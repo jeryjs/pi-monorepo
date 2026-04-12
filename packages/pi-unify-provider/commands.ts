@@ -30,6 +30,33 @@ function dedupeModels(models: UnifyModelConfig[]): UnifyModelConfig[] {
 	return [...byId.values()];
 }
 
+function generateUniqueProviderName(baseName: string, store: ConfigStore): string {
+	if (!store.getProvider(baseName)) return baseName;
+	let name = `${baseName} (copy)`;
+	let n = 2;
+	while (store.getProvider(name)) {
+		name = `${baseName} (copy ${n})`;
+		n++;
+	}
+	return name;
+}
+
+async function resolveProviderNameConflict(
+	ctx: ExtensionCommandContext,
+	store: ConfigStore,
+	requestedName: string,
+): Promise<string | undefined> {
+	if (!store.getProvider(requestedName)) return requestedName;
+	const choice = await ctx.ui.select("Provider already exists", [
+		"Overwrite existing",
+		"Rename as copy",
+		"Cancel",
+	]);
+	if (!choice || choice === "Cancel") return undefined;
+	if (choice === "Overwrite existing") return requestedName;
+	return generateUniqueProviderName(requestedName, store);
+}
+
 function authMethodOptions(): AuthMethod[] {
 	return [...WELL_KNOWN_PROVIDERS[0]!.supportedAuth];
 }
@@ -209,6 +236,8 @@ async function runAddProviderFlow(
 
 	const name = await ctx.ui.input("Provider name", preset.name);
 	if (!name) return undefined;
+	const resolvedName = await resolveProviderNameConflict(ctx, store, name.trim());
+	if (!resolvedName) return undefined;
 	const baseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
 	if (!baseUrl) return undefined;
 	const api = await promptApi(ctx, preset.api);
@@ -218,7 +247,7 @@ async function runAddProviderFlow(
 
 	const provider: ProviderConfigRecord = {
 		type: preset.id,
-		name: name.trim(),
+		name: resolvedName,
 		baseUrl: baseUrl.trim(),
 		api,
 		auth,
@@ -285,6 +314,23 @@ async function runModelsEditFlow(
 	provider.updatedAt = Date.now();
 	store.upsertProvider(provider);
 	return true;
+}
+
+async function pickProviderName(
+	ctx: ExtensionCommandContext,
+	store: ConfigStore,
+	inputName?: string,
+): Promise<string | undefined> {
+	if (inputName && store.getProvider(inputName)) return inputName;
+	const providers = store.getProviders();
+	if (providers.length === 0) return undefined;
+	if (inputName && !store.getProvider(inputName)) {
+		ctx.ui.notify(`Provider not found: ${inputName}`, "warning");
+	}
+	return ctx.ui.select(
+		"Select provider",
+		providers.map((provider) => provider.name),
+	);
 }
 
 async function runDashboard(
@@ -373,6 +419,27 @@ export function registerCommands(input: RegisterCommandsInput): void {
 			if (!provider) return;
 			await refreshProviders();
 			ctx.ui.notify(`Added provider: ${provider.name}`, "info");
+		},
+	});
+
+	pi.registerCommand("unify-providers", {
+		description: "Open unified provider dashboard",
+		handler: async (_args, ctx) => {
+			await runDashboard(ctx, store, refreshProviders);
+		},
+	});
+
+	pi.registerCommand("unify-models", {
+		description: "Edit provider models",
+		handler: async (args, ctx) => {
+			if (!ctx.hasUI) return;
+			const requestedName = args.trim() || undefined;
+			const providerName = await pickProviderName(ctx, store, requestedName);
+			if (!providerName) return;
+			const changed = await runModelsEditFlow(ctx, store, providerName);
+			if (!changed) return;
+			await refreshProviders();
+			ctx.ui.notify(`Updated models for: ${providerName}`, "info");
 		},
 	});
 
