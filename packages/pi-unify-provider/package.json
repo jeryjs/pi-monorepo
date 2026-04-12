@@ -4,11 +4,17 @@
   "description": "Multi-provider LLM management for Pi with automatic model discovery",
   "keywords": ["pi-extension", "pi-package", "llm", "openai", "anthropic", "unify"],
   "license": "MIT",
-  "author": "User",
-  "dependencies": {},
+  "author": "github.com/jeryjs",
   "pi": {
     "extensions": ["./src/extension.ts"],
     "skills": ["./skills"],
     "prompts": ["./prompts"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.66.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "5.7.2"
   }
 }

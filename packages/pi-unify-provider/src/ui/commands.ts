@@ -104,7 +104,7 @@ export async function showAddProviderFlow(
   };
 
   // Step 3: Authentication setup
-  ctx.ui.notify(`Configuring ${providerDef.displayName}...", "info");
+  ctx.ui.notify(`Configuring ${providerDef.displayName}...`, "info");
 
   if (providerDef.authType === "api_key" || providerDef.authType === "both") {
     const useApiKey = await ctx.ui.confirm({
@@ -235,6 +235,25 @@ async function showProviderDetails(
       // Trigger fetch (would need fetcher instance)
       break;
     case "models":
+      await showModelsList(configStore, providerName, ctx);
+      break;
+    case "toggle_fetch":
+      provider.autoFetchOfficialModels = !provider.autoFetchOfficialModels;
+      configStore.setProvider(provider);
+      ctx.ui.notify(`Auto-fetch ${provider.autoFetchOfficialModels ? "enabled" : "disabled"}`, "info");
+      break;
+    case "delete":
+      const confirm = await ctx.ui.confirm({
+        message: `Delete provider "${providerName}"?`,
+        details: "This cannot be undone",
+      });
+      if (confirm) {
+        configStore.deleteProvider(providerName);
+        ctx.ui.notify(`Provider "${providerName}" deleted`, "info");
+      }
+      break;
+  }
+}
 
 // ============================================================================
 // Show Models List

@@ -71,8 +71,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Keyboard shortcut: Ctrl+Shift+U for dashboard
-  pi.registerShortcut({
-    key: "ctrl+shift+u",
+  pi.registerShortcut("ctrl+shift+u", {
     description: "Open Unify Provider dashboard",
     handler: async (ctx) => {
       await showProviderDashboard(configStore, ctx);
@@ -104,7 +103,7 @@ async function registerAllProviders(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   }
 
   if (registered > 0) {
-    ctx.ui.notify(`${registered} provider(s) registered from Unify.`, "success");
+    ctx.ui.notify(`${registered} provider(s) registered from Unify.`, "info");
   }
 }
 

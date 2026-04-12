@@ -244,3 +244,124 @@ export class AuthManager {
       try {
         const refreshed = await this.refreshOAuthToken(creds.refreshToken, config);
         this.storeCredentials(providerName, {
+          type: "oauth",
+          accessToken: refreshed.access_token,
+          refreshToken: refreshed.refresh_token || creds.refreshToken,
+          expiresAt: refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : undefined,
+          createdAt: Date.now(),
+        });
+        return { Authorization: `Bearer ${refreshed.access_token}` };
+      } catch (error) {
+        if (ctx) {
+          ctx.ui.notify(`OAuth token refresh failed for ${providerName}. Re-authenticate with /unify-add`, "warning");
+        }
+        throw error;
+      }
+    }
+
+    return { Authorization: `Bearer ${creds.accessToken}` };
+  }
+
+  private async getDeviceCodeHeaders(
+    providerName: string,
+    config: any,
+    ctx?: { ui: { notify: (msg: string, level: "info" | "warning" | "error") => void } }
+  ): Promise<Record<string, string>> {
+    throw new Error("Device code auth not yet implemented");
+  }
+
+  private async getBrowserSessionHeaders(
+    providerName: string,
+    config: any,
+    ctx?: { ui: { notify: (msg: string, level: "info" | "warning" | "error") => void } }
+  ): Promise<Record<string, string>> {
+    throw new Error("Browser session auth not yet implemented");
+  }
+
+  private async getCustomHeaders(config: any): Promise<Record<string, string>> {
+    return config.headers || {};
+  }
+
+  private async initiateOAuth2(providerName: string, config: OAuth2AuthConfig): Promise<{ type: "url"; url: string; state: string }> {
+    const state = Math.random().toString(36).substring(7);
+    oauthStates.set(state, { providerName, state, expiresAt: Date.now() + 600000 });
+    const url = `${config.authUrl}?client_id=${config.clientId}&redirect_uri=${config.redirectUri}&response_type=code&state=${state}&scope=${config.scope || ""}`;
+    return { type: "url", url, state };
+  }
+
+  private async initiateOAuth2Pkce(providerName: string, config: OAuth2PkceAuthConfig): Promise<{ type: "url"; url: string; state: string }> {
+    const state = Math.random().toString(36).substring(7);
+    const codeVerifier = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    oauthStates.set(state, { providerName, state, codeVerifier, expiresAt: Date.now() + 600000 });
+    const url = `${config.authUrl}?client_id=${config.clientId}&redirect_uri=${config.redirectUri}&response_type=code&state=${state}&code_challenge=${codeVerifier}&code_challenge_method=plain&scope=${config.scope || ""}`;
+    return { type: "url", url, state };
+  }
+
+  private async initiateDeviceCode(providerName: string, config: any): Promise<{ type: "device_code"; userCode: string; verificationUrl: string }> {
+    throw new Error("Device code auth not yet implemented");
+  }
+
+  private async exchangeCodeForToken(code: string, codeVerifier: string | undefined, config: OAuth2AuthConfig | OAuth2PkceAuthConfig): Promise<any> {
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: config.redirectUri,
+      client_id: config.clientId,
+    });
+    if (codeVerifier) body.append("code_verifier", codeVerifier);
+    if ("clientSecret" in config && config.clientSecret) body.append("client_secret", config.clientSecret);
+
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    if (!response.ok) throw new Error(`Token exchange failed: ${response.statusText}`);
+    return response.json();
+  }
+
+  private async refreshOAuthToken(refreshToken: string, config: OAuth2AuthConfig | OAuth2PkceAuthConfig): Promise<any> {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: config.clientId,
+    });
+    if ("clientSecret" in config && config.clientSecret) body.append("client_secret", config.clientSecret);
+
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    if (!response.ok) throw new Error(`Token refresh failed: ${response.statusText}`);
+    return response.json();
+  }
+
+  private storeCredentials(providerName: string, creds: StoredCredentials[string]): void {
+    this.credentials[providerName] = creds;
+    this.save();
+  }
+
+  private load(): void {
+    if (existsSync(PI_AUTH_PATH)) {
+      try {
+        const data = readFileSync(PI_AUTH_PATH, "utf-8");
+        this.credentials = JSON.parse(data);
+      } catch (error) {
+        console.error("Failed to load auth credentials:", error);
+      }
+    }
+  }
+
+  private save(): void {
+    try {
+      const dir = join(homedir(), ".pi", "agent");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(PI_AUTH_PATH, JSON.stringify(this.credentials, null, 2));
+    } catch (error) {
+      console.error("Failed to save auth credentials:", error);
+    }
+  }
+}
