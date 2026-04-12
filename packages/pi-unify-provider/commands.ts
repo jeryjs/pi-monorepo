@@ -126,16 +126,20 @@ async function promptAuthConfig(
 	ctx: ExtensionCommandContext,
 	secrets: SecretStore,
 	current: AuthConfig,
+	skipMethodSelect = false,
 ): Promise<AuthConfig | undefined> {
-	const methodOptions = authMethodOptions();
-	const selected = await ctx.ui.select(
-		"Authentication method",
-		methodOptions.map((method) =>
-			method === current.method ? `${method} (current)` : method,
-		),
-	);
-	if (!selected) return undefined;
-	const method = selected.replace(" (current)", "") as AuthMethod;
+	let method: AuthMethod = current.method;
+	if (!skipMethodSelect) {
+		const methodOptions = authMethodOptions();
+		const selected = await ctx.ui.select(
+			"Authentication method",
+			methodOptions.map((candidate) =>
+				candidate === current.method ? `${candidate} (current)` : candidate,
+			),
+		);
+		if (!selected) return undefined;
+		method = selected.replace(" (current)", "") as AuthMethod;
+	}
 
 	switch (method) {
 		case "none":
@@ -350,7 +354,22 @@ async function runAddProviderFlow(
 		}
 	}
 
-	const auth = await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
+	const auth = preset.id === "custom"
+		? await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig)
+		: await (async () => {
+			const useRecommended = await ctx.ui.confirm(
+				"Authentication setup",
+				`Use recommended auth method (${preset.defaultAuth}) for ${preset.name}?`,
+			);
+			return useRecommended
+				? promptAuthConfig(
+					ctx,
+					secrets,
+					{ method: preset.defaultAuth } as AuthConfig,
+					true,
+				)
+				: promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
+		})();
 	if (!auth) return undefined;
 
 	const provider: ProviderConfigRecord = {

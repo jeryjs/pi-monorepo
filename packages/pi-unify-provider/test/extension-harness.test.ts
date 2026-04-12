@@ -70,6 +70,7 @@ test("extension works in pi-test-harness command flow", async () => {
 			extensionFactories: [registerExtension],
 			mockUI: {
 				editor: "alpha\nbeta",
+				input: "sk-known-provider",
 			},
 		});
 
@@ -103,7 +104,7 @@ test("extension works in pi-test-harness command flow", async () => {
 		assert.equal(together?.baseUrl, "https://api.together.xyz/v1");
 		assert.equal(together?.api, "openai-completions");
 
-		assert.equal(t.events.uiCallsFor("input").length, 0);
+		assert.ok(t.events.uiCallsFor("input").length > 0);
 	} finally {
 		t?.dispose();
 		globalThis.fetch = originalFetch;
