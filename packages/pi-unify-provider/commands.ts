@@ -452,6 +452,7 @@ async function runEditProviderFlow(
 			`Name: ${provider.name}`,
 			`Base URL: ${provider.baseUrl}`,
 			`API: ${provider.api}`,
+			"Delete provider",
 			"Done",
 		]);
 
@@ -485,6 +486,17 @@ async function runEditProviderFlow(
 			provider.api = nextApi;
 			changed = true;
 			continue;
+		}
+
+		if (choice === "Delete provider") {
+			const ok = await ctx.ui.confirm(
+				"Delete provider",
+				`Delete provider '${provider.name}'? This cannot be undone.`,
+			);
+			if (!ok) continue;
+			store.removeProvider(provider.name);
+			verboseLog("commands", "provider deleted from settings", { name: provider.name });
+			return true;
 		}
 
 	}
