@@ -16,6 +16,8 @@ import {
 } from "./types.ts";
 import { getProviderPreset } from "./well-known.ts";
 
+const DYNAMIC_API_KEY_PLACEHOLDER = "UNIFY_DYNAMIC_AUTH";
+
 interface ProviderAuthBinding {
 	name: string;
 	origin: string;
@@ -100,6 +102,7 @@ function toRuntimeProviderConfig(
 ): ProviderConfig {
 	return {
 		baseUrl: withQuery(provider.baseUrl, auth.query),
+		apiKey: DYNAMIC_API_KEY_PLACEHOLDER,
 		api: provider.api,
 		authHeader: false,
 		headers: auth.headers,
