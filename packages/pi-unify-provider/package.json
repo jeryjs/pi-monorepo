@@ -34,7 +34,7 @@
   ],
   "pi": {
     "extensions": [
-      "./src/extension.ts"
+      "./index.ts"
     ],
     "skills": [],
     "prompts": []
