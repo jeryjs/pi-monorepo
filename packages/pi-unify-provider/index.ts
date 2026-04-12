@@ -1,12 +1,65 @@
 import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
+import {
+	applyResolvedAuthToPayload,
+	resolveProviderAuth,
+} from "./auth.js";
 import { ConfigStore } from "./config-store.js";
+import { OfficialModelsFetcher } from "./fetcher.js";
 import { SecretStore } from "./secret-store.js";
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_MAX_TOKENS,
 	type ProviderConfigRecord,
+	type ResolvedAuth,
 	type UnifyModelConfig,
 } from "./types.js";
+import { getProviderPreset } from "./well-known.js";
+
+interface ProviderAuthBinding {
+	name: string;
+	origin: string;
+	pathPrefix: string;
+	auth: ResolvedAuth;
+}
+
+function withQuery(baseUrl: string, query?: Record<string, string>): string {
+	if (!query || Object.keys(query).length === 0) return baseUrl;
+	const url = new URL(baseUrl);
+	for (const [key, value] of Object.entries(query)) {
+		url.searchParams.set(key, value);
+	}
+	return url.toString();
+}
+
+function createAuthBinding(
+	provider: ProviderConfigRecord,
+	auth: ResolvedAuth,
+): ProviderAuthBinding {
+	const parsed = new URL(provider.baseUrl);
+	return {
+		name: provider.name,
+		origin: parsed.origin,
+		pathPrefix: parsed.pathname || "/",
+		auth,
+	};
+}
+
+function findBindingForPayload(
+	payload: unknown,
+	bindings: ProviderAuthBinding[],
+): ProviderAuthBinding | undefined {
+	if (!payload || typeof payload !== "object") return undefined;
+	const urlString =
+		typeof (payload as { url?: unknown }).url === "string"
+			? ((payload as { url: string }).url)
+			: undefined;
+	if (!urlString) return undefined;
+	const parsed = new URL(urlString);
+	return bindings.find((binding) => {
+		if (binding.origin !== parsed.origin) return false;
+		return parsed.pathname.startsWith(binding.pathPrefix);
+	});
+}
 
 function toProviderModelConfig(
 	provider: ProviderConfigRecord,
@@ -29,12 +82,15 @@ function toProviderModelConfig(
 	};
 }
 
-function toRuntimeProviderConfig(provider: ProviderConfigRecord): ProviderConfig {
+function toRuntimeProviderConfig(
+	provider: ProviderConfigRecord,
+	auth: ResolvedAuth,
+): ProviderConfig {
 	return {
-		baseUrl: provider.baseUrl,
+		baseUrl: withQuery(provider.baseUrl, auth.query),
 		api: provider.api,
 		authHeader: false,
-		headers: provider.extraHeaders,
+		headers: auth.headers,
 		models: provider.models.map((m) => toProviderModelConfig(provider, m)),
 	};
 }
@@ -42,17 +98,42 @@ function toRuntimeProviderConfig(provider: ProviderConfigRecord): ProviderConfig
 async function registerConfiguredProviders(
 	pi: ExtensionAPI,
 	store: ConfigStore,
+ 	secrets: SecretStore,
+ 	fetcher: OfficialModelsFetcher,
+ 	bindings: ProviderAuthBinding[],
 ): Promise<void> {
-	const providers = store.getProviders();
+	bindings.length = 0;
+	const providers = [...store.getProviders()];
 	for (const provider of providers) {
-		pi.registerProvider(provider.name, toRuntimeProviderConfig(provider));
+		const preset = getProviderPreset(provider.type);
+		const auth = await resolveProviderAuth(provider, secrets);
+
+		if (provider.autoFetchOfficialModels && preset) {
+			try {
+				const nextModels = await fetcher.fetchProviderModels({
+					provider,
+					preset,
+					resolvedAuth: auth,
+				});
+				if (nextModels.length > 0) {
+					provider.models = nextModels;
+					store.upsertProvider({ ...provider, updatedAt: Date.now() });
+				}
+			} catch (error) {
+				console.error(`[unify] failed to fetch official models for ${provider.name}:`, error);
+			}
+		}
+
+		pi.registerProvider(provider.name, toRuntimeProviderConfig(provider, auth));
+		bindings.push(createAuthBinding(provider, auth));
 	}
 }
 
 export default function registerExtension(pi: ExtensionAPI): void {
 	const store = new ConfigStore();
 	const secrets = new SecretStore();
-	void secrets;
+	const fetcher = new OfficialModelsFetcher();
+	const bindings: ProviderAuthBinding[] = [];
 
 	pi.registerCommand("unify", {
 		description: "Open unify provider manager (rewrite in progress)",
@@ -62,7 +143,23 @@ export default function registerExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("unify-refresh", {
+		description: "Refresh official models for configured providers",
+		handler: async (_args, ctx) => {
+			await registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
+			if (ctx.hasUI) {
+				ctx.ui.notify("Unify provider models refreshed.", "info");
+			}
+		},
+	});
+
+	pi.on("before_provider_request", async (event) => {
+		const binding = findBindingForPayload(event.payload, bindings);
+		if (!binding) return;
+		return applyResolvedAuthToPayload(event.payload, binding.auth);
+	});
+
 	pi.on("session_start", async (_event, _ctx) => {
-		await registerConfiguredProviders(pi, store);
+		await registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
 	});
 }
