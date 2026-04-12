@@ -1,0 +1,22 @@
+[
+  {
+    "packageId": "pi-coding-agent",
+    "root": "C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@mariozechner/pi-coding-agent",
+    "fileCount": 671,
+    "distFileCount": 525,
+    "docs": 23,
+    "examples": 116,
+    "dtsFileCount": 129,
+    "totalExportStatements": 1089
+  },
+  {
+    "packageId": "pi-ai",
+    "root": "C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@mariozechner/pi-ai",
+    "fileCount": 174,
+    "distFileCount": 172,
+    "docs": 0,
+    "examples": 0,
+    "dtsFileCount": 43,
+    "totalExportStatements": 304
+  }
+]
