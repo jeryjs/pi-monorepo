@@ -1,6 +1,7 @@
 import type { Api } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { ConfigStore } from "./config-store.ts";
+import { verboseLog } from "./debug.ts";
 import { SecretStore } from "./secret-store.ts";
 import {
 	type AuthConfig,
@@ -373,6 +374,12 @@ async function runAddProviderFlow(
 	};
 
 	store.upsertProvider(provider);
+	verboseLog("commands", "provider added", {
+		name: provider.name,
+		type: provider.type,
+		baseUrl: provider.baseUrl,
+		modelCount: provider.models.length,
+	});
 	return provider;
 }
 
@@ -435,6 +442,12 @@ async function runEditProviderFlow(
 	if (!changed) return false;
 	provider.updatedAt = Date.now();
 	store.upsertProvider(provider);
+	verboseLog("commands", "provider edited", {
+		name: provider.name,
+		baseUrl: provider.baseUrl,
+		api: provider.api,
+		autoFetchOfficialModels: provider.autoFetchOfficialModels,
+	});
 	return true;
 }
 
@@ -451,6 +464,10 @@ async function runAuthEditFlow(
 	provider.auth = auth;
 	provider.updatedAt = Date.now();
 	store.upsertProvider(provider);
+	verboseLog("commands", "provider auth updated", {
+		name: provider.name,
+		authMethod: provider.auth.method,
+	});
 	return true;
 }
 
@@ -578,6 +595,10 @@ async function runModelsEditFlow(
 			provider.models = dedupeModels(action.models);
 			provider.updatedAt = Date.now();
 			store.upsertProvider(provider);
+			verboseLog("commands", "models saved", {
+				provider: provider.name,
+				modelCount: provider.models.length,
+			});
 			return true;
 		}
 
@@ -622,6 +643,10 @@ async function runOfficialModelsFlow(
 	if (!provider) return false;
 
 	const officialModels = await fetchOfficialModels(providerName);
+	verboseLog("commands", "official models listed", {
+		provider: providerName,
+		officialCount: officialModels.length,
+	});
 	if (officialModels.length === 0) {
 		ctx.ui.notify(`No official models found for ${providerName}.`, "warning");
 		return false;
@@ -650,6 +675,10 @@ async function runOfficialModelsFlow(
 
 	provider.updatedAt = Date.now();
 	store.upsertProvider(provider);
+	verboseLog("commands", "official models merged", {
+		provider: provider.name,
+		modelCount: provider.models.length,
+	});
 	return true;
 }
 
@@ -812,6 +841,7 @@ async function runImport(
 	if (!overwrite) return;
 	store.replaceProviders(providers);
 	await refreshProviders();
+	verboseLog("commands", "providers imported", { count: providers.length });
 	ctx.ui.notify(`Imported ${providers.length} provider(s).`, "info");
 }
 
@@ -822,6 +852,7 @@ async function runExport(
 	if (!ctx.hasUI) return;
 	const payload = JSON.stringify({ providers: store.getProviders() }, null, "\t");
 	ctx.ui.setEditorText(payload);
+	verboseLog("commands", "providers exported", { count: store.getProviders().length });
 	ctx.ui.notify("Export JSON was placed into the editor input.", "info");
 }
 

@@ -5,6 +5,7 @@ import {
 } from "./auth.ts";
 import { registerCommands } from "./commands.ts";
 import { ConfigStore } from "./config-store.ts";
+import { verboseLog } from "./debug.ts";
 import { OfficialModelsFetcher } from "./fetcher.ts";
 import { SecretStore } from "./secret-store.ts";
 import {
@@ -119,6 +120,7 @@ async function registerConfiguredProviders(
 ): Promise<void> {
 	bindings.length = 0;
 	const providers = [...store.getProviders()];
+	verboseLog("runtime", "registerConfiguredProviders start", { providerCount: providers.length });
 	for (const provider of providers) {
 		const preset = getProviderPreset(provider.type);
 		const auth = await resolveProviderAuth(provider, secrets);
@@ -141,7 +143,14 @@ async function registerConfiguredProviders(
 
 		pi.registerProvider(provider.name, toRuntimeProviderConfig(provider, auth));
 		bindings.push(createAuthBinding(provider, auth));
+		verboseLog("runtime", "provider registered", {
+			name: provider.name,
+			type: provider.type,
+			modelCount: provider.models.length,
+			baseUrl: provider.baseUrl,
+		});
 	}
+	verboseLog("runtime", "registerConfiguredProviders done", { registeredCount: providers.length });
 }
 
 export default function registerExtension(pi: ExtensionAPI): void {
@@ -152,16 +161,22 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	const refreshProviders = async () =>
 		registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
 	const fetchOfficialModels = async (providerName: string): Promise<UnifyModelConfig[]> => {
+		verboseLog("runtime", "fetchOfficialModels request", { providerName });
 		const provider = store.getProvider(providerName);
 		if (!provider) return [];
 		const preset = getProviderPreset(provider.type);
 		if (!preset) return [];
 		const auth = await resolveProviderAuth(provider, secrets);
-		return fetcher.fetchProviderModels({
+		const models = await fetcher.fetchProviderModels({
 			provider: { ...provider, models: [] },
 			preset,
 			resolvedAuth: auth,
 		});
+		verboseLog("runtime", "fetchOfficialModels done", {
+			providerName,
+			modelCount: models.length,
+		});
+		return models;
 	};
 
 	registerCommands({
@@ -175,6 +190,12 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", async (event) => {
 		const binding = findBindingForPayload(event.payload, bindings);
 		if (!binding) return;
+		verboseLog("runtime", "before_provider_request", {
+			provider: binding.name,
+			payloadKeys: event.payload && typeof event.payload === "object"
+				? Object.keys(event.payload as Record<string, unknown>)
+				: [],
+		});
 		return applyResolvedAuthToPayload(event.payload, binding.auth);
 	});
 

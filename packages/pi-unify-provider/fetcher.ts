@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { verboseLog } from "./debug.ts";
 import { withModelMetadata } from "./model-database.ts";
 import type {
 	ProviderConfigRecord,
@@ -125,13 +126,30 @@ async function fetchJsonWithRetry(
 	let lastError: unknown;
 	for (let attempt = 0; attempt < options.retries; attempt++) {
 		try {
+			verboseLog("fetcher", "request", {
+				url,
+				method: init.method ?? "GET",
+				attempt: attempt + 1,
+				retries: options.retries,
+				headers: init.headers,
+			});
 			const response = await fetch(url, { ...init, signal: withTimeoutSignal(options.timeoutMs) });
+			verboseLog("fetcher", "response", {
+				url,
+				status: response.status,
+				ok: response.ok,
+			});
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status} from ${url}`);
 			}
 			return await response.json();
 		} catch (error) {
 			lastError = error;
+			verboseLog("fetcher", "request failed", {
+				url,
+				attempt: attempt + 1,
+				error: error instanceof Error ? error.message : String(error),
+			});
 			if (attempt === options.retries - 1) break;
 			await sleep(options.baseDelayMs * 2 ** attempt);
 		}
@@ -170,6 +188,13 @@ export class OfficialModelsFetcher {
 
 	async fetchProviderModels(input: FetchProviderInput): Promise<UnifyModelConfig[]> {
 		const { provider, preset, resolvedAuth } = input;
+		verboseLog("fetcher", "fetchProviderModels start", {
+			provider: provider.name,
+			type: provider.type,
+			baseUrl: provider.baseUrl,
+			endpoint: preset?.officialModelsEndpoint,
+			autoFetchOfficialModels: provider.autoFetchOfficialModels,
+		});
 		const endpoint = preset?.officialModelsEndpoint;
 		const hardcoded = preset?.hardcodedModels ?? fallbackModelsForProvider(provider.type);
 
@@ -184,7 +209,15 @@ export class OfficialModelsFetcher {
 			this.options,
 		);
 		const fetched = parseOpenAIModelList(payload);
-		return mergeModels(provider.models, fetched, hardcoded);
+		const merged = mergeModels(provider.models, fetched, hardcoded);
+		verboseLog("fetcher", "fetchProviderModels done", {
+			provider: provider.name,
+			fetchedCount: fetched.length,
+			hardcodedCount: hardcoded.length,
+			manualCount: provider.models.length,
+			finalCount: merged.length,
+		});
+		return merged;
 	}
 }
 

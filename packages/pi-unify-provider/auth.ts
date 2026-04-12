@@ -7,6 +7,7 @@ import type {
 	ProviderConfigRecord,
 	ResolvedAuth,
 } from "./types.ts";
+import { verboseLog } from "./debug.ts";
 import { isSecretRef, type SecretStore } from "./secret-store.ts";
 
 const EXPIRY_BUFFER_MS = 60_000;
@@ -80,10 +81,20 @@ async function refreshOAuthToken(
 	if ("clientSecret" in auth && auth.clientSecret) {
 		body.set("client_secret", auth.clientSecret);
 	}
+	verboseLog("auth", "oauth refresh request", {
+		tokenUrl: tokenEndpoint(auth),
+		method: auth.method,
+		hasRefreshToken: !!token.refreshToken,
+	});
 	const response = await fetch(tokenEndpoint(auth), {
 		method: "POST",
 		headers: { "content-type": "application/x-www-form-urlencoded" },
 		body: body.toString(),
+	});
+	verboseLog("auth", "oauth refresh response", {
+		status: response.status,
+		ok: response.ok,
+		tokenUrl: tokenEndpoint(auth),
 	});
 	if (!response.ok) {
 		throw new Error(`OAuth refresh failed (${response.status})`);
@@ -133,6 +144,7 @@ export async function resolveAuth(
 	auth: AuthConfig,
 	secretStore: SecretStore,
 ): Promise<ResolvedAuth> {
+	verboseLog("auth", "resolveAuth", { method: auth.method });
 	switch (auth.method) {
 		case "none":
 			return {};
@@ -196,11 +208,18 @@ export async function resolveProviderAuth(
 	secretStore: SecretStore,
 ): Promise<ResolvedAuth> {
 	const auth = await resolveAuth(provider.auth, secretStore);
-	return {
+	const resolved = {
 		headers: mergeHeaders(provider.extraHeaders, auth.headers),
 		query: mergeQuery(provider.extraQuery, auth.query),
 		body: mergeBody(provider.extraBody, auth.body),
 	};
+	verboseLog("auth", "resolveProviderAuth", {
+		provider: provider.name,
+		headers: Object.keys(resolved.headers ?? {}),
+		query: Object.keys(resolved.query ?? {}),
+		body: Object.keys(resolved.body ?? {}),
+	});
+	return resolved;
 }
 
 export function applyResolvedAuthToPayload(payload: unknown, resolved: ResolvedAuth): unknown {
@@ -220,6 +239,13 @@ export function applyResolvedAuthToPayload(payload: unknown, resolved: ResolvedA
 		}
 		next.url = url.toString();
 	}
+
+	verboseLog("auth", "applyResolvedAuthToPayload", {
+		hasHeaders: !!resolved.headers,
+		hasQuery: !!resolved.query,
+		hasBody: !!resolved.body,
+		hasPayloadUrl: typeof (payload as { url?: unknown }).url === "string",
+	});
 
 	return next;
 }
