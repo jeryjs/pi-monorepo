@@ -1,190 +1,160 @@
-/**
- * Well-known provider definitions and API configurations
- * Contains the 5 target providers: Poe, Together, Fireworks, Perplexity, AI21
- */
+import type { Api } from "@mariozechner/pi-ai";
+import type { AuthMethod, ProviderType, ModelConfig } from "../types.js";
 
-import type { ProviderType } from "../config.js";
-
-export interface WellKnownProvider {
+export interface WellKnownProviderConfig {
+  id: ProviderType;
   name: string;
-  type: ProviderType;
-  displayName: string;
+  category: "Hosted APIs" | "Custom";
   description: string;
-  apiType: "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
-  defaultBaseUrl: string;
-  defaultContextWindow: number;
-  defaultMaxTokens: number;
-  supportsOfficialModelFetch: boolean;
-  // API endpoint for fetching models (if supported)
-  modelsEndpoint?: string;
-  // OAuth configuration
-  oauth?: {
-    name: string;
-    authUrl: string;
-    tokenUrl: string;
-    scopes: string[];
-  };
-  // Default headers required
+  baseUrl: string;
+  api: Api;
+  authMethods: AuthMethod[];
+  defaultAuthMethod: AuthMethod;
+  officialModelsEndpoint?: string;
   defaultHeaders?: Record<string, string>;
-  // Auth type
-  authType: "api_key" | "oauth" | "both";
-  // Provider-specific quirks
-  quirks?: {
-    // Transform model names (e.g., remove prefixes)
-    modelIdTransform?: (id: string) => string;
-    // Custom parameter injection
-    extraBodyParams?: Record<string, unknown>;
-  };
+  hardcodedModels?: ModelConfig[];
 }
 
-export const WELL_KNOWN_PROVIDERS: Record<ProviderType, WellKnownProvider> = {
-  // ==========================================================================
-  // Poe - creator.poe.com/docs
-  // Supports API Key (preferred) or OAuth
-  // ==========================================================================
-  poe: {
-    name: "poe",
-    type: "poe",
-    displayName: "Poe",
-    description: "Universal AI hub with access to 100+ models",
-    apiType: "openai-completions",
-    defaultBaseUrl: "https://api.poe.com/machine",
-    defaultContextWindow: 128000,
-    defaultMaxTokens: 4096,
-    supportsOfficialModelFetch: true,
-    modelsEndpoint: "https://api.poe.com/machine/models",
-    authType: "both", // Supports both API key and OAuth
-    defaultHeaders: {
-      "Accept": "application/json",
-    },
-    oauth: {
-      name: "Poe (Sign in with Poe)",
-      authUrl: "https://creator.poe.com/oauth/authorize",
-      tokenUrl: "https://creator.poe.com/oauth/token",
-      scopes: ["read", "write"],
-    },
-    quirks: {
-      modelIdTransform: (id) => id.replace(/^poe-/, ""), // Strip poe- prefix if present
-    },
+export const WELL_KNOWN_PROVIDERS: WellKnownProviderConfig[] = [
+  {
+    id: "together",
+    name: "Together AI",
+    category: "Hosted APIs",
+    description: "OpenAI-compatible API for open models",
+    baseUrl: "https://api.together.xyz/v1",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
   },
-
-  // ==========================================================================
-  // Together AI - together.xyz
-  // ==========================================================================
-  together: {
-    name: "together",
-    type: "together",
-    displayName: "Together AI",
-    description: "Inference platform for open-source models",
-    apiType: "openai-completions",
-    defaultBaseUrl: "https://api.together.xyz/v1",
-    defaultContextWindow: 128000,
-    defaultMaxTokens: 8192,
-    supportsOfficialModelFetch: true,
-    modelsEndpoint: "https://api.together.xyz/v1/models",
-    authType: "api_key",
-    defaultHeaders: {
-      "Accept": "application/json",
-    },
-    quirks: {
-      // Together exposes models as "organization/model-name"
-      modelIdTransform: (id) => id,
-    },
+  {
+    id: "fireworks",
+    name: "Fireworks AI",
+    category: "Hosted APIs",
+    description: "OpenAI-compatible inference API",
+    baseUrl: "https://api.fireworks.ai/inference/v1",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
   },
-
-  // ==========================================================================
-  // Fireworks AI - fireworks.ai
-  // ==========================================================================
-  fireworks: {
-    name: "fireworks",
-    type: "fireworks",
-    displayName: "Fireworks AI",
-    description: "Fast, affordable generative AI inference",
-    apiType: "openai-completions",
-    defaultBaseUrl: "https://api.fireworks.ai/inference/v1",
-    defaultContextWindow: 131072,
-    defaultMaxTokens: 8192,
-    supportsOfficialModelFetch: true,
-    modelsEndpoint: "https://api.fireworks.ai/inference/v1/models",
-    authType: "api_key",
-    defaultHeaders: {
-      "Accept": "application/json",
-    },
-    quirks: {
-      // Fireworks uses "accounts/fireworks/models/" prefix
-      modelIdTransform: (id) => id.replace(/^accounts\/fireworks\/models\//, ""),
-    },
+  {
+    id: "perplexity",
+    name: "Perplexity",
+    category: "Hosted APIs",
+    description: "Perplexity Sonar and reasoning models",
+    baseUrl: "https://api.perplexity.ai",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
+    hardcodedModels: [
+      { id: "sonar", name: "Sonar", source: "builtin" },
+      { id: "sonar-pro", name: "Sonar Pro", source: "builtin" },
+      { id: "sonar-reasoning", name: "Sonar Reasoning", capabilities: { reasoning: true }, source: "builtin" },
+      { id: "sonar-reasoning-pro", name: "Sonar Reasoning Pro", capabilities: { reasoning: true }, source: "builtin" },
+    ],
   },
-
-  // ==========================================================================
-  // Perplexity - perplexity.ai
-  // ==========================================================================
-  perplexity: {
-    name: "perplexity",
-    type: "perplexity",
-    displayName: "Perplexity",
-    description: "pplx-api with Sonar models",
-    apiType: "openai-completions",
-    defaultBaseUrl: "https://api.perplexity.ai",
-    defaultContextWindow: 128000,
-    defaultMaxTokens: 8192,
-    supportsOfficialModelFetch: false, // Perplexity doesn't have a models endpoint, uses hardcoded list
-    authType: "api_key",
-    defaultHeaders: {
-      "Accept": "application/json",
-    },
-    quirks: {
-      // Perplexity doesn't support streaming tokens usage
-      extraBodyParams: {
-        "return_citations": false, // We handle citations differently
-      },
-    },
+  {
+    id: "ai21",
+    name: "AI21",
+    category: "Hosted APIs",
+    description: "AI21 Jamba family models",
+    baseUrl: "https://api.ai21.com/studio/v1",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
+    hardcodedModels: [
+      { id: "jamba-mini", name: "Jamba Mini", source: "builtin" },
+      { id: "jamba-large", name: "Jamba Large", source: "builtin", capabilities: { reasoning: true } },
+      { id: "jamba-1.6-large", name: "Jamba 1.6 Large", source: "builtin", capabilities: { reasoning: true } },
+    ],
   },
-
-  // ==========================================================================
-  // AI21 Labs - studio.ai21.com
-  // ==========================================================================
-  ai21: {
-    name: "ai21",
-    type: "ai21",
-    displayName: "AI21 Labs",
-    description: "Jurassic and Jamba models",
-    apiType: "openai-completions",
-    defaultBaseUrl: "https://api.ai21.com/studio/v1",
-    defaultContextWindow: 256000,
-    defaultMaxTokens: 4096,
-    supportsOfficialModelFetch: true,
-    modelsEndpoint: "https://api.ai21.com/studio/v1/models",
-    authType: "api_key",
-    defaultHeaders: {
-      "Accept": "application/json",
-    },
-    quirks: {
-      // AI21 model IDs often use organization/model format
-      modelIdTransform: (id) => id,
-    },
+  {
+    id: "poe",
+    name: "Poe",
+    category: "Hosted APIs",
+    description: "OpenAI-compatible Poe API endpoint",
+    baseUrl: "https://api.poe.com/v1",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "browser-session",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
   },
-};
+  {
+    id: "custom",
+    name: "Custom Provider",
+    category: "Custom",
+    description: "Bring your own OpenAI/Anthropic-compatible gateway",
+    baseUrl: "https://api.example.com/v1",
+    api: "openai-completions",
+    authMethods: [
+      "api-key",
+      "bearer-token",
+      "oauth2",
+      "oauth2-pkce",
+      "oauth-device-code",
+      "browser-session",
+      "custom-header",
+      "query-param",
+      "none",
+    ],
+    defaultAuthMethod: "api-key",
+    officialModelsEndpoint: "/models",
+  },
+];
 
-/**
- * Get well-known provider by type
- */
-export function getWellKnownProvider(type: ProviderType): WellKnownProvider | undefined {
-  return WELL_KNOWN_PROVIDERS[type];
+export function getWellKnownProviders(): WellKnownProviderConfig[] {
+  return WELL_KNOWN_PROVIDERS;
 }
 
-/**
- * Get all well-known providers
- */
-export function getAllWellKnownProviders(): WellKnownProvider[] {
-  return Object.values(WELL_KNOWN_PROVIDERS);
-}
-
-/**
- * Get providers that support official model fetching
- */
-export function getProvidersWithModelFetch(): ProviderType[] {
-  return Object.entries(WELL_KNOWN_PROVIDERS)
-    .filter(([_, def]) => def.supportsOfficialModelFetch)
-    .map(([type, _]) => type as ProviderType);
+export function getWellKnownProvider(type: ProviderType): WellKnownProviderConfig | undefined {
+  return WELL_KNOWN_PROVIDERS.find((provider) => provider.id === type);
 }

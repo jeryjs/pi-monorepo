@@ -1,55 +1,55 @@
 # Pi Unify Provider - Implementation Checklist
 
 ## Phase 1: Core Infrastructure ✅
-- [x] Extension skeleton with command registration
-- [x] Configuration persistence layer (ConfigStore)
-- [x] Type definitions for providers, models, auth
-- [x] Well-known provider definitions (5 providers)
-- [x] Model fetcher service structure
+- [ ] Extension skeleton with command registration
+- [ ] Configuration persistence layer (ConfigStore)
+- [ ] Type definitions for providers, models, auth
+- [ ] Well-known provider definitions (5 providers)
+- [ ] Model fetcher service structure
 
 ## Phase 2: Authentication System ✅
-- [x] 7 auth method type definitions:
-  - [x] api_key
-  - [x] bearer_token
-  - [x] oauth2
-  - [x] oauth2_pkce
-  - [x] oauth_device_code
-  - [x] browser_session
-  - [x] custom_header
-  - [x] query_param
-  - [x] none
-- [x] AuthManager implementation
-- [x] OAuth flow handlers (initiate, complete, refresh)
-- [x] API key storage (env + secret storage)
+- [ ] 7 auth method type definitions:
+  - [ ] api_key
+  - [ ] bearer_token
+  - [ ] oauth2
+  - [ ] oauth2_pkce
+  - [ ] oauth_device_code
+  - [ ] browser_session
+  - [ ] custom_header
+  - [ ] query_param
+  - [ ] none
+- [ ] AuthManager implementation
+- [ ] OAuth flow handlers (initiate, complete, refresh)
+- [ ] API key storage (env + secret storage)
 
 ## Phase 3: Model Management ✅ COMPLETE
-- [x] Complete model fetcher implementations:
-  - [x] Together AI fetcher
-  - [x] Fireworks AI fetcher
-  - [x] AI21 fetcher
-  - [x] Poe fetcher
-  - [x] Perplexity hardcoded models
-- [x] Model parameters database (20+ presets, extensible)
-- [x] Model merge strategy (fetched + built-in + manual)
-- [x] Exponential backoff implementation
-- [x] Caching system
-- [x] Error handling & retry logic
+- [ ] Complete model fetcher implementations:
+  - [ ] Together AI fetcher
+  - [ ] Fireworks AI fetcher
+  - [ ] AI21 fetcher
+  - [ ] Poe fetcher
+  - [ ] Perplexity hardcoded models
+- [ ] Model parameters database (20+ presets, extensible)
+- [ ] Model merge strategy (fetched + built-in + manual)
+- [ ] Exponential backoff implementation
+- [ ] Caching system
+- [ ] Error handling & retry logic
 
 ## Phase 4: TUI Commands ✅ COMPLETE
-- [x] Command registration structure
-- [x] showProviderDashboard() - Main dashboard
-- [x] showAddProviderFlow() - Interactive wizard
-- [x] showModelsList() - Model browser
-- [x] showProviderDetails() - Provider options
-- [x] refreshAllProviders() - Force refresh
+- [ ] Command registration structure
+- [ ] showProviderDashboard() - Main dashboard
+- [ ] showAddProviderFlow() - Interactive wizard
+- [ ] showModelsList() - Model browser
+- [ ] showProviderDetails() - Provider options
+- [ ] refreshAllProviders() - Force refresh
 
 ## Phase 5: Integration & Testing 🔄 IN PROGRESS
-- [x] Complete extension.ts integration
-- [x] Provider registration on session_start
-- [x] Event hooks (before_provider_request)
-- [x] Keyboard shortcuts (Ctrl+Shift+U)
-- [x] Real-time model updates
-- [x] Error boundaries
+- [ ] Complete extension.ts integration
+- [ ] Provider registration on session_start
+- [ ] Event hooks (before_provider_request)
+- [ ] Keyboard shortcuts (Ctrl+Shift+U)
+- [ ] Real-time model updates
+- [ ] Error boundaries
 - [ ] Manual testing with each provider
 - [ ] Install and test in Pi
 - [ ] Fix any runtime errors

@@ -1,219 +1,115 @@
-/**
- * Model Parameters Database
- * Built-in presets for common models with optimized parameters
- */
+import type { ModelConfig } from "../types.js";
 
-import type { UnifyModelConfig } from "../config.js";
-
-/**
- * Built-in model parameters database
- * Key: Model ID (can be partial match)
- * Value: Partial model config with recommended parameters
- */
-export const MODEL_PARAMETERS_DB = new Map<string, Partial<UnifyModelConfig>>([
-  // ==================== Anthropic Claude ====================
-  ["claude-3-opus", {
-    name: "Claude 3 Opus",
-    contextWindow: 200000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: false },
-  }],
-  ["claude-3-sonnet", {
-    name: "Claude 3.5 Sonnet",
-    contextWindow: 200000,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: false },
-  }],
-  ["claude-3-haiku", {
-    name: "Claude 3 Haiku",
-    contextWindow: 200000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: false },
-  }],
-
-  // ==================== OpenAI GPT ====================
-  ["gpt-4o", {
-    name: "GPT-4o",
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 2.5, output: 10 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: false },
-  }],
-  ["gpt-4o-mini", {
-    name: "GPT-4o Mini",
-    contextWindow: 128000,
-    maxOutputTokens: 16384,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 0.15, output: 0.6 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: false },
-  }],
-  ["o1", {
-    name: "o1",
-    contextWindow: 200000,
-    maxOutputTokens: 100000,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: true },
-    cost: { input: 15, output: 60 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: true, supportsReasoningEffort: true },
-  }],
-  ["o1-mini", {
-    name: "o1-mini",
-    contextWindow: 128000,
-    maxOutputTokens: 65536,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
-    cost: { input: 1.1, output: 4.4 },
-    temperature: 1.0,
-    compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
-  }],
-
-  // ==================== Google Gemini ====================
-  ["gemini-1.5-pro", {
-    name: "Gemini 1.5 Pro",
-    contextWindow: 2000000,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 1.25, output: 5 },
-    temperature: 1.0,
-  }],
-  ["gemini-1.5-flash", {
-    name: "Gemini 1.5 Flash",
-    contextWindow: 1000000,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: true, toolCalling: true, reasoning: false },
-    cost: { input: 0.075, output: 0.3 },
-    temperature: 1.0,
-  }],
-
-  // ==================== Together AI Models ====================
-  ["meta-llama", {
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.18, output: 0.72 },
-    temperature: 0.7,
-  }],
-  ["meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo", {
-    name: "Llama 3.1 405B",
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 5, output: 15 },
-    temperature: 0.7,
-  }],
-  ["meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo", {
-    name: "Llama 3.1 70B",
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.88, output: 0.88 },
-    temperature: 0.7,
-  }],
-  ["mistralai", {
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.6, output: 0.6 },
-    temperature: 0.7,
-  }],
-  ["deepseek-ai", {
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
-    cost: { input: 0.14, output: 0.28 },
-    temperature: 1.0,
-    compat: { supportsUsageInStreaming: true },
-  }],
-  ["Qwen", {
-    contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.5, output: 0.5 },
-    temperature: 0.7,
-    compat: { supportsDeveloperRole: false },
-  }],
-
-  // ==================== Fireworks Models ====================
-  ["accounts/fireworks/models/llama-v3p1-405b-instruct", {
-    name: "Llama 3.1 405B (Fireworks)",
+const PRESETS: Record<string, Partial<ModelConfig>> = {
+  // Together
+  "meta-llama/Llama-3.3-70B-Instruct-Turbo": {
     contextWindow: 131072,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.9, output: 0.9 },
-    temperature: 0.7,
-  }],
-  ["accounts/fireworks/models/llama-v3p1-70b-instruct", {
-    name: "Llama 3.1 70B (Fireworks)",
+    capabilities: { toolCalling: true },
+  },
+  "meta-llama/Llama-3.1-405B-Instruct-Turbo": {
     contextWindow: 131072,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.9, output: 0.9 },
-    temperature: 0.7,
-  }],
-  ["accounts/fireworks/models/mixtral-8x22b-instruct", {
-    name: "Mixtral 8x22B (Fireworks)",
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "Qwen/Qwen2.5-Coder-32B-Instruct": {
+    contextWindow: 32768,
+    capabilities: { toolCalling: true },
+  },
+  "deepseek-ai/DeepSeek-V3": {
     contextWindow: 65536,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 0.9, output: 0.9 },
-    temperature: 0.7,
-  }],
+    capabilities: { toolCalling: true, reasoning: true },
+  },
 
-  // ==================== Perplexity Models ====================
-  ["sonar", {
-    name: "Sonar",
+  // Fireworks
+  "accounts/fireworks/models/llama-v3p1-405b-instruct": {
+    contextWindow: 131072,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "accounts/fireworks/models/deepseek-r1": {
+    contextWindow: 32768,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "accounts/fireworks/models/qwen2p5-coder-32b-instruct": {
+    contextWindow: 32768,
+    capabilities: { toolCalling: true },
+  },
+
+  // Perplexity
+  "sonar": {
+    contextWindow: 127000,
+    capabilities: { toolCalling: true },
+  },
+  "sonar-pro": {
+    contextWindow: 127000,
+    capabilities: { toolCalling: true },
+  },
+  "sonar-reasoning": {
+    contextWindow: 127000,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "sonar-reasoning-pro": {
+    contextWindow: 127000,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+
+  // AI21
+  "jamba-mini": {
+    contextWindow: 256000,
+    capabilities: { toolCalling: true },
+  },
+  "jamba-large": {
+    contextWindow: 256000,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "jamba-1.6-large": {
+    contextWindow: 256000,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+
+  // Poe / common model aliases
+  "gpt-4o": {
     contextWindow: 128000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: false, reasoning: false },
-    cost: { input: 5, output: 5 },
-    temperature: 0.7,
-    compat: { supportsUsageInStreaming: false },
-  }],
-  ["sonar-pro", {
-    name: "Sonar Pro",
+    capabilities: { toolCalling: true, imageInput: true },
+  },
+  "gpt-4.1": {
+    contextWindow: 1048576,
+    capabilities: { toolCalling: true, imageInput: true },
+  },
+  "o3-mini": {
     contextWindow: 200000,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: false },
-    cost: { input: 15, output: 60 },
-    temperature: 0.7,
-    compat: { supportsUsageInStreaming: false },
-  }],
-  ["sonar-reasoning", {
-    name: "Sonar Reasoning",
-    contextWindow: 128000,
-    maxOutputTokens: 8192,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
-    cost: { input: 10, output: 40 },
-    temperature: 0.7,
-    compat: { supportsUsageInStreaming: false },
-  }],
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+  "claude-3.7-sonnet": {
+    contextWindow: 200000,
+    capabilities: { toolCalling: true, imageInput: true, reasoning: true },
+  },
+  "claude-sonnet-4": {
+    contextWindow: 200000,
+    capabilities: { toolCalling: true, imageInput: true, reasoning: true },
+  },
+  "gemini-2.5-pro": {
+    contextWindow: 1048576,
+    capabilities: { toolCalling: true, imageInput: true, reasoning: true },
+  },
+  "qwen3-coder-plus": {
+    contextWindow: 1000000,
+    capabilities: { toolCalling: true, reasoning: true },
+  },
+};
 
-  // ==================== AI21 Models ====================
-  ["jamba-1-5-large", {
-    name: "Jamba 1.5 Large",
-    contextWindow: 256000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
-    cost: { input: 2, output: 8 },
-    temperature: 0.7,
-  }],
-  ["jamba-1-5-mini", {
-    name: "Jamba 1.5 Mini",
-    contextWindow: 256000,
-    maxOutputTokens: 4096,
-    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
-    cost: { input: 0.2, output: 0.4 },
-    temperature: 0.7,
-  }],
-]);
+export function getModelPreset(modelId: string): Partial<ModelConfig> | undefined {
+  return PRESETS[modelId];
+}
+
+export function mergeModelWithPreset(model: ModelConfig): ModelConfig {
+  const preset = PRESETS[model.id];
+  if (!preset) return model;
+
+  return {
+    ...preset,
+    ...model,
+    capabilities: {
+      ...(preset.capabilities ?? {}),
+      ...(model.capabilities ?? {}),
+    },
+  };
+}

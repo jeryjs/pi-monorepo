@@ -8,16 +8,28 @@ importers:
 
   .:
     dependencies:
+      '@mariozechner/pi-tui':
+        specifier: ^0.66.1
+        version: 0.66.1
+    devDependencies:
+      '@marcfargas/pi-test-harness':
+        specifier: ^0.5.0
+        version: 0.5.0(@mariozechner/pi-agent-core@0.66.1(ws@8.20.0)(zod@4.3.6))(@mariozechner/pi-ai@0.66.1(ws@8.20.0)(zod@4.3.6))(@mariozechner/pi-coding-agent@0.66.1(ws@8.20.0)(zod@4.3.6))
+      '@mariozechner/pi-agent-core':
+        specifier: ^0.66.1
+        version: 0.66.1(ws@8.20.0)(zod@4.3.6)
+      '@mariozechner/pi-ai':
+        specifier: ^0.66.1
+        version: 0.66.1(ws@8.20.0)(zod@4.3.6)
       '@mariozechner/pi-coding-agent':
         specifier: ^0.66.1
         version: 0.66.1(ws@8.20.0)(zod@4.3.6)
-    devDependencies:
       '@types/node':
         specifier: ^25.6.0
         version: 25.6.0
       typescript:
-        specifier: 5.7.2
-        version: 5.7.2
+        specifier: 6.0.2
+        version: 6.0.2
 
 packages:
 
@@ -182,6 +194,13 @@ packages:
     peerDependenciesMeta:
       '@modelcontextprotocol/sdk':
         optional: true
+
+  '@marcfargas/pi-test-harness@0.5.0':
+    resolution: {integrity: sha512-EoF5BXiGRPNlos90UELMQ4jE/YYSPxbxgT/Bp9ZAIGwXh/HXRZBxUN4qscOLitCXw9GqCzctovdMIpo/VCauog==}
+    peerDependencies:
+      '@mariozechner/pi-agent-core': '*'
+      '@mariozechner/pi-ai': '*'
+      '@mariozechner/pi-coding-agent': '>=0.50.0'
 
   '@mariozechner/clipboard-darwin-arm64@0.3.2':
     resolution: {integrity: sha512-uBf6K7Je1ihsgvmWxA8UCGCeI+nbRVRXoarZdLjl6slz94Zs1tNKFZqx7aCI5O1i3e0B6ja82zZ06BWrl0MCVw==}
@@ -993,8 +1012,8 @@ packages:
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
-  typescript@5.7.2:
-    resolution: {integrity: sha512-i5t66RHxDvVN40HfDd1PsEThGNnlMCMT3jMUuoh9/0TaqWevNontacunWyN02LA9/fIbEWlcHZcgTKb9QoaLfg==}
+  typescript@6.0.2:
+    resolution: {integrity: sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -1474,6 +1493,12 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  '@marcfargas/pi-test-harness@0.5.0(@mariozechner/pi-agent-core@0.66.1(ws@8.20.0)(zod@4.3.6))(@mariozechner/pi-ai@0.66.1(ws@8.20.0)(zod@4.3.6))(@mariozechner/pi-coding-agent@0.66.1(ws@8.20.0)(zod@4.3.6))':
+    dependencies:
+      '@mariozechner/pi-agent-core': 0.66.1(ws@8.20.0)(zod@4.3.6)
+      '@mariozechner/pi-ai': 0.66.1(ws@8.20.0)(zod@4.3.6)
+      '@mariozechner/pi-coding-agent': 0.66.1(ws@8.20.0)(zod@4.3.6)
 
   '@mariozechner/clipboard-darwin-arm64@0.3.2':
     optional: true
@@ -2440,7 +2465,7 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  typescript@5.7.2: {}
+  typescript@6.0.2: {}
 
   uint8array-extras@1.5.0: {}
 
