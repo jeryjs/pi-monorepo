@@ -495,9 +495,13 @@ export class OfficialModelsFetcher {
       ? (provider.auth as any).envVar
       : `${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
 
-    const envValue =
+    const envValue = process.env[envVar];
+    if (envValue) return envValue;
 
-    return process.env[envVar];
+    // 2. Check AuthManager for stored keys
+    // Note: OAuth credentials and stored API keys would be here
+
+    return undefined;
   }
 }
 
