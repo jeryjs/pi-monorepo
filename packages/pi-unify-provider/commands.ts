@@ -146,7 +146,7 @@ async function captureSecretValue(
 	prefill: string | undefined,
 	kind: "api-key" | "generic" | "oauth-token",
 ): Promise<string | undefined> {
-	const value = await ctx.ui.input(label, prefill);
+	const value = await ctx.ui.editor(label, prefill ?? "");
 	if (!value) return undefined;
 	const secure = await ctx.ui.confirm(
 		"Store as secret reference",
@@ -164,6 +164,16 @@ async function captureSecretValue(
 	}
 	secrets.setGeneric(ref, value);
 	return ref;
+}
+
+async function promptEditableValue(
+	ctx: ExtensionCommandContext,
+	title: string,
+	currentValue: string | undefined,
+): Promise<string | undefined> {
+	const edited = await ctx.ui.editor(title, currentValue ?? "");
+	if (edited === undefined) return undefined;
+	return edited.trim();
 }
 
 async function promptApi(
@@ -216,14 +226,16 @@ async function promptAuthConfig(
 				"generic",
 			);
 			if (!token) return undefined;
-			const headerName = await ctx.ui.input(
+			const headerName = await promptEditableValue(
+				ctx,
 				"Header name (default Authorization)",
 				current.method === "bearer-token" ? current.headerName : "Authorization",
 			);
 			return { method: "bearer-token", token, headerName: headerName || "Authorization" };
 		}
 		case "custom-header": {
-			const headerName = await ctx.ui.input(
+			const headerName = await promptEditableValue(
+				ctx,
 				"Header name",
 				current.method === "custom-header" ? current.headerName : "X-API-Key",
 			);
@@ -239,7 +251,8 @@ async function promptAuthConfig(
 			return { method: "custom-header", headerName, headerValue };
 		}
 		case "query-param": {
-			const paramName = await ctx.ui.input(
+			const paramName = await promptEditableValue(
+				ctx,
 				"Query param name",
 				current.method === "query-param" ? current.paramName : "api_key",
 			);
@@ -266,11 +279,13 @@ async function promptAuthConfig(
 			return { method: "browser-session", cookieHeader };
 		}
 		case "oauth2": {
-			const tokenUrl = await ctx.ui.input(
+			const tokenUrl = await promptEditableValue(
+				ctx,
 				"OAuth token URL",
 				current.method === "oauth2" ? current.tokenUrl : undefined,
 			);
-			const clientId = await ctx.ui.input(
+			const clientId = await promptEditableValue(
+				ctx,
 				"OAuth client ID",
 				current.method === "oauth2" ? current.clientId : undefined,
 			);
@@ -292,15 +307,18 @@ async function promptAuthConfig(
 			return { method: "oauth2", tokenUrl, clientId, clientSecret, token };
 		}
 		case "oauth2-pkce": {
-			const authorizationUrl = await ctx.ui.input(
+			const authorizationUrl = await promptEditableValue(
+				ctx,
 				"Authorization URL",
 				current.method === "oauth2-pkce" ? current.authorizationUrl : undefined,
 			);
-			const tokenUrl = await ctx.ui.input(
+			const tokenUrl = await promptEditableValue(
+				ctx,
 				"Token URL",
 				current.method === "oauth2-pkce" ? current.tokenUrl : undefined,
 			);
-			const clientId = await ctx.ui.input(
+			const clientId = await promptEditableValue(
+				ctx,
 				"Client ID",
 				current.method === "oauth2-pkce" ? current.clientId : undefined,
 			);
@@ -315,17 +333,20 @@ async function promptAuthConfig(
 			return { method: "oauth2-pkce", authorizationUrl, tokenUrl, clientId, token };
 		}
 		case "oauth-device-code": {
-			const deviceAuthorizationUrl = await ctx.ui.input(
+			const deviceAuthorizationUrl = await promptEditableValue(
+				ctx,
 				"Device authorization URL",
 				current.method === "oauth-device-code"
 					? current.deviceAuthorizationUrl
 					: undefined,
 			);
-			const tokenUrl = await ctx.ui.input(
+			const tokenUrl = await promptEditableValue(
+				ctx,
 				"Token URL",
 				current.method === "oauth-device-code" ? current.tokenUrl : undefined,
 			);
-			const clientId = await ctx.ui.input(
+			const clientId = await promptEditableValue(
+				ctx,
 				"Client ID",
 				current.method === "oauth-device-code" ? current.clientId : undefined,
 			);
@@ -363,12 +384,12 @@ async function runAddProviderFlow(
 	let api = preset.api;
 
 	if (preset.id === "custom") {
-		const customName = await ctx.ui.input("Provider name", preset.name);
+		const customName = await promptEditableValue(ctx, "Provider name", preset.name);
 		if (!customName) return undefined;
 		resolvedName = await resolveProviderNameConflict(ctx, store, customName.trim());
 		if (!resolvedName) return undefined;
 
-		const customBaseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
+		const customBaseUrl = await promptEditableValue(ctx, "Base URL", preset.baseUrl);
 		if (!customBaseUrl) return undefined;
 		baseUrl = customBaseUrl.trim();
 
@@ -381,7 +402,7 @@ async function runAddProviderFlow(
 			`Use defaults for ${preset.name}?\nEndpoint: ${preset.baseUrl}\nAPI: ${preset.api}`,
 		);
 		if (!customize) {
-			const customBaseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
+			const customBaseUrl = await promptEditableValue(ctx, "Base URL", preset.baseUrl);
 			if (!customBaseUrl) return undefined;
 			baseUrl = customBaseUrl.trim();
 
@@ -439,7 +460,7 @@ async function runEditProviderFlow(
 		}
 
 		if (choice.startsWith("Name:")) {
-			const nextName = await ctx.ui.input("Provider name", provider.name);
+			const nextName = await promptEditableValue(ctx, "Provider name", provider.name);
 			if (!nextName) continue;
 			const trimmed = nextName.trim();
 			if (trimmed === provider.name) continue;
@@ -451,7 +472,7 @@ async function runEditProviderFlow(
 		}
 
 		if (choice.startsWith("Base URL:")) {
-			const nextBaseUrl = await ctx.ui.input("Base URL", provider.baseUrl);
+			const nextBaseUrl = await promptEditableValue(ctx, "Base URL", provider.baseUrl);
 			if (!nextBaseUrl) continue;
 			provider.baseUrl = nextBaseUrl.trim();
 			changed = true;
@@ -538,23 +559,27 @@ async function runModelsEditFlow(
 				continue;
 			}
 			if (choice.startsWith("ID:")) {
-				const id = await ctx.ui.input("Model ID", next.id);
+				const id = await promptEditableValue(ctx, "Model ID", next.id);
 				if (!id) continue;
 				next.id = id.trim();
 				continue;
 			}
 			if (choice.startsWith("Name:")) {
-				const name = await ctx.ui.input("Model name", next.name ?? "");
+				const name = await promptEditableValue(ctx, "Model name", next.name ?? "");
 				next.name = name?.trim() || undefined;
 				continue;
 			}
 			if (choice.startsWith("Family:")) {
-				const family = await ctx.ui.input("Model family", next.family ?? "");
+				const family = await promptEditableValue(ctx, "Model family", next.family ?? "");
 				next.family = family?.trim() || undefined;
 				continue;
 			}
 			if (choice.startsWith("Context Window:")) {
-				const value = await ctx.ui.input("Context window tokens", next.contextWindow !== undefined ? String(next.contextWindow) : "");
+				const value = await promptEditableValue(
+					ctx,
+					"Context window tokens",
+					next.contextWindow !== undefined ? String(next.contextWindow) : "",
+				);
 				if (!value) {
 					next.contextWindow = undefined;
 					continue;
@@ -564,7 +589,11 @@ async function runModelsEditFlow(
 				continue;
 			}
 			if (choice.startsWith("Max Tokens:")) {
-				const value = await ctx.ui.input("Max output tokens", next.maxTokens !== undefined ? String(next.maxTokens) : "");
+				const value = await promptEditableValue(
+					ctx,
+					"Max output tokens",
+					next.maxTokens !== undefined ? String(next.maxTokens) : "",
+				);
 				if (!value) {
 					next.maxTokens = undefined;
 					continue;
@@ -827,15 +856,19 @@ async function runDashboard(
 
 	while (true) {
 		const providers = [...store.getProviders()].sort((a, b) => a.name.localeCompare(b.name));
+		const providerOptionMap = new Map<string, string>();
+		const providerOptions = providers.map((provider) => {
+			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
+			const label = `${provider.name} (${provider.type}) • enabled ${enabledCount}/${provider.models.length}`;
+			providerOptionMap.set(label, provider.name);
+			return label;
+		});
 		const choice = await ctx.ui.select("Unify Provider Manager", [
 			"Add provider",
 			"Refresh provider registrations",
 			"Import providers",
 			"Export providers",
-			...providers.map((provider) => {
-				const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
-				return `${provider.name} (${provider.type}) • enabled ${enabledCount}/${provider.models.length}`;
-			}),
+			...providerOptions,
 			"Close",
 		]);
 
@@ -862,8 +895,10 @@ async function runDashboard(
 			continue;
 		}
 
-		const providerName = choice.split(" (")[0]!.trim();
-		await providerMenu(providerName);
+		const providerName = providerOptionMap.get(choice);
+		if (providerName) {
+			await providerMenu(providerName);
+		}
 	}
 }
 
