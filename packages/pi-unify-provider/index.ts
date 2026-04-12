@@ -152,6 +152,7 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	registerCommands({
 		pi,
 		store,
+		secrets,
 		refreshProviders,
 	});
 

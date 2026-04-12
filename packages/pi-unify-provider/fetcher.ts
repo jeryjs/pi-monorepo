@@ -60,16 +60,43 @@ function toUrl(provider: ProviderConfigRecord, endpoint: string, auth?: Resolved
 
 function parseOpenAIModelList(payload: unknown): UnifyModelConfig[] {
 	if (!payload || typeof payload !== "object") return [];
-	const data = (payload as { data?: unknown }).data;
-	if (!Array.isArray(data)) return [];
+
+	const parseId = (value: unknown): string | undefined => {
+		if (typeof value === "string" && value.trim()) return value.trim();
+		if (!value || typeof value !== "object") return undefined;
+		const row = value as Record<string, unknown>;
+		const id = row.id ?? row.model ?? row.model_id ?? row.name;
+		return typeof id === "string" && id.trim() ? id.trim() : undefined;
+	};
+
+	const maybeArray = [
+		(payload as { data?: unknown }).data,
+		(payload as { models?: unknown }).models,
+		(payload as { results?: unknown }).results,
+		Array.isArray(payload) ? payload : undefined,
+	].find((candidate) => Array.isArray(candidate));
+
 	const out: UnifyModelConfig[] = [];
-	for (const row of data) {
-		if (!row || typeof row !== "object") continue;
-		const id = (row as { id?: unknown }).id;
-		if (typeof id !== "string" || id.length === 0) continue;
-		out.push({ id });
+	if (Array.isArray(maybeArray)) {
+		for (const row of maybeArray) {
+			const id = parseId(row);
+			if (id) out.push({ id });
+		}
 	}
-	return out;
+
+	const modelsObject = (payload as { models?: unknown }).models;
+	if (modelsObject && typeof modelsObject === "object" && !Array.isArray(modelsObject)) {
+		for (const key of Object.keys(modelsObject as Record<string, unknown>)) {
+			if (key.trim()) out.push({ id: key.trim() });
+		}
+	}
+
+	if (out.length > 0) return out;
+
+	const fallbackId = parseId(payload);
+	if (fallbackId) return [{ id: fallbackId }];
+
+	return [];
 }
 
 function dedupeById(models: UnifyModelConfig[]): UnifyModelConfig[] {

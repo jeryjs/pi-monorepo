@@ -170,9 +170,15 @@ export async function resolveAuth(
 		case "oauth2":
 		case "oauth2-pkce":
 		case "oauth-device-code": {
+			const refreshAuth = "clientSecret" in auth
+				? {
+					...auth,
+					clientSecret: await resolveSecretString(auth.clientSecret, secretStore, "generic"),
+				}
+				: auth;
 			const { token, tokenRef } = await resolveOAuthToken(auth.token, secretStore);
 			if (!token?.accessToken) throw new Error(`${auth.method} auth missing access token`);
-			const next = shouldRefresh(token) ? await refreshOAuthToken(auth, token) : token;
+			const next = shouldRefresh(token) ? await refreshOAuthToken(refreshAuth, token) : token;
 			if (tokenRef && next !== token) {
 				secretStore.setOAuthToken(tokenRef, next);
 			}
