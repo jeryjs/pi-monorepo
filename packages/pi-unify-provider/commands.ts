@@ -64,8 +64,7 @@ async function selectWithSearch(
 				() => done(undefined),
 				hints,
 				initialSearchInput,
-			),
-		{ overlay: true, overlayOptions: { anchor: "center", width: 98, maxHeight: "85%" } },
+			)
 	);
 	if (selected !== undefined) return selected;
 
