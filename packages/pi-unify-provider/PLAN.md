@@ -1,138 +1,69 @@
-# Pi Unify Provider - Implementation Plan
+# Pi Unify Provider - Rewrite Plan (Flat / Pi-native)
 
-## Vision
-Bring VS Code Unify Chat Provider's power to Pi: a multi-provider LLM management extension with automatic model discovery, beautiful TUI configuration, and maximal feature parity.
+## Why Rewrite
 
-## Feature Matrix (Fully Implemented)
+The implementation is being rebuilt to follow Pi-native patterns more strictly:
+- Flat file layout like `pi-subagents` (minimal architecture overhead).
+- Prefer peer dependency exports over custom utility rewrites.
+- Use `ctx.ui.custom` + `@mariozechner/pi-tui` for persistent TUI flows.
+- Keep code compact and DRY (fail-fast style).
 
-### Phase 1: Core Provider Management ✅
-- [ ] Extension skeleton with `registerProvider()` integration
-- [ ] Configuration storage (`~/.pi/agent/unify-providers.json`)
-- [ ] Command-based TUI for provider management
-- [ ] Support for 45+ well-known providers
+## Target Scope (v0.2 rewrite)
 
-### Phase 2: Automatic Model Discovery ✅
-- [ ] Background fetcher service with exponential backoff
-- [ ] Provider-specific model list APIs (OpenAI, Anthropic, etc.)
-- [ ] Model parameter database with 200+ model presets
-- [ ] Merge strategy: manual < auto-fetched < built-in params
+1. Provider management and registration via `pi.registerProvider`.
+2. Five provider presets: Together, Fireworks, AI21, Poe, Perplexity (+ Custom).
+3. Auth method support:
+     - `none`, `api-key`, `bearer-token`, `oauth2`, `oauth2-pkce`,
+         `oauth-device-code`, `browser-session`, `custom-header`, `query-param`.
+4. Official model fetch + merge with local manual models.
+5. Persistent TUI flow for `/unify`, `/unify-add`, `/unify-refresh`.
 
-### Phase 3: Rich Configuration UI ✅
-- [ ] `/unify-providers` command - Interactive provider management
-- [ ] `/unify-add` command - Add provider with guided setup
-- [ ] `/unify-models` command - View and configure models
-- [ ] `/unify-refresh` command - Force refresh all official models
-- [ ] Status bar integration with balance/quota display
+## Flat File Layout
 
-### Phase 4: Advanced Features ✅
-- [ ] Preset templates per model (temperature, thinking, etc.)
-- [ ] Import/export configurations (JSON, Base64, URI)
-- [ ] One-click migration from other tools
-- [ ] Context window hook for usage reporting
-
-## Architecture
+All implementation files stay in project root (single-folder style):
 
 ```
-pi-unify-provider/
-├── extension.ts           # Main extension entry
-├── commands.ts            # TUI command handlers
-├── config.ts              # Configuration management
-├── providers/
-│   ├── index.ts           # Provider registration coordinator
-│   ├── fetcher.ts         # Official model fetcher service
-│   └── well-known.ts      # 45+ provider definitions
-├── models/
-│   ├── database.ts        # 200+ model parameter presets
-│   └── types.ts           # Model configuration types
-├── ui/
-│   ├── provider-form.ts   # Provider configuration UI
-│   ├── model-picker.ts    # Model selection interface
-│   └── status-bar.ts      # Balance/status display
-└── utils/
-    ├── auth.ts            # Auth credential management  
-    ├── fetch.ts           # HTTP client with retry
-    └── cache.ts           # Model list caching
+index.ts                    # extension entry
+types.ts                    # config + auth + model types
+config-store.ts             # provider config persistence
+secret-store.ts             # local secret ref storage
+well-known.ts               # 5 provider presets
+model-database.ts           # model metadata presets
+fetcher.ts                  # provider model discovery
+auth.ts                     # auth resolver + header/query/body injection
+ui.ts                       # persistent TUI component/router
+commands.ts                 # slash command registration
+register.ts                 # provider registration coordinator
 ```
 
-## Commands Reference
+## Dependency Reuse Policy
 
-| Command | Description |
-|---------|-------------|
-| `/unify` | Open provider management dashboard |
-| `/unify-add` | Add a new provider (guided) |
-| `/unify-providers` | List and manage existing providers |
-| `/unify-models [provider]` | View/edit models for a provider |
-| `/unify-refresh` | Refresh all official model lists |
-| `/unify-import [json/base64/url]` | Import configuration |
-| `/unify-export` | Export configuration |
+- `@mariozechner/pi-coding-agent`
+    - `ExtensionAPI`, `ExtensionContext`, `ToolDefinition`, `ProviderConfig`, `ProviderModelConfig`, `defineTool`, `loadSkills`, `getMarkdownTheme`.
+- `@mariozechner/pi-ai`
+    - `Api`, `Model`, `Message`, `Usage`, `TextContent`, `ToolCall`, `StreamOptions`, `SimpleStreamOptions`, `AssistantMessageEventStream` types.
+- `@mariozechner/pi-agent-core`
+    - `AgentToolResult`, `AgentToolUpdateCallback`, `ThinkingLevel`, `AgentMessage` types for strongly-typed tool/update state.
+- `@mariozechner/pi-tui`
+    - `Component`, `Container`, `Box`, `Text`, `Markdown`, `matchesKey`, `Key`, `truncateToWidth`, `visibleWidth` for interactive views.
 
-## Provider Types Supported
+## Implementation Order
 
-1. **anthropic** - Claude models via Anthropic API
-2. **openai-chat-completion** - GPT models via OpenAI
-3. **openai-responses** - OpenAI Responses API
-4. **google-ai-studio** - Gemini via AI Studio
-5. **google-vertex-ai** - Gemini via Vertex AI
-6. **ollama** - Local models via Ollama
-7. **openrouter** - OpenRouter aggregation
-8. **deepseek** - DeepSeek models
-9. **kimi** - Moonshot/Kimi models
-10. **groq** - Groq LPU models
-11. **cerebras** - Cerebras models
-12. **xai** - xAI/Grok models
-... plus 33+ more
+1. **Core contracts**: `types.ts`, `config-store.ts`, `secret-store.ts`.
+2. **Provider intelligence**: `well-known.ts`, `model-database.ts`, `fetcher.ts`.
+3. **Auth pipeline**: token resolution + request mutation support.
+4. **UI**: single persistent TUI component with screen stack.
+5. **Commands + registration**: `index.ts`, `commands.ts`, `register.ts`.
+6. **Validation pass**: typecheck + runtime smoke tests.
 
-## Model Parameters Database
-- Context window (maxInputTokens)
-- Max output tokens
-- Reasoning/thinking support
-- Tool calling capability
-- Vision support
-- Cost per 1M tokens (input/output/cache)
-- Temperature/topP defaults
-- Preset templates
+## Commit Cadence
 
-## Data Flow
-
-```
-User runs /unify-add
-    ↓
-Select provider type (well-known list)
-    ↓
-Enter baseUrl, auth (API key or OAuth)
-    ↓
-Save to unify-providers.json
-    ↓
-Extension loads and registers via pi.registerProvider()
-    ↓
-Background fetcher queries official models API
-    ↓
-Merge with built-in model parameters
-    ↓
-Update model registry with new models
-    ↓
-Models available in /model picker!
-```
-
-## Git Commit Strategy
-- `feat: extension skeleton with command registration`
-- `feat: configuration persistence layer`
-- `feat: well-known provider definitions (45 providers)`
-- `feat: model database with 200+ presets`
-- `feat: automatic model fetcher service`
-- `feat: TUI dashboard (/unify command)`
-- `feat: provider add flow with OAuth support`
-- `feat: model picker and configuration`
-- `feat: import/export functionality`
-- `feat: status bar integration`
-- `fix: model merge strategy for duplicates`
-- `docs: comprehensive README with setup guide`
-
-## Success Criteria
-- [ ] Can add any provider via `/unify-add` in < 30 seconds
-- [ ] Official models auto-populate for supported providers
-- [ ] Manual and auto-fetched models coexist cleanly
-- [ ] Built-in parameters apply automatically
-- [ ] Full OAuth support for providers requiring it
-- [ ] Configuration survives across Pi restarts
-- [ ] No provider conflicts with existing Pi providers
+Meaningful small commits (one capability per commit):
+- `feat: scaffold flat rewrite entry and types`
+- `feat: add config and secret stores`
+- `feat: add well-known provider presets`
+- `feat: implement auth resolution pipeline`
+- `feat: add official model fetcher and merge`
+- `feat: add persistent unify tui`
+- `feat: wire commands and provider registration`
+- `fix: type/runtime polish after smoke tests`
