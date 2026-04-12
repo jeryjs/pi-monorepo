@@ -1,5 +1,5 @@
 import type { Api } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type {ExtensionAPI,ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { ConfigStore } from "./config-store.ts";
 import { verboseLog } from "./debug.ts";
@@ -13,6 +13,7 @@ import {
 } from "./types.ts";
 import {
 	formatModelProperties,
+	ScopedModelConfigComponent,
 	SearchSelectorComponent,
 	type SearchSelectorItem,
 	toDashboardItems,
@@ -233,10 +234,10 @@ async function promptApi(
 	const selected = await selectWithSearch(
 		ctx,
 		"Provider API type",
-		API_OPTIONS.map((api) => (api === current ? `${api} (current)` : api)),
-	);
+		API_OPTIONS.map((api) => (api === current ? { value: api, label: api, secondary: "current" } : api)),
+	) as Api;
 	if (!selected) return undefined;
-	return selected.replace(" (current)", "") as Api;
+	return selected;
 }
 
 async function promptAuthConfig(
@@ -245,15 +246,14 @@ async function promptAuthConfig(
 	current: AuthConfig,
 ): Promise<AuthConfig | undefined> {
 	const methodOptions = authMethodOptions();
-	const selected = await selectWithSearch(
+	const method = await selectWithSearch(
 		ctx,
 		"Authentication method",
 		methodOptions.map((candidate) =>
-			candidate === current.method ? `${candidate} (current)` : candidate,
+			candidate === current.method ? { value: candidate, label: candidate, secondary: "current" } : candidate,
 		),
-	);
-	if (!selected) return undefined;
-	const method = selected.replace(" (current)", "") as AuthMethod;
+	) as AuthMethod;
+	if (!method) return undefined;
 
 	switch (method) {
 		case "none":
@@ -503,19 +503,19 @@ async function runEditProviderFlow(
 	let changed = false;
 	while (true) {
 		const choice = await selectWithSearch(ctx, `Edit provider: ${provider.name}`, [
-			`Name: ${provider.name}`,
-			`Base URL: ${provider.baseUrl}`,
-			`API: ${provider.api}`,
-            {value: "auth", label: "Authentication", secondary: provider.auth.method},
-			"Delete provider",
-			"Done",
+			{ value: "name", label: "Name", secondary: provider.name },
+			{ value: "endpoint", label: "Base URL", secondary: provider.baseUrl },
+			{ value: "api", label: `API`, secondary: provider.api },
+			{ value: "auth", label: "Authentication", secondary: provider.auth.method },
+			{ value: "delete", label: "Delete provider" },
+			{ value: "done", label: "Done" },
 		]);
 
-		if (!choice || choice === "Done") {
+		if (!choice || choice === "done") {
 			break;
 		}
 
-		if (choice.startsWith("Name:")) {
+		if (choice === "name") {
 			const nextName = await promptEditableValue(ctx, "Provider name", provider.name);
 			if (!nextName) continue;
 			const trimmed = nextName.trim();
@@ -527,7 +527,7 @@ async function runEditProviderFlow(
 			continue;
 		}
 
-		if (choice.startsWith("Base URL:")) {
+		if (choice === "endpoint") {
 			const nextBaseUrl = await promptEditableValue(ctx, "Base URL", provider.baseUrl);
 			if (!nextBaseUrl) continue;
 			provider.baseUrl = nextBaseUrl.trim();
@@ -535,7 +535,7 @@ async function runEditProviderFlow(
 			continue;
 		}
 
-		if (choice.startsWith("API:")) {
+		if (choice === "api") {
 			const nextApi = await promptApi(ctx, provider.api);
 			if (!nextApi) continue;
 			provider.api = nextApi;
@@ -545,10 +545,10 @@ async function runEditProviderFlow(
 
         if (choice === "auth") {
             changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
-			continue;
-		}
+            continue;
+        }
 
-		if (choice === "Delete provider") {
+		if (choice === "delete") {
 			const ok = await ctx.ui.confirm(
 				"Delete provider",
 				`Delete provider '${provider.name}'? This cannot be undone.`,
@@ -592,6 +592,96 @@ async function runAuthEditFlow(
 	return true;
 }
 
+async function editSingleModelFlow(
+	ctx: ExtensionCommandContext,
+	model: UnifyModelConfig,
+): Promise<UnifyModelConfig | "delete" | undefined> {
+	const next: UnifyModelConfig = {
+		...ensureModelIdentity(model, model.source ?? "user"),
+		source: "user",
+		capabilities: { ...(model.capabilities ?? {}) },
+	};
+
+	while (true) {
+		const choice = await selectWithSearch(ctx, `Edit model: ${next.id}`, [
+			`Enabled: ${next.enabled ? "on" : "off"}`,
+			`ID: ${next.id}`,
+			`Name: ${next.name ?? "(none)"}`,
+			`Family: ${next.family ?? "(none)"}`,
+			`Context Window: ${next.contextWindow ?? "(unset)"}`,
+			`Max Tokens: ${next.maxTokens ?? "(unset)"}`,
+			`Tool Calling: ${next.capabilities?.toolCalling ? "on" : "off"}`,
+			`Image Input: ${next.capabilities?.imageInput ? "on" : "off"}`,
+			`Reasoning: ${next.capabilities?.reasoning ? "on" : "off"}`,
+			"Delete model",
+			"Done",
+		]);
+
+		if (!choice || choice === "Done") return next;
+		if (choice === "Delete model") return "delete";
+
+		if (choice.startsWith("Enabled:")) {
+			next.enabled = !next.enabled;
+			continue;
+		}
+		if (choice.startsWith("ID:")) {
+			const id = await promptEditableValue(ctx, "Model ID", next.id);
+			if (!id) continue;
+			next.id = id.trim();
+			continue;
+		}
+		if (choice.startsWith("Name:")) {
+			const name = await promptEditableValue(ctx, "Model name", next.name ?? "");
+			next.name = name?.trim() || undefined;
+			continue;
+		}
+		if (choice.startsWith("Family:")) {
+			const family = await promptEditableValue(ctx, "Model family", next.family ?? "");
+			next.family = family?.trim() || undefined;
+			continue;
+		}
+		if (choice.startsWith("Context Window:")) {
+			const value = await promptEditableValue(
+				ctx,
+				"Context window tokens",
+				next.contextWindow !== undefined ? String(next.contextWindow) : "",
+			);
+			if (!value) {
+				next.contextWindow = undefined;
+				continue;
+			}
+			const parsed = Number(value);
+			if (Number.isFinite(parsed) && parsed > 0) next.contextWindow = parsed;
+			continue;
+		}
+		if (choice.startsWith("Max Tokens:")) {
+			const value = await promptEditableValue(
+				ctx,
+				"Max output tokens",
+				next.maxTokens !== undefined ? String(next.maxTokens) : "",
+			);
+			if (!value) {
+				next.maxTokens = undefined;
+				continue;
+			}
+			const parsed = Number(value);
+			if (Number.isFinite(parsed) && parsed > 0) next.maxTokens = parsed;
+			continue;
+		}
+		if (choice.startsWith("Tool Calling:")) {
+			next.capabilities = { ...(next.capabilities ?? {}), toolCalling: !next.capabilities?.toolCalling };
+			continue;
+		}
+		if (choice.startsWith("Image Input:")) {
+			next.capabilities = { ...(next.capabilities ?? {}), imageInput: !next.capabilities?.imageInput };
+			continue;
+		}
+		if (choice.startsWith("Reasoning:")) {
+			next.capabilities = { ...(next.capabilities ?? {}), reasoning: !next.capabilities?.reasoning };
+		}
+	}
+}
+
 async function runModelsEditFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
@@ -601,196 +691,78 @@ async function runModelsEditFlow(
 	const provider = store.getProvider(providerName);
 	if (!provider) return false;
 
-	const editModelFields = async (model: UnifyModelConfig): Promise<UnifyModelConfig | "delete" | undefined> => {
-		const next: UnifyModelConfig = {
-			...ensureModelIdentity(model, model.source ?? "user"),
-			source: "user",
-			capabilities: { ...(model.capabilities ?? {}) },
-		};
+	const working = dedupeModels(provider.models.map((m) => ensureModelIdentity(m, "user")));
+	const cachedOfficial = await fetchOfficialModels(providerName);
+	const universe = sortModelsForAllTab(buildModelUniverse(working, cachedOfficial));
+	const allModelIds = universe.map((model) => model.id);
+	const enabledModelIds = new Set(working.filter((model) => model.enabled !== false).map((model) => model.id));
 
-		while (true) {
-			const choice = await selectWithSearch(ctx, `Edit model: ${next.id}`, [
-				`Enabled: ${next.enabled ? "on" : "off"}`,
-				`ID: ${next.id}`,
-				`Name: ${next.name ?? "(none)"}`,
-				`Family: ${next.family ?? "(none)"}`,
-				`Context Window: ${next.contextWindow ?? "(unset)"}`,
-				`Max Tokens: ${next.maxTokens ?? "(unset)"}`,
-				`Tool Calling: ${next.capabilities?.toolCalling ? "on" : "off"}`,
-				`Image Input: ${next.capabilities?.imageInput ? "on" : "off"}`,
-				`Reasoning: ${next.capabilities?.reasoning ? "on" : "off"}`,
-				"Delete model",
-				"Done",
-			]);
+	type ModelConfigAction =
+		| { kind: "save"; enabledIds: string[] }
+		| { kind: "cancel" };
 
-			if (!choice || choice === "Done") return next;
-			if (choice === "Delete model") return "delete";
+	const currentEnabled = new Set(enabledModelIds);
+	const action = await ctx.ui.custom<ModelConfigAction | undefined>(
+		(_tui, theme, _kb, done) =>
+			new ScopedModelConfigComponent(theme, {
+				allModels: universe,
+				enabledModelIds: currentEnabled,
+				hasEnabledModelsFilter: currentEnabled.size > 0 && currentEnabled.size < allModelIds.length,
+			}, {
+				onModelToggle: (modelId, enabled) => {
+					if (enabled) currentEnabled.add(modelId);
+					else currentEnabled.delete(modelId);
+				},
+				onEnableAll: (ids) => {
+					currentEnabled.clear();
+					for (const id of ids) currentEnabled.add(id);
+				},
+				onClearAll: () => {
+					currentEnabled.clear();
+				},
+				onPersist: (enabledIds) => done({ kind: "save", enabledIds }),
+				onCancel: () => done({ kind: "cancel" }),
+			}),
+		{ overlay: true, overlayOptions: { anchor: "center", width: 98, maxHeight: "85%" } },
+	);
 
-			if (choice.startsWith("Enabled:")) {
-				next.enabled = !next.enabled;
-				continue;
-			}
-			if (choice.startsWith("ID:")) {
-				const id = await promptEditableValue(ctx, "Model ID", next.id);
-				if (!id) continue;
-				next.id = id.trim();
-				continue;
-			}
-			if (choice.startsWith("Name:")) {
-				const name = await promptEditableValue(ctx, "Model name", next.name ?? "");
-				next.name = name?.trim() || undefined;
-				continue;
-			}
-			if (choice.startsWith("Family:")) {
-				const family = await promptEditableValue(ctx, "Model family", next.family ?? "");
-				next.family = family?.trim() || undefined;
-				continue;
-			}
-			if (choice.startsWith("Context Window:")) {
-				const value = await promptEditableValue(
-					ctx,
-					"Context window tokens",
-					next.contextWindow !== undefined ? String(next.contextWindow) : "",
-				);
-				if (!value) {
-					next.contextWindow = undefined;
-					continue;
-				}
-				const parsed = Number(value);
-				if (Number.isFinite(parsed) && parsed > 0) next.contextWindow = parsed;
-				continue;
-			}
-			if (choice.startsWith("Max Tokens:")) {
-				const value = await promptEditableValue(
-					ctx,
-					"Max output tokens",
-					next.maxTokens !== undefined ? String(next.maxTokens) : "",
-				);
-				if (!value) {
-					next.maxTokens = undefined;
-					continue;
-				}
-				const parsed = Number(value);
-				if (Number.isFinite(parsed) && parsed > 0) next.maxTokens = parsed;
-				continue;
-			}
-			if (choice.startsWith("Tool Calling:")) {
-				next.capabilities = { ...(next.capabilities ?? {}), toolCalling: !next.capabilities?.toolCalling };
-				continue;
-			}
-			if (choice.startsWith("Image Input:")) {
-				next.capabilities = { ...(next.capabilities ?? {}), imageInput: !next.capabilities?.imageInput };
-				continue;
-			}
-			if (choice.startsWith("Reasoning:")) {
-				next.capabilities = { ...(next.capabilities ?? {}), reasoning: !next.capabilities?.reasoning };
-			}
-		}
-	};
+	if (!action || action.kind === "cancel") return false;
 
-	let working = dedupeModels(provider.models.map((m) => ensureModelIdentity(m, "user")));
-	let cachedOfficial = await fetchOfficialModels(providerName);
-	let fetchStatus = `fetched ${cachedOfficial.length} model(s)`;
-	let view: "enabled" | "all" = "enabled";
-	let filter = "";
+	const enabledSet = new Set(action.enabledIds);
+	const workingById = new Map(working.map((model) => [model.id, model]));
+	const universeById = new Map(universe.map((model) => [model.id, model]));
 
-	while (true) {
-		const universe = sortModelsForAllTab(buildModelUniverse(working, cachedOfficial));
-		const visible = view === "enabled"
-			? universe.filter((m) => m.source === "user" && m.enabled !== false)
-			: universe;
-		const filtered = filter
-			? visible.filter((m) => `${m.id} ${m.name ?? ""}`.toLowerCase().includes(filter.toLowerCase()))
-			: visible;
-
-		const modelOptionMap = new Map<string, UnifyModelConfig>();
-		const options: SearchSelectorItem[] = [
-			{ value: "__switch_view__", label: `Switch view (current: ${view})` },
-			{ value: "__search_filter__", label: `Search filter: ${filter || "(none)"}` },
-			{ value: "__fetch_official__", label: `Fetch official models list (${fetchStatus})` },
-			{ value: "__add_new__", label: "Add new model" },
-			{ value: "__save__", label: "Save model changes (Ctrl+S)" },
-			{ value: "__back__", label: "Back without saving" },
-		];
-		for (const model of filtered) {
-			const key = model.uid ? `model:${model.uid}` : `model-id:${model.id}`;
-			modelOptionMap.set(key, model);
-			const selectedMark = model.enabled !== false ? "[x]" : "[ ]";
-			const secondary = formatModelProperties(model);
-			options.push({
-				value: key,
-				label: `${selectedMark} ${model.id}`,
-				secondary: secondary || undefined,
-				searchText: `${model.id} ${model.name ?? ""} ${secondary ?? ""}`,
-			});
-		}
-
-		const choice = await selectWithSearch(
-			ctx,
-			`Models: ${providerName}`,
-			options,
-			"Enter:select/toggle  Tab:view switch via menu  Esc:cancel",
+	const nextModels: UnifyModelConfig[] = [];
+	for (const [id, model] of workingById) {
+		nextModels.push(
+			ensureModelIdentity(
+				{ ...model, enabled: enabledSet.has(id), source: "user" },
+				"user",
+			),
 		);
-		if (!choice || choice === "__back__") return false;
-
-		if (choice === "__switch_view__") {
-			view = view === "enabled" ? "all" : "enabled";
-			continue;
-		}
-		if (choice === "__search_filter__") {
-			const value = await ctx.ui.input("Model search filter", filter);
-			filter = value?.trim() ?? "";
-			continue;
-		}
-		if (choice === "__fetch_official__") {
-			fetchStatus = "fetching...";
-			cachedOfficial = await fetchOfficialModels(providerName);
-			fetchStatus = `fetched ${cachedOfficial.length} model(s)`;
-			ctx.ui.notify(fetchStatus, "info");
-			continue;
-		}
-		if (choice === "__add_new__") {
-			const id = await ctx.ui.input("New model ID", "");
-			if (!id) continue;
-			const name = await ctx.ui.input("Model name (optional)", "");
-			working = dedupeModels([
-				...working,
-				ensureModelIdentity({
-					id: id.trim(),
-					name: name?.trim() || undefined,
-					source: "user",
-					enabled: true,
-				}, "user"),
-			]);
-			continue;
-		}
-		if (choice === "__save__") {
-			provider.models = dedupeModels(working.map((m) => ensureModelIdentity({ ...m, source: "user" }, "user")));
-			provider.updatedAt = Date.now();
-			store.upsertProvider(provider);
-			verboseLog("commands", "models saved", { provider: provider.name, modelCount: provider.models.length });
-			return true;
-		}
-
-		const selectedModel = modelOptionMap.get(choice);
-		if (!selectedModel) continue;
-
-		const existing = working.find((m) => m.uid === selectedModel.uid || m.id === selectedModel.id);
-		const materialized = existing
-			? ensureModelIdentity(existing, "user")
-			: ensureModelIdentity({ ...selectedModel, source: "user", enabled: false }, "user");
-
-		const edited = await editModelFields(materialized);
-		if (!edited) continue;
-		if (edited === "delete") {
-			working = working.filter((m) => m.uid !== materialized.uid);
-			continue;
-		}
-		working = dedupeModels([
-			...working.filter((m) => m.uid !== materialized.uid),
-			ensureModelIdentity({ ...edited, source: "user" }, "user"),
-		]);
 	}
+
+	for (const id of enabledSet) {
+		if (workingById.has(id)) continue;
+		const official = universeById.get(id);
+		if (!official) continue;
+		nextModels.push(
+			ensureModelIdentity(
+				{ ...official, enabled: true, source: "user" },
+				"user",
+			),
+		);
+	}
+
+	provider.models = dedupeModels(nextModels);
+	provider.updatedAt = Date.now();
+	store.upsertProvider(provider);
+	verboseLog("commands", "models saved via scoped selector", {
+		provider: provider.name,
+		modelCount: provider.models.length,
+		enabledCount: provider.models.filter((model) => model.enabled !== false).length,
+	});
+	return true;
 }
 
 async function runOfficialModelsFlow(
@@ -889,31 +861,37 @@ async function runDashboard(
 	if (!ctx.hasUI) return;
 
 	const providerMenu = async (providerName: string): Promise<void> => {
-		let fetchLabel = "not fetched";
 		while (true) {
 			const provider = store.getProvider(providerName);
 			if (!provider) return;
 			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
 
+			const modelItems: SearchSelectorItem[] = provider.models.map((model) => ({
+				value: `model:${model.uid ?? model.id}`,
+				label: model.id,
+				secondary: `${model.enabled !== false ? "enabled" : "disabled"}${formatModelProperties(model) ? ` · ${formatModelProperties(model)}` : ""}`,
+				searchText: `${model.id} ${model.name ?? ""} ${formatModelProperties(model)}`,
+			}));
+
 			const choice = await selectWithSearch(ctx, `Provider: ${provider.name}`, [
-				{ value: "add_new_model", label: "Add new model" },
-				{ value: "add_official", label: "Add from official models" },
-				{ value: "fetch_official", label: `Fetch official models list`, secondary: fetchLabel },
-                { label: "---------------------------", value: 'divider', disabled: true },
-				{ value: "manage_models", label: `Manage models`, secondary: `${enabledCount} configured` },
-                { label: "---------------------------", value: 'divider', disabled: true },
+				{ value: "model_config", label: "Model configuration", secondary: `${enabledCount}/${provider.models.length} enabled` },
+				{ value: "add_custom_model", label: "Add custom model" },
+				...(modelItems.length > 0
+					? [{ value: "divider-models", label: "──────── models ────────", disabled: true }, ...modelItems]
+					: []),
+                { label: "-----------------", value: 'divider', disabled: true },
 				{ value: "provider_settings", label: "Provider settings" },
 				{ value: "back", label: "Back" },
 			]);
 
 			if (!choice || choice === "back") return;
 
-			if (choice === "provider_settings") {
-				const changed = await runEditProviderFlow(ctx, store, secrets, provider.name);
+			if (choice === "model_config") {
+				const changed = await runModelsEditFlow(ctx, store, provider.name, fetchOfficialModels);
 				if (changed) await refreshProviders();
 				continue;
 			}
-			if (choice === "add_new_model") {
+			if (choice === "add_custom_model") {
 				const id = await ctx.ui.input("New model ID", "");
 				if (!id) continue;
 				const name = await ctx.ui.input("Model name (optional)", "");
@@ -926,21 +904,32 @@ async function runDashboard(
 				await refreshProviders();
 				continue;
 			}
-			if (choice === "add_official") {
-				const changed = await runOfficialModelsFlow(ctx, store, provider.name, fetchOfficialModels);
-				if (changed) await refreshProviders();
+			if (choice.startsWith("model:")) {
+				const modelKey = choice.replace("model:", "");
+				const model = provider.models.find((m) => (m.uid ?? m.id) === modelKey);
+				if (!model) continue;
+				const edited = await editSingleModelFlow(ctx, model);
+				if (!edited) continue;
+				if (edited === "delete") {
+					provider.models = provider.models.filter((item) => (item.uid ?? item.id) !== modelKey);
+				} else {
+					provider.models = dedupeModels(
+						provider.models.map((item) =>
+							(item.uid ?? item.id) === modelKey
+								? ensureModelIdentity({ ...edited, source: "user" }, "user")
+								: item,
+						),
+					);
+				}
+				provider.updatedAt = Date.now();
+				store.upsertProvider(provider);
+				await refreshProviders();
 				continue;
 			}
-			if (choice === "fetch_official") {
-				fetchLabel = "fetching...";
-				const models = await fetchOfficialModels(provider.name);
-				fetchLabel = `fetched ${models.length} model(s)`;
-				ctx.ui.notify(fetchLabel, "info");
-				continue;
-			}
-			if (choice === "manage_models") {
-				const changed = await runModelsEditFlow(ctx, store, provider.name, fetchOfficialModels);
+			if (choice === "provider_settings") {
+				const changed = await runEditProviderFlow(ctx, store, secrets, provider.name);
 				if (changed) await refreshProviders();
+				continue;
 			}
 		}
 	};
@@ -951,18 +940,18 @@ async function runDashboard(
 		const providerOptionMap = new Map(providerItems.map((item) => [item.value, item.value]));
 		const choice = await selectWithSearch(
 			ctx,
-			"Unify Provider Manager",
-			[
-			{ value: "add_provider", label: "Add provider" },
-            { label: "-----------------", value: 'divider-1', disabled: true, visible: providers.length > 0 },
-			...providerItems,
-            { label: "-----------------", value: 'divider-2', disabled: true, visible: providers.length > 0 },
-			{ value: "refresh", label: "Refresh provider registrations" },
-			{ value: "import", label: "Import providers" },
-			{ value: "export", label: "Export providers" },
-            { label: "-----------------", value: 'divider-3', disabled: true },
-			{ value: "close", label: "Close" },
-			],
+            "Unify Provider Manager",
+            [
+                { value: "add_provider", label: "Add provider" },
+                { label: "──────── providers ────────", value: 'divider-1', disabled: true, visible: providers.length > 0 },
+                ...providerItems,
+                { label: "-----------------", value: 'divider-2', disabled: true, visible: providers.length > 0 },
+                { value: "refresh", label: "Refresh provider registrations" },
+                { value: "import", label: "Import providers" },
+                { value: "export", label: "Export providers" },
+                { label: "-----------------", value: 'divider-3', disabled: true },
+                { value: "close", label: "Close" },
+            ],
 			"Enter:select  Type to filter providers/options  Esc:close",
 		);
 
