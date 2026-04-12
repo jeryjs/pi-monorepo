@@ -1,245 +1,220 @@
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import type { Component } from "@mariozechner/pi-tui";
-import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import type { ProviderConfigRecord, UnifyModelConfig } from "./types.ts";
+import {
+	DynamicBorder,
+	keyHint,
+	rawKeyHint,
+	type Theme,
+} from "@mariozechner/pi-coding-agent";
+import {
+	Container,
+	fuzzyFilter,
+	getKeybindings,
+	Input,
+	Spacer,
+	Text,
+	truncateToWidth,
+	type Component,
+} from "@mariozechner/pi-tui";
+import type { UnifyModelConfig } from "./types.ts";
 
-export type DashboardAction =
-	| { kind: "close" }
-	| { kind: "add" }
-	| { kind: "refresh" }
-	| { kind: "official-models"; providerName: string }
-	| { kind: "edit"; providerName: string }
-	| { kind: "auth"; providerName: string }
-	| { kind: "models"; providerName: string }
-	| { kind: "delete"; providerName: string };
-
-function row(content: string, width: number): string {
-	return content.length >= width ? truncateToWidth(content, width) : `${content}${" ".repeat(width - content.length)}`;
+export interface SearchSelectorItem {
+	value: string;
+	label: string;
+	secondary?: string;
+	searchText?: string;
 }
 
-export class UnifyDashboardComponent implements Component {
-	private cursor = 0;
-	private readonly theme: Theme;
-	private readonly providers: ProviderConfigRecord[];
-	private readonly done: (action: DashboardAction) => void;
+function padLine(text: string, width: number): string {
+	return truncateToWidth(text, Math.max(1, width));
+}
+
+function formatCount(selected: number, total: number): string {
+	return total === 0 ? "0/0" : `${selected}/${total}`;
+}
+
+function compactTokens(tokens?: number): string | undefined {
+	if (!tokens || tokens <= 0) return undefined;
+	if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`;
+	if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+	return String(tokens);
+}
+
+export function formatModelProperties(model: UnifyModelConfig): string {
+	const props: string[] = [];
+	if (model.capabilities?.reasoning) props.push("think");
+	if (model.capabilities?.imageInput) props.push("img");
+	const ctx = compactTokens(model.contextWindow);
+	if (ctx) props.push(`ctx:${ctx}`);
+	const out = compactTokens(model.maxTokens);
+	if (out) props.push(`out:${out}`);
+	if (model.source) props.push(model.source);
+	return props.join(" · ");
+}
+
+/**
+ * Searchable selector with keyboard behavior mirroring model-selector style.
+ */
+export class SearchSelectorComponent extends Container {
+	searchInput: Input;
+	_focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+	listContainer: Container;
+	allItems: SearchSelectorItem[] = [];
+	filteredItems: SearchSelectorItem[] = [];
+	selectedIndex = 0;
+	titleText: Text;
+	theme: Theme;
+	onSelect: (value: string) => void;
+	onCancel: () => void;
+	hints: string;
 
 	constructor(
 		theme: Theme,
-		providers: ProviderConfigRecord[],
-		done: (action: DashboardAction) => void,
+		title: string,
+		items: SearchSelectorItem[],
+		onSelect: (value: string) => void,
+		onCancel: () => void,
+		hints?: string,
+		initialSearchInput?: string,
 	) {
+		super();
 		this.theme = theme;
-		this.providers = providers;
-		this.done = done;
+		this.onSelect = onSelect;
+		this.onCancel = onCancel;
+		this.hints = hints ?? `${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`;
+
+		this.allItems = [...items];
+		this.filteredItems = [...items];
+
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+
+		this.titleText = new Text(this.theme.fg("accent", title), 0, 0);
+		this.addChild(this.titleText);
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input();
+		if (initialSearchInput) {
+			this.searchInput.setValue(initialSearchInput);
+		}
+		this.searchInput.onSubmit = () => {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelect(selected.value);
+		};
+		this.addChild(this.searchInput);
+		this.addChild(new Spacer(1));
+
+		this.listContainer = new Container();
+		this.addChild(this.listContainer);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(this.theme.fg("dim", this.hints), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder());
+
+		this.filterItems(this.searchInput.getValue());
 	}
 
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || data === "q") {
-			this.done({ kind: "close" });
+	filterItems(query: string): void {
+		this.filteredItems = query
+			? fuzzyFilter(this.allItems, query, (item) => item.searchText ?? `${item.label} ${item.secondary ?? ""}`)
+			: this.allItems;
+		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.updateList();
+	}
+
+	updateList(): void {
+		this.listContainer.clear();
+		const maxVisible = 10;
+		const startIndex = Math.max(0, Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredItems.length - maxVisible));
+		const endIndex = Math.min(startIndex + maxVisible, this.filteredItems.length);
+
+		if (this.filteredItems.length === 0) {
+			this.listContainer.addChild(new Text(this.theme.fg("dim", "No matching results"), 0, 0));
 			return;
 		}
-		if (data === "a") {
-			this.done({ kind: "add" });
-			return;
+
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.filteredItems[i];
+			if (!item) continue;
+			const isSelected = i === this.selectedIndex;
+			const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
+			const label = isSelected ? this.theme.fg("accent", item.label) : item.label;
+			const secondary = item.secondary ? this.theme.fg("dim", ` ${item.secondary}`) : "";
+			this.listContainer.addChild(new Text(`${prefix}${label}${secondary}`, 0, 0));
 		}
-		if (data === "r") {
-			this.done({ kind: "refresh" });
-			return;
-		}
-		if (matchesKey(data, "up")) {
-			this.cursor = Math.max(0, this.cursor - 1);
-			return;
-		}
-		if (matchesKey(data, "down")) {
-			this.cursor = Math.min(Math.max(0, this.providers.length - 1), this.cursor + 1);
-			return;
-		}
-		const selected = this.providers[this.cursor];
-		if (!selected) return;
-		if (data === "e") {
-			this.done({ kind: "edit", providerName: selected.name });
-			return;
-		}
-		if (data === "h") {
-			this.done({ kind: "auth", providerName: selected.name });
-			return;
-		}
-		if (data === "m") {
-			this.done({ kind: "models", providerName: selected.name });
-			return;
-		}
-		if (data === "o") {
-			this.done({ kind: "official-models", providerName: selected.name });
-			return;
-		}
-		if (data === "d") {
-			this.done({ kind: "delete", providerName: selected.name });
-			return;
+
+		if (startIndex > 0 || endIndex < this.filteredItems.length) {
+			this.listContainer.addChild(new Text(this.theme.fg("dim", `  (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0));
 		}
 	}
 
-	render(width: number): string[] {
-		const lines: string[] = [];
-		const inner = Math.max(20, width);
-		lines.push(this.theme.fg("accent", row("Unify Provider Manager", inner)));
-		lines.push(this.theme.fg("dim", row("", inner)));
-		if (this.providers.length === 0) {
-			lines.push(row(this.theme.fg("dim", "No providers configured. Press [a] to add."), inner));
-		} else {
-			for (let i = 0; i < this.providers.length; i++) {
-				const provider = this.providers[i]!;
-				const selected = i === this.cursor;
-				const prefix = selected ? this.theme.fg("accent", "▶") : " ";
-				const authMethod = provider.auth.method;
-				const text = `${prefix} ${provider.name} [${provider.type}]  models:${provider.models.length}  auth:${authMethod}`;
-				lines.push(row(selected ? this.theme.fg("accent", text) : text, inner));
-			}
+	handleInput(keyData: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(keyData, "tui.select.up")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+			this.updateList();
+			return;
 		}
-		lines.push(this.theme.fg("dim", row("", inner)));
-		lines.push(this.theme.fg("dim", row("a:add  e:edit  h:auth  m:models  o:official  d:delete  r:refresh  q:close", inner)));
-		return lines;
-	}
+		if (kb.matches(keyData, "tui.select.down")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+			return;
+		}
+		if (kb.matches(keyData, "tui.select.confirm")) {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelect(selected.value);
+			return;
+		}
+		if (kb.matches(keyData, "tui.select.cancel")) {
+			this.onCancel();
+			return;
+		}
 
-	invalidate(): void {}
+		this.searchInput.handleInput(keyData);
+		this.filterItems(this.searchInput.getValue());
+	}
 }
 
-export type ModelManagerAction =
-	| { kind: "cancel" }
-	| { kind: "save"; models: UnifyModelConfig[] }
-	| { kind: "add-custom" }
-	| { kind: "edit-model"; modelId: string };
+export interface ProviderDashboardItem {
+	providerName: string;
+	providerType: string;
+	authMethod: string;
+	enabledModels: number;
+	totalModels: number;
+}
 
-type ModelTab = "all" | "selected";
+export function toDashboardItems(
+	providers: Array<{
+		name: string;
+		type: string;
+		auth: { method: string };
+		models: UnifyModelConfig[];
+	}>,
+): ProviderDashboardItem[] {
+	return providers.map((provider) => {
+		const enabledModels = provider.models.filter((model) => model.enabled !== false).length;
+		return {
+			providerName: provider.name,
+			providerType: provider.type,
+			authMethod: provider.auth.method,
+			enabledModels,
+			totalModels: provider.models.length,
+		};
+	});
+}
 
-export class ModelManagerComponent implements Component {
-	private readonly allModels: UnifyModelConfig[];
-	private readonly selectedById = new Map<string, UnifyModelConfig>();
-	private readonly theme: Theme;
-	private readonly done: (action: ModelManagerAction) => void;
-	private tab: ModelTab = "all";
-	private allIndex = 0;
-	private selectedIndex = 0;
-
-	constructor(
-		theme: Theme,
-		allModels: UnifyModelConfig[],
-		selectedModels: UnifyModelConfig[],
-		done: (action: ModelManagerAction) => void,
-	) {
-		this.theme = theme;
-		this.done = done;
-		this.allModels = [...allModels].sort((a, b) => a.id.localeCompare(b.id));
-		for (const model of selectedModels) {
-			this.selectedById.set(model.id, model);
-		}
-	}
-
-	private get selectedModels(): UnifyModelConfig[] {
-		return [...this.selectedById.values()].sort((a, b) => a.id.localeCompare(b.id));
-	}
-
-	private toggleTab(): void {
-		this.tab = this.tab === "all" ? "selected" : "all";
-	}
-
-	private clampIndices(): void {
-		this.allIndex = Math.max(0, Math.min(this.allIndex, Math.max(0, this.allModels.length - 1)));
-		this.selectedIndex = Math.max(0, Math.min(this.selectedIndex, Math.max(0, this.selectedModels.length - 1)));
-	}
-
-	private addCurrentAllModel(): void {
-		const model = this.allModels[this.allIndex];
-		if (!model) return;
-		if (!this.selectedById.has(model.id)) {
-			this.selectedById.set(model.id, model);
-		}
-		this.clampIndices();
-	}
-
-	private removeCurrentSelectedModel(): void {
-		const selected = this.selectedModels[this.selectedIndex];
-		if (!selected) return;
-		this.selectedById.delete(selected.id);
-		this.clampIndices();
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || data === "q") {
-			this.done({ kind: "cancel" });
-			return;
-		}
-		if (matchesKey(data, "tab")) {
-			this.toggleTab();
-			return;
-		}
-		if (matchesKey(data, "up")) {
-			if (this.tab === "all") this.allIndex = Math.max(0, this.allIndex - 1);
-			else this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			return;
-		}
-		if (matchesKey(data, "down")) {
-			if (this.tab === "all") this.allIndex = Math.min(Math.max(0, this.allModels.length - 1), this.allIndex + 1);
-			else this.selectedIndex = Math.min(Math.max(0, this.selectedModels.length - 1), this.selectedIndex + 1);
-			return;
-		}
-		if (matchesKey(data, "return")) {
-			if (this.tab === "all") this.addCurrentAllModel();
-			else this.removeCurrentSelectedModel();
-			return;
-		}
-		if (data === "d" && this.tab === "selected") {
-			this.removeCurrentSelectedModel();
-			return;
-		}
-		if (data === "e" && this.tab === "selected") {
-			const selected = this.selectedModels[this.selectedIndex];
-			if (!selected) return;
-			this.done({ kind: "edit-model", modelId: selected.id });
-			return;
-		}
-		if (data === "n") {
-			this.done({ kind: "add-custom" });
-			return;
-		}
-		if (data === "s") {
-			this.done({ kind: "save", models: this.selectedModels });
-		}
-	}
-
-	render(width: number): string[] {
-		const lines: string[] = [];
-		const inner = Math.max(20, width);
-		const allCount = this.allModels.length;
-		const selected = this.selectedModels;
-		const selectedCount = selected.length;
-
-		const tabAll = this.tab === "all" ? this.theme.fg("accent", `[All Models ${allCount}]`) : `[All Models ${allCount}]`;
-		const tabSelected = this.tab === "selected" ? this.theme.fg("accent", `[Selected ${selectedCount}]`) : `[Selected ${selectedCount}]`;
-
-		lines.push(this.theme.fg("accent", row("Model Configuration", inner)));
-		lines.push(row(`${tabAll}  ${tabSelected}`, inner));
-		lines.push(this.theme.fg("dim", row("Enter: add/remove  Tab: switch tab  e:edit selected  n:new model  s:save  q:cancel", inner)));
-		lines.push(this.theme.fg("dim", row("", inner)));
-
-		const items = this.tab === "all" ? this.allModels : selected;
-		const index = this.tab === "all" ? this.allIndex : this.selectedIndex;
-
-		if (items.length === 0) {
-			lines.push(row(this.theme.fg("dim", this.tab === "all" ? "No official models available" : "No selected models yet"), inner));
-		} else {
-			for (let i = 0; i < items.length; i++) {
-				const model = items[i]!;
-				const isCurrent = i === index;
-				const prefix = isCurrent ? this.theme.fg("accent", "▶") : " ";
-				const selectedMark = this.selectedById.has(model.id) ? this.theme.fg("success", "●") : this.theme.fg("dim", "○");
-				const modeMark = this.tab === "all" ? selectedMark : this.theme.fg("success", "●");
-				const line = `${prefix} ${modeMark} ${model.id}`;
-				lines.push(row(isCurrent ? this.theme.fg("accent", line) : line, inner));
-			}
-		}
-
-		return lines;
-	}
-
-	invalidate(): void {}
+export function toDashboardSelectorItems(items: ProviderDashboardItem[]): SearchSelectorItem[] {
+	return items.map((item) => ({
+		value: item.providerName,
+		label: item.providerName,
+		secondary: `${item.providerType} · auth:${item.authMethod} · models:${formatCount(item.enabledModels, item.totalModels)}`,
+		searchText: `${item.providerName} ${item.providerType} ${item.authMethod}`,
+	}));
 }

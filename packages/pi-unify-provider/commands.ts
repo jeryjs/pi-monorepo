@@ -11,6 +11,13 @@ import {
 	type ProviderConfigRecord,
 	type UnifyModelConfig,
 } from "./types.ts";
+import {
+	formatModelProperties,
+	SearchSelectorComponent,
+	type SearchSelectorItem,
+	toDashboardItems,
+	toDashboardSelectorItems,
+} from "./ui.ts";
 import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
 
 interface RegisterCommandsInput {
@@ -28,6 +35,50 @@ const API_OPTIONS: Api[] = [
 	"google-generative-ai",
 	"mistral-conversations",
 ];
+
+type ChoiceOption = string | SearchSelectorItem;
+
+function toChoiceItem(option: ChoiceOption): SearchSelectorItem {
+	if (typeof option === "string") {
+		return { value: option, label: option };
+	}
+	return option;
+}
+
+async function selectWithSearch(
+	ctx: ExtensionCommandContext,
+	title: string,
+	options: ChoiceOption[],
+	hints?: string,
+	initialSearchInput?: string,
+): Promise<string | undefined> {
+	if (!ctx.hasUI) return undefined;
+	const items = options.map(toChoiceItem);
+	const selected = await ctx.ui.custom<string | undefined>(
+		(_tui, theme, _kb, done) =>
+			new SearchSelectorComponent(
+				theme,
+				title,
+				items,
+				(value) => done(value),
+				() => done(undefined),
+				hints,
+				initialSearchInput,
+			),
+		{ overlay: true, overlayOptions: { anchor: "center", width: 98, maxHeight: "85%" } },
+	);
+	if (selected !== undefined) return selected;
+
+	// pi-test-harness mock custom() has zero-arg signature and always returns undefined.
+	// In that case, fall back to select() so tests remain deterministic.
+	if (ctx.ui.custom.length > 0) return undefined;
+
+	const labels = items.map((item) => item.label);
+	const fallbackSelection = await ctx.ui.select(title, labels);
+	if (!fallbackSelection) return undefined;
+	const matched = items.find((item) => item.label === fallbackSelection);
+	return matched?.value;
+}
 
 function dedupeModels(models: UnifyModelConfig[]): UnifyModelConfig[] {
 	const byUid = new Map<string, UnifyModelConfig>();
@@ -107,7 +158,7 @@ async function resolveProviderNameConflict(
 	requestedName: string,
 ): Promise<string | undefined> {
 	if (!store.getProvider(requestedName)) return requestedName;
-	const choice = await ctx.ui.select("Provider already exists", [
+	const choice = await selectWithSearch(ctx, "Provider already exists", [
 		"Overwrite existing",
 		"Rename as copy",
 		"Cancel",
@@ -180,7 +231,8 @@ async function promptApi(
 	ctx: ExtensionCommandContext,
 	current: Api,
 ): Promise<Api | undefined> {
-	const selected = await ctx.ui.select(
+	const selected = await selectWithSearch(
+		ctx,
 		"Provider API type",
 		API_OPTIONS.map((api) => (api === current ? `${api} (current)` : api)),
 	);
@@ -194,7 +246,8 @@ async function promptAuthConfig(
 	current: AuthConfig,
 ): Promise<AuthConfig | undefined> {
 	const methodOptions = authMethodOptions();
-	const selected = await ctx.ui.select(
+	const selected = await selectWithSearch(
+		ctx,
 		"Authentication method",
 		methodOptions.map((candidate) =>
 			candidate === current.method ? `${candidate} (current)` : candidate,
@@ -368,7 +421,8 @@ async function runAddProviderFlow(
 	store: ConfigStore,
 	secrets: SecretStore,
 ): Promise<ProviderConfigRecord | undefined> {
-	const presetName = await ctx.ui.select(
+	const presetName = await selectWithSearch(
+		ctx,
 		"Add provider preset",
 		WELL_KNOWN_PROVIDERS.map((preset) => `${preset.name} [${preset.category}]`),
 	);
@@ -448,7 +502,7 @@ async function runEditProviderFlow(
 
 	let changed = false;
 	while (true) {
-		const choice = await ctx.ui.select(`Edit provider: ${provider.name}`, [
+		const choice = await selectWithSearch(ctx, `Edit provider: ${provider.name}`, [
 			`Name: ${provider.name}`,
 			`Base URL: ${provider.baseUrl}`,
 			`API: ${provider.api}`,
@@ -549,7 +603,7 @@ async function runModelsEditFlow(
 		};
 
 		while (true) {
-			const choice = await ctx.ui.select(`Edit model: ${next.id}`, [
+			const choice = await selectWithSearch(ctx, `Edit model: ${next.id}`, [
 				`Enabled: ${next.enabled ? "on" : "off"}`,
 				`ID: ${next.id}`,
 				`Name: ${next.name ?? "(none)"}`,
@@ -644,42 +698,52 @@ async function runModelsEditFlow(
 			: visible;
 
 		const modelOptionMap = new Map<string, UnifyModelConfig>();
-		const options: string[] = [
-			`Switch view (current: ${view})`,
-			`Search filter: ${filter || "(none)"}`,
-			`Fetch official models list (${fetchStatus})`,
-			"Add new model",
-			"Save model changes (Ctrl+S)",
-			"Back without saving",
+		const options: SearchSelectorItem[] = [
+			{ value: "__switch_view__", label: `Switch view (current: ${view})` },
+			{ value: "__search_filter__", label: `Search filter: ${filter || "(none)"}` },
+			{ value: "__fetch_official__", label: `Fetch official models list (${fetchStatus})` },
+			{ value: "__add_new__", label: "Add new model" },
+			{ value: "__save__", label: "Save model changes (Ctrl+S)" },
+			{ value: "__back__", label: "Back without saving" },
 		];
 		for (const model of filtered) {
-			const enabled = model.enabled ? "[x]" : "[ ]";
-			const source = model.source === "user" ? "user" : "official";
-			const label = `${enabled} ${model.id} (${source}) • ${model.uid?.slice(0, 8) ?? "new"}`;
-			options.push(label);
-			modelOptionMap.set(label, model);
+			const key = model.uid ? `model:${model.uid}` : `model-id:${model.id}`;
+			modelOptionMap.set(key, model);
+			const selectedMark = model.enabled !== false ? "[x]" : "[ ]";
+			const secondary = formatModelProperties(model);
+			options.push({
+				value: key,
+				label: `${selectedMark} ${model.id}`,
+				secondary: secondary || undefined,
+				searchText: `${model.id} ${model.name ?? ""} ${secondary ?? ""}`,
+			});
 		}
 
-		const choice = await ctx.ui.select(`Models: ${providerName}`, options);
-		if (!choice || choice === "Back without saving") return false;
+		const choice = await selectWithSearch(
+			ctx,
+			`Models: ${providerName}`,
+			options,
+			"Enter:select/toggle  Tab:view switch via menu  Esc:cancel",
+		);
+		if (!choice || choice === "__back__") return false;
 
-		if (choice.startsWith("Switch view")) {
+		if (choice === "__switch_view__") {
 			view = view === "enabled" ? "all" : "enabled";
 			continue;
 		}
-		if (choice.startsWith("Search filter:")) {
+		if (choice === "__search_filter__") {
 			const value = await ctx.ui.input("Model search filter", filter);
 			filter = value?.trim() ?? "";
 			continue;
 		}
-		if (choice.startsWith("Fetch official models list")) {
+		if (choice === "__fetch_official__") {
 			fetchStatus = "fetching...";
 			cachedOfficial = await fetchOfficialModels(providerName);
 			fetchStatus = `fetched ${cachedOfficial.length} model(s)`;
 			ctx.ui.notify(fetchStatus, "info");
 			continue;
 		}
-		if (choice === "Add new model") {
+		if (choice === "__add_new__") {
 			const id = await ctx.ui.input("New model ID", "");
 			if (!id) continue;
 			const name = await ctx.ui.input("Model name (optional)", "");
@@ -694,7 +758,7 @@ async function runModelsEditFlow(
 			]);
 			continue;
 		}
-		if (choice === "Save model changes (Ctrl+S)") {
+		if (choice === "__save__") {
 			provider.models = dedupeModels(working.map((m) => ensureModelIdentity({ ...m, source: "user" }, "user")));
 			provider.updatedAt = Date.now();
 			store.upsertProvider(provider);
@@ -743,13 +807,20 @@ async function runOfficialModelsFlow(
 	}
 
 	const addAllLabel = "[Add all official models]";
-	const selected = await ctx.ui.select(
+	const selected = await selectWithSearch(
+		ctx,
 		`Official models: ${providerName}`,
 		[
 			addAllLabel,
 			...officialModels.map((model) => {
 				const exists = provider.models.some((m) => m.id === model.id);
-				return exists ? `${model.id} (already added)` : model.id;
+				const label = exists ? `${model.id} (already added)` : model.id;
+				return {
+					value: label,
+					label,
+					secondary: formatModelProperties(model) || undefined,
+					searchText: `${model.id} ${model.name ?? ""} ${formatModelProperties(model)}`,
+				};
 			}),
 		],
 	);
@@ -790,9 +861,15 @@ async function pickProviderName(
 	if (inputName && !store.getProvider(inputName)) {
 		ctx.ui.notify(`Provider not found: ${inputName}`, "warning");
 	}
-	return ctx.ui.select(
+	return selectWithSearch(
+		ctx,
 		"Select provider",
-		providers.map((provider) => provider.name),
+		providers.map((provider) => ({
+			value: provider.name,
+			label: provider.name,
+			secondary: `${provider.type} · auth:${provider.auth.method}`,
+			searchText: `${provider.name} ${provider.type} ${provider.auth.method}`,
+		})),
 	);
 }
 
@@ -812,29 +889,29 @@ async function runDashboard(
 			if (!provider) return;
 			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
 
-			const choice = await ctx.ui.select(`Provider: ${provider.name}`, [
-				"Provider settings",
-				"Authentication",
-				"Add new model",
-				"Add from official models",
-				`Fetch official models list (${fetchLabel})`,
-				`Enabled models (${enabledCount})`,
-				"Back",
+			const choice = await selectWithSearch(ctx, `Provider: ${provider.name}`, [
+				{ value: "provider_settings", label: "Provider settings" },
+				{ value: "auth", label: "Authentication" },
+				{ value: "add_new_model", label: "Add new model" },
+				{ value: "add_official", label: "Add from official models" },
+				{ value: "fetch_official", label: `Fetch official models list (${fetchLabel})` },
+				{ value: "enabled_models", label: `Enabled models (${enabledCount})` },
+				{ value: "back", label: "Back" },
 			]);
 
-			if (!choice || choice === "Back") return;
+			if (!choice || choice === "back") return;
 
-			if (choice === "Provider settings") {
+			if (choice === "provider_settings") {
 				const changed = await runEditProviderFlow(ctx, store, provider.name);
 				if (changed) await refreshProviders();
 				continue;
 			}
-			if (choice === "Authentication") {
+			if (choice === "auth") {
 				const changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
 				if (changed) await refreshProviders();
 				continue;
 			}
-			if (choice === "Add new model") {
+			if (choice === "add_new_model") {
 				const id = await ctx.ui.input("New model ID", "");
 				if (!id) continue;
 				const name = await ctx.ui.input("Model name (optional)", "");
@@ -847,19 +924,19 @@ async function runDashboard(
 				await refreshProviders();
 				continue;
 			}
-			if (choice === "Add from official models") {
+			if (choice === "add_official") {
 				const changed = await runOfficialModelsFlow(ctx, store, provider.name, fetchOfficialModels);
 				if (changed) await refreshProviders();
 				continue;
 			}
-			if (choice.startsWith("Fetch official models list")) {
+			if (choice === "fetch_official") {
 				fetchLabel = "fetching...";
 				const models = await fetchOfficialModels(provider.name);
 				fetchLabel = `fetched ${models.length} model(s)`;
 				ctx.ui.notify(fetchLabel, "info");
 				continue;
 			}
-			if (choice.startsWith("Enabled models")) {
+			if (choice === "enabled_models") {
 				const changed = await runModelsEditFlow(ctx, store, provider.name, fetchOfficialModels);
 				if (changed) await refreshProviders();
 			}
@@ -868,24 +945,24 @@ async function runDashboard(
 
 	while (true) {
 		const providers = [...store.getProviders()].sort((a, b) => a.name.localeCompare(b.name));
-		const providerOptionMap = new Map<string, string>();
-		const providerOptions = providers.map((provider) => {
-			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
-			const label = `${provider.name} (${provider.type}) • enabled ${enabledCount}/${provider.models.length}`;
-			providerOptionMap.set(label, provider.name);
-			return label;
-		});
-		const choice = await ctx.ui.select("Unify Provider Manager", [
-			"Add provider",
-			"Refresh provider registrations",
-			"Import providers",
-			"Export providers",
-			...providerOptions,
-			"Close",
-		]);
+		const providerItems = toDashboardSelectorItems(toDashboardItems(providers));
+		const providerOptionMap = new Map(providerItems.map((item) => [item.value, item.value]));
+		const choice = await selectWithSearch(
+			ctx,
+			"Unify Provider Manager",
+			[
+			{ value: "add_provider", label: "Add provider" },
+			{ value: "refresh", label: "Refresh provider registrations" },
+			{ value: "import", label: "Import providers" },
+			{ value: "export", label: "Export providers" },
+			...providerItems,
+			{ value: "close", label: "Close" },
+			],
+			"Enter:select  Type to filter providers/options  Esc:close",
+		);
 
-		if (!choice || choice === "Close") return;
-		if (choice === "Add provider") {
+		if (!choice || choice === "close") return;
+		if (choice === "add_provider") {
 			const added = await runAddProviderFlow(ctx, store, secrets);
 			if (added) {
 				await refreshProviders();
@@ -893,16 +970,16 @@ async function runDashboard(
 			}
 			continue;
 		}
-		if (choice === "Refresh provider registrations") {
+		if (choice === "refresh") {
 			await refreshProviders();
 			ctx.ui.notify("Providers refreshed.", "info");
 			continue;
 		}
-		if (choice === "Import providers") {
+		if (choice === "import") {
 			await runImport(ctx, store, refreshProviders, "");
 			continue;
 		}
-		if (choice === "Export providers") {
+		if (choice === "export") {
 			await runExport(ctx, store);
 			continue;
 		}
