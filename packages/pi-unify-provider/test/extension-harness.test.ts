@@ -12,7 +12,6 @@ type ProviderFixture = {
 	api: string;
 	auth: Record<string, unknown>;
 	models: Array<{ id: string }>;
-	autoFetchOfficialModels?: boolean;
 };
 
 function writeProviderDb(homeDir: string, providers: ProviderFixture[]): string {
@@ -58,7 +57,6 @@ test("extension works in pi-test-harness command flow", async () => {
 				api: "openai-completions",
 				auth: { method: "api-key", apiKey: "sk-test" },
 				models: [{ id: "model-original" }],
-				autoFetchOfficialModels: false,
 			},
 		]);
 
@@ -81,7 +79,6 @@ test("extension works in pi-test-harness command flow", async () => {
 										api: "openai-completions",
 										auth: { method: "api-key", apiKey: "sk-test" },
 										models: [{ id: "alpha" }, { id: "beta" }],
-										autoFetchOfficialModels: false,
 									},
 								],
 							},

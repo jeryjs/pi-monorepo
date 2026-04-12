@@ -193,7 +193,6 @@ export class OfficialModelsFetcher {
 			type: provider.type,
 			baseUrl: provider.baseUrl,
 			endpoint: preset?.officialModelsEndpoint,
-			autoFetchOfficialModels: provider.autoFetchOfficialModels,
 		});
 		const endpoint = preset?.officialModelsEndpoint;
 		const hardcoded = preset?.hardcodedModels ?? fallbackModelsForProvider(provider.type);

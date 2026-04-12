@@ -115,9 +115,12 @@ export interface ModelCapabilities {
 }
 
 export interface UnifyModelConfig {
+	uid?: string;
 	id: string;
 	name?: string;
 	family?: string;
+	source?: "user" | "official";
+	enabled?: boolean;
 	api?: Api;
 	contextWindow?: number;
 	maxTokens?: number;
@@ -135,7 +138,6 @@ export interface ProviderConfigRecord {
 	extraHeaders?: Record<string, string>;
 	extraQuery?: Record<string, string>;
 	extraBody?: Record<string, unknown>;
-	autoFetchOfficialModels?: boolean;
 	updatedAt?: number;
 }
 

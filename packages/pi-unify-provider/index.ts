@@ -14,8 +14,9 @@ import {
 	type ProviderConfigRecord,
 	type ResolvedAuth,
 	type UnifyModelConfig,
+	type WellKnownProviderPreset,
 } from "./types.ts";
-import { getProviderPreset } from "./well-known.ts";
+import { ALL_AUTH_METHODS, getProviderPreset } from "./well-known.ts";
 
 const DYNAMIC_API_KEY_PLACEHOLDER = "UNIFY_DYNAMIC_AUTH";
 
@@ -107,7 +108,9 @@ function toRuntimeProviderConfig(
 		api: provider.api,
 		authHeader: false,
 		headers: auth.headers,
-		models: provider.models.map((m) => toProviderModelConfig(provider, m)),
+		models: provider.models
+			.filter((m) => m.enabled !== false)
+			.map((m) => toProviderModelConfig(provider, m)),
 	};
 }
 
@@ -122,24 +125,7 @@ async function registerConfiguredProviders(
 	const providers = [...store.getProviders()];
 	verboseLog("runtime", "registerConfiguredProviders start", { providerCount: providers.length });
 	for (const provider of providers) {
-		const preset = getProviderPreset(provider.type);
 		const auth = await resolveProviderAuth(provider, secrets);
-
-		if (provider.autoFetchOfficialModels && preset) {
-			try {
-				const nextModels = await fetcher.fetchProviderModels({
-					provider,
-					preset,
-					resolvedAuth: auth,
-				});
-				if (nextModels.length > 0) {
-					provider.models = nextModels;
-					store.upsertProvider({ ...provider, updatedAt: Date.now() });
-				}
-			} catch (error) {
-				console.error(`[unify] failed to fetch official models for ${provider.name}:`, error);
-			}
-		}
 
 		pi.registerProvider(provider.name, toRuntimeProviderConfig(provider, auth));
 		bindings.push(createAuthBinding(provider, auth));
@@ -165,11 +151,29 @@ export default function registerExtension(pi: ExtensionAPI): void {
 		const provider = store.getProvider(providerName);
 		if (!provider) return [];
 		const preset = getProviderPreset(provider.type);
-		if (!preset) return [];
+		const basePath = (() => {
+			try {
+				return new URL(provider.baseUrl).pathname;
+			} catch {
+				return "/";
+			}
+		})();
+		const effectivePreset: WellKnownProviderPreset =
+			preset ?? {
+				id: "custom",
+				name: provider.name,
+				category: "Custom",
+				description: "Fallback official model discovery",
+				baseUrl: provider.baseUrl,
+				api: provider.api,
+				supportedAuth: ALL_AUTH_METHODS,
+				defaultAuth: provider.auth.method,
+				officialModelsEndpoint: basePath === "/" ? "/v1/models" : "/models",
+			};
 		const auth = await resolveProviderAuth(provider, secrets);
 		const models = await fetcher.fetchProviderModels({
 			provider: { ...provider, models: [] },
-			preset,
+			preset: effectivePreset,
 			resolvedAuth: auth,
 		});
 		verboseLog("runtime", "fetchOfficialModels done", {

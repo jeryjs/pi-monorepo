@@ -1,5 +1,6 @@
 import type { Api } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { ConfigStore } from "./config-store.ts";
 import { verboseLog } from "./debug.ts";
 import { SecretStore } from "./secret-store.ts";
@@ -11,12 +12,6 @@ import {
 	type UnifyModelConfig,
 } from "./types.ts";
 import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
-import {
-	ModelManagerComponent,
-	type DashboardAction,
-	type ModelManagerAction,
-	UnifyDashboardComponent,
-} from "./ui.ts";
 
 interface RegisterCommandsInput {
 	pi: ExtensionAPI;
@@ -35,9 +30,64 @@ const API_OPTIONS: Api[] = [
 ];
 
 function dedupeModels(models: UnifyModelConfig[]): UnifyModelConfig[] {
-	const byId = new Map<string, UnifyModelConfig>();
-	for (const model of models) byId.set(model.id, model);
-	return [...byId.values()];
+	const byUid = new Map<string, UnifyModelConfig>();
+	for (const input of models) {
+		const model = ensureModelIdentity(input);
+		byUid.set(model.uid!, model);
+	}
+	return [...byUid.values()];
+}
+
+function ensureModelIdentity(model: UnifyModelConfig, source: "user" | "official" = "user"): UnifyModelConfig {
+	return {
+		...model,
+		uid: model.uid ?? randomUUID(),
+		source: model.source ?? source,
+		enabled: model.enabled ?? (source === "user"),
+	};
+}
+
+function buildModelUniverse(
+	selectedModels: UnifyModelConfig[],
+	officialModels: UnifyModelConfig[],
+): UnifyModelConfig[] {
+	const selected = selectedModels.map((m) => ensureModelIdentity(m, "user"));
+	const selectedById = new Set(selected.map((m) => m.id));
+	const remainingOfficial = officialModels
+		.filter((m) => !selectedById.has(m.id))
+		.map((m) => ensureModelIdentity({ ...m, enabled: false }, "official"));
+
+	return [...selected, ...remainingOfficial];
+}
+
+function sortModelsForAllTab(models: UnifyModelConfig[]): UnifyModelConfig[] {
+	return [...models].sort((a, b) => {
+		const aEnabled = a.enabled ? 1 : 0;
+		const bEnabled = b.enabled ? 1 : 0;
+		if (aEnabled !== bEnabled) return bEnabled - aEnabled;
+
+		const aUser = a.source === "user" ? 1 : 0;
+		const bUser = b.source === "user" ? 1 : 0;
+		if (aUser !== bUser) return bUser - aUser;
+
+		return a.id.localeCompare(b.id);
+	});
+}
+
+function addOrEnableModelById(
+	models: UnifyModelConfig[],
+	candidate: UnifyModelConfig,
+): UnifyModelConfig[] {
+	const target = ensureModelIdentity({ ...candidate, source: "user", enabled: true }, "user");
+	const existing = models.find((m) => m.id === target.id);
+	if (!existing) {
+		return dedupeModels([...models, target]);
+	}
+	return dedupeModels(models.map((m) =>
+		m.uid === existing.uid
+			? ensureModelIdentity({ ...m, enabled: true, source: "user" }, "user")
+			: m,
+	));
 }
 
 function generateUniqueProviderName(baseName: string, store: ConfigStore): string {
@@ -292,21 +342,6 @@ async function promptAuthConfig(
 	}
 }
 
-async function promptModels(
-	ctx: ExtensionCommandContext,
-	current: UnifyModelConfig[],
-): Promise<UnifyModelConfig[] | undefined> {
-	const prefill = current.map((m) => m.id).join("\n");
-	const edited = await ctx.ui.editor("Model IDs (one per line)", prefill);
-	if (edited === undefined) return undefined;
-	const ids = edited
-		.split(/\r?\n|,/g)
-		.map((value) => value.trim())
-		.filter(Boolean);
-	const byId = new Map(current.map((m) => [m.id, m]));
-	return dedupeModels(ids.map((id) => byId.get(id) ?? { id }));
-}
-
 async function runAddProviderFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
@@ -365,11 +400,10 @@ async function runAddProviderFlow(
 		baseUrl,
 		api,
 		auth,
-		models: dedupeModels(preset.hardcodedModels ?? []),
+		models: [],
 		extraHeaders: preset.extraHeaders,
 		extraQuery: preset.extraQuery,
 		extraBody: preset.extraBody,
-		autoFetchOfficialModels: !!preset.officialModelsEndpoint,
 		updatedAt: Date.now(),
 	};
 
@@ -397,7 +431,6 @@ async function runEditProviderFlow(
 			`Name: ${provider.name}`,
 			`Base URL: ${provider.baseUrl}`,
 			`API: ${provider.api}`,
-			`Auto-fetch official models: ${provider.autoFetchOfficialModels ? "on" : "off"}`,
 			"Done",
 		]);
 
@@ -433,10 +466,6 @@ async function runEditProviderFlow(
 			continue;
 		}
 
-		if (choice.startsWith("Auto-fetch official models:")) {
-			provider.autoFetchOfficialModels = !provider.autoFetchOfficialModels;
-			changed = true;
-		}
 	}
 
 	if (!changed) return false;
@@ -446,7 +475,6 @@ async function runEditProviderFlow(
 		name: provider.name,
 		baseUrl: provider.baseUrl,
 		api: provider.api,
-		autoFetchOfficialModels: provider.autoFetchOfficialModels,
 	});
 	return true;
 }
@@ -480,16 +508,16 @@ async function runModelsEditFlow(
 	const provider = store.getProvider(providerName);
 	if (!provider) return false;
 
-	const editModelFields = async (
-		model: UnifyModelConfig,
-	): Promise<UnifyModelConfig | "delete" | undefined> => {
+	const editModelFields = async (model: UnifyModelConfig): Promise<UnifyModelConfig | "delete" | undefined> => {
 		const next: UnifyModelConfig = {
-			...model,
+			...ensureModelIdentity(model, model.source ?? "user"),
+			source: "user",
 			capabilities: { ...(model.capabilities ?? {}) },
 		};
 
 		while (true) {
 			const choice = await ctx.ui.select(`Edit model: ${next.id}`, [
+				`Enabled: ${next.enabled ? "on" : "off"}`,
 				`ID: ${next.id}`,
 				`Name: ${next.name ?? "(none)"}`,
 				`Family: ${next.family ?? "(none)"}`,
@@ -505,30 +533,28 @@ async function runModelsEditFlow(
 			if (!choice || choice === "Done") return next;
 			if (choice === "Delete model") return "delete";
 
+			if (choice.startsWith("Enabled:")) {
+				next.enabled = !next.enabled;
+				continue;
+			}
 			if (choice.startsWith("ID:")) {
 				const id = await ctx.ui.input("Model ID", next.id);
 				if (!id) continue;
 				next.id = id.trim();
 				continue;
 			}
-
 			if (choice.startsWith("Name:")) {
-				const name = await ctx.ui.input("Model name", next.name);
+				const name = await ctx.ui.input("Model name", next.name ?? "");
 				next.name = name?.trim() || undefined;
 				continue;
 			}
-
 			if (choice.startsWith("Family:")) {
-				const family = await ctx.ui.input("Model family", next.family);
+				const family = await ctx.ui.input("Model family", next.family ?? "");
 				next.family = family?.trim() || undefined;
 				continue;
 			}
-
 			if (choice.startsWith("Context Window:")) {
-				const value = await ctx.ui.input(
-					"Context window tokens",
-					next.contextWindow !== undefined ? String(next.contextWindow) : "",
-				);
+				const value = await ctx.ui.input("Context window tokens", next.contextWindow !== undefined ? String(next.contextWindow) : "");
 				if (!value) {
 					next.contextWindow = undefined;
 					continue;
@@ -537,12 +563,8 @@ async function runModelsEditFlow(
 				if (Number.isFinite(parsed) && parsed > 0) next.contextWindow = parsed;
 				continue;
 			}
-
 			if (choice.startsWith("Max Tokens:")) {
-				const value = await ctx.ui.input(
-					"Max output tokens",
-					next.maxTokens !== undefined ? String(next.maxTokens) : "",
-				);
+				const value = await ctx.ui.input("Max output tokens", next.maxTokens !== undefined ? String(next.maxTokens) : "");
 				if (!value) {
 					next.maxTokens = undefined;
 					continue;
@@ -551,85 +573,112 @@ async function runModelsEditFlow(
 				if (Number.isFinite(parsed) && parsed > 0) next.maxTokens = parsed;
 				continue;
 			}
-
 			if (choice.startsWith("Tool Calling:")) {
-				next.capabilities = {
-					...(next.capabilities ?? {}),
-					toolCalling: !next.capabilities?.toolCalling,
-				};
+				next.capabilities = { ...(next.capabilities ?? {}), toolCalling: !next.capabilities?.toolCalling };
 				continue;
 			}
-
 			if (choice.startsWith("Image Input:")) {
-				next.capabilities = {
-					...(next.capabilities ?? {}),
-					imageInput: !next.capabilities?.imageInput,
-				};
+				next.capabilities = { ...(next.capabilities ?? {}), imageInput: !next.capabilities?.imageInput };
 				continue;
 			}
-
 			if (choice.startsWith("Reasoning:")) {
-				next.capabilities = {
-					...(next.capabilities ?? {}),
-					reasoning: !next.capabilities?.reasoning,
-				};
+				next.capabilities = { ...(next.capabilities ?? {}), reasoning: !next.capabilities?.reasoning };
 			}
 		}
 	};
 
-	let working = dedupeModels([...provider.models]);
+	let working = dedupeModels(provider.models.map((m) => ensureModelIdentity(m, "user")));
+	let cachedOfficial = await fetchOfficialModels(providerName);
+	let fetchStatus = `fetched ${cachedOfficial.length} model(s)`;
+	let view: "enabled" | "all" = "enabled";
+	let filter = "";
 
 	while (true) {
-		const official = await fetchOfficialModels(providerName);
-		const allModels = dedupeModels([...official, ...working]);
-		const action = await ctx.ui.custom<ModelManagerAction>(
-			(_tui, theme, _kb, done) => new ModelManagerComponent(theme, allModels, working, done),
-			{ overlay: true, overlayOptions: { anchor: "center", width: 110, maxHeight: "85%" } },
-		);
+		const universe = sortModelsForAllTab(buildModelUniverse(working, cachedOfficial));
+		const visible = view === "enabled"
+			? universe.filter((m) => m.source === "user" && m.enabled !== false)
+			: universe;
+		const filtered = filter
+			? visible.filter((m) => `${m.id} ${m.name ?? ""}`.toLowerCase().includes(filter.toLowerCase()))
+			: visible;
 
-		if (!action || action.kind === "cancel") {
-			return false;
+		const modelOptionMap = new Map<string, UnifyModelConfig>();
+		const options: string[] = [
+			`Switch view (current: ${view})`,
+			`Search filter: ${filter || "(none)"}`,
+			`Fetch official models list (${fetchStatus})`,
+			"Add new model",
+			"Save model changes (Ctrl+S)",
+			"Back without saving",
+		];
+		for (const model of filtered) {
+			const enabled = model.enabled ? "[x]" : "[ ]";
+			const source = model.source === "user" ? "user" : "official";
+			const label = `${enabled} ${model.id} (${source}) • ${model.uid?.slice(0, 8) ?? "new"}`;
+			options.push(label);
+			modelOptionMap.set(label, model);
 		}
 
-		if (action.kind === "save") {
-			provider.models = dedupeModels(action.models);
-			provider.updatedAt = Date.now();
-			store.upsertProvider(provider);
-			verboseLog("commands", "models saved", {
-				provider: provider.name,
-				modelCount: provider.models.length,
-			});
-			return true;
-		}
+		const choice = await ctx.ui.select(`Models: ${providerName}`, options);
+		if (!choice || choice === "Back without saving") return false;
 
-		if (action.kind === "add-custom") {
+		if (choice.startsWith("Switch view")) {
+			view = view === "enabled" ? "all" : "enabled";
+			continue;
+		}
+		if (choice.startsWith("Search filter:")) {
+			const value = await ctx.ui.input("Model search filter", filter);
+			filter = value?.trim() ?? "";
+			continue;
+		}
+		if (choice.startsWith("Fetch official models list")) {
+			fetchStatus = "fetching...";
+			cachedOfficial = await fetchOfficialModels(providerName);
+			fetchStatus = `fetched ${cachedOfficial.length} model(s)`;
+			ctx.ui.notify(fetchStatus, "info");
+			continue;
+		}
+		if (choice === "Add new model") {
 			const id = await ctx.ui.input("New model ID", "");
 			if (!id) continue;
 			const name = await ctx.ui.input("Model name (optional)", "");
 			working = dedupeModels([
 				...working,
-				{
+				ensureModelIdentity({
 					id: id.trim(),
 					name: name?.trim() || undefined,
-				},
+					source: "user",
+					enabled: true,
+				}, "user"),
 			]);
 			continue;
 		}
-
-		if (action.kind === "edit-model") {
-			const existing = working.find((m) => m.id === action.modelId);
-			if (!existing) continue;
-			const edited = await editModelFields(existing);
-			if (!edited) continue;
-			if (edited === "delete") {
-				working = working.filter((m) => m.id !== action.modelId);
-				continue;
-			}
-			working = dedupeModels([
-				...working.filter((m) => m.id !== action.modelId),
-				edited,
-			]);
+		if (choice === "Save model changes (Ctrl+S)") {
+			provider.models = dedupeModels(working.map((m) => ensureModelIdentity({ ...m, source: "user" }, "user")));
+			provider.updatedAt = Date.now();
+			store.upsertProvider(provider);
+			verboseLog("commands", "models saved", { provider: provider.name, modelCount: provider.models.length });
+			return true;
 		}
+
+		const selectedModel = modelOptionMap.get(choice);
+		if (!selectedModel) continue;
+
+		const existing = working.find((m) => m.uid === selectedModel.uid || m.id === selectedModel.id);
+		const materialized = existing
+			? ensureModelIdentity(existing, "user")
+			: ensureModelIdentity({ ...selectedModel, source: "user", enabled: false }, "user");
+
+		const edited = await editModelFields(materialized);
+		if (!edited) continue;
+		if (edited === "delete") {
+			working = working.filter((m) => m.uid !== materialized.uid);
+			continue;
+		}
+		working = dedupeModels([
+			...working.filter((m) => m.uid !== materialized.uid),
+			ensureModelIdentity({ ...edited, source: "user" }, "user"),
+		]);
 	}
 }
 
@@ -666,11 +715,18 @@ async function runOfficialModelsFlow(
 	if (!selected) return false;
 
 	if (selected === addAllLabel) {
-		provider.models = dedupeModels([...provider.models, ...officialModels]);
+		let nextModels = dedupeModels(provider.models.map((model) => ensureModelIdentity(model, "user")));
+		for (const model of officialModels) {
+			nextModels = addOrEnableModelById(nextModels, model);
+		}
+		provider.models = nextModels;
 	} else {
 		const modelId = selected.replace(" (already added)", "");
 		const model = officialModels.find((m) => m.id === modelId) ?? { id: modelId };
-		provider.models = dedupeModels([...provider.models, model]);
+		provider.models = addOrEnableModelById(
+			dedupeModels(provider.models.map((item) => ensureModelIdentity(item, "user"))),
+			model,
+		);
 	}
 
 	provider.updatedAt = Date.now();
@@ -707,83 +763,107 @@ async function runDashboard(
 	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>,
 ): Promise<void> {
 	if (!ctx.hasUI) return;
+
+	const providerMenu = async (providerName: string): Promise<void> => {
+		let fetchLabel = "not fetched";
+		while (true) {
+			const provider = store.getProvider(providerName);
+			if (!provider) return;
+			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
+
+			const choice = await ctx.ui.select(`Provider: ${provider.name}`, [
+				"Provider settings",
+				"Authentication",
+				"Add new model",
+				"Add from official models",
+				`Fetch official models list (${fetchLabel})`,
+				`Enabled models (${enabledCount})`,
+				"Back",
+			]);
+
+			if (!choice || choice === "Back") return;
+
+			if (choice === "Provider settings") {
+				const changed = await runEditProviderFlow(ctx, store, provider.name);
+				if (changed) await refreshProviders();
+				continue;
+			}
+			if (choice === "Authentication") {
+				const changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
+				if (changed) await refreshProviders();
+				continue;
+			}
+			if (choice === "Add new model") {
+				const id = await ctx.ui.input("New model ID", "");
+				if (!id) continue;
+				const name = await ctx.ui.input("Model name (optional)", "");
+				provider.models = dedupeModels([
+					...provider.models,
+					ensureModelIdentity({ id: id.trim(), name: name?.trim() || undefined, source: "user", enabled: true }, "user"),
+				]);
+				provider.updatedAt = Date.now();
+				store.upsertProvider(provider);
+				await refreshProviders();
+				continue;
+			}
+			if (choice === "Add from official models") {
+				const changed = await runOfficialModelsFlow(ctx, store, provider.name, fetchOfficialModels);
+				if (changed) await refreshProviders();
+				continue;
+			}
+			if (choice.startsWith("Fetch official models list")) {
+				fetchLabel = "fetching...";
+				const models = await fetchOfficialModels(provider.name);
+				fetchLabel = `fetched ${models.length} model(s)`;
+				ctx.ui.notify(fetchLabel, "info");
+				continue;
+			}
+			if (choice.startsWith("Enabled models")) {
+				const changed = await runModelsEditFlow(ctx, store, provider.name, fetchOfficialModels);
+				if (changed) await refreshProviders();
+			}
+		}
+	};
+
 	while (true) {
 		const providers = [...store.getProviders()].sort((a, b) => a.name.localeCompare(b.name));
-		const action = await ctx.ui.custom<DashboardAction>(
-			(_tui, theme, _kb, done) => new UnifyDashboardComponent(theme, providers, done),
-			{ overlay: true, overlayOptions: { anchor: "center", width: 98, maxHeight: "85%" } },
-		);
-		if (!action || action.kind === "close") {
-			return;
-		}
-		switch (action.kind) {
-			case "add": {
-				const added = await runAddProviderFlow(ctx, store, secrets);
-				if (added) {
-					await refreshProviders();
-					ctx.ui.notify(`Added provider: ${added.name}`, "info");
-				}
-				break;
-			}
-			case "refresh": {
+		const choice = await ctx.ui.select("Unify Provider Manager", [
+			"Add provider",
+			"Refresh provider registrations",
+			"Import providers",
+			"Export providers",
+			...providers.map((provider) => {
+				const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
+				return `${provider.name} (${provider.type}) • enabled ${enabledCount}/${provider.models.length}`;
+			}),
+			"Close",
+		]);
+
+		if (!choice || choice === "Close") return;
+		if (choice === "Add provider") {
+			const added = await runAddProviderFlow(ctx, store, secrets);
+			if (added) {
 				await refreshProviders();
-				ctx.ui.notify("Providers refreshed.", "info");
-				break;
+				ctx.ui.notify(`Added provider: ${added.name}`, "info");
 			}
-			case "delete": {
-				const ok = await ctx.ui.confirm(
-					"Delete provider",
-					`Delete provider '${action.providerName}'?`,
-				);
-				if (!ok) break;
-				store.removeProvider(action.providerName);
-				await refreshProviders();
-				ctx.ui.notify(`Deleted provider: ${action.providerName}`, "warning");
-				break;
-			}
-			case "edit": {
-				const changed = await runEditProviderFlow(ctx, store, action.providerName);
-				if (changed) {
-					await refreshProviders();
-					ctx.ui.notify(`Updated provider: ${action.providerName}`, "info");
-				}
-				break;
-			}
-			case "auth": {
-				const changed = await runAuthEditFlow(ctx, store, secrets, action.providerName);
-				if (changed) {
-					await refreshProviders();
-					ctx.ui.notify(`Updated auth for: ${action.providerName}`, "info");
-				}
-				break;
-			}
-			case "models": {
-				const changed = await runModelsEditFlow(
-					ctx,
-					store,
-					action.providerName,
-					fetchOfficialModels,
-				);
-				if (changed) {
-					await refreshProviders();
-					ctx.ui.notify(`Updated models for: ${action.providerName}`, "info");
-				}
-				break;
-			}
-			case "official-models": {
-				const changed = await runOfficialModelsFlow(
-					ctx,
-					store,
-					action.providerName,
-					fetchOfficialModels,
-				);
-				if (changed) {
-					await refreshProviders();
-					ctx.ui.notify(`Updated models for: ${action.providerName}`, "info");
-				}
-				break;
-			}
+			continue;
 		}
+		if (choice === "Refresh provider registrations") {
+			await refreshProviders();
+			ctx.ui.notify("Providers refreshed.", "info");
+			continue;
+		}
+		if (choice === "Import providers") {
+			await runImport(ctx, store, refreshProviders, "");
+			continue;
+		}
+		if (choice === "Export providers") {
+			await runExport(ctx, store);
+			continue;
+		}
+
+		const providerName = choice.split(" (")[0]!.trim();
+		await providerMenu(providerName);
 	}
 }
 
@@ -807,11 +887,12 @@ function normalizeImportedProviders(raw: unknown): ProviderConfigRecord[] {
 			baseUrl: provider.baseUrl,
 			api: provider.api,
 			auth: provider.auth,
-			models: Array.isArray(provider.models) ? provider.models : [],
+			models: Array.isArray(provider.models)
+				? provider.models.map((model) => ensureModelIdentity(model as UnifyModelConfig, "user"))
+				: [],
 			extraHeaders: provider.extraHeaders,
 			extraQuery: provider.extraQuery,
 			extraBody: provider.extraBody,
-			autoFetchOfficialModels: provider.autoFetchOfficialModels,
 			updatedAt: Date.now(),
 		});
 	}
