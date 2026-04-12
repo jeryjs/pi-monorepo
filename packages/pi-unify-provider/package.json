@@ -1,0 +1,14 @@
+{
+  "name": "pi-unify-provider",
+  "version": "0.1.0",
+  "description": "Multi-provider LLM management for Pi with automatic model discovery",
+  "keywords": ["pi-extension", "pi-package", "llm", "openai", "anthropic", "unify"],
+  "license": "MIT",
+  "author": "User",
+  "dependencies": {},
+  "pi": {
+    "extensions": ["./src/extension.ts"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}
