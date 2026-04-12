@@ -1,7 +1,7 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import type { Component } from "@mariozechner/pi-tui";
 import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import type { ProviderConfigRecord } from "./types.js";
+import type { ProviderConfigRecord } from "./types.ts";
 
 export type DashboardAction =
 	| { kind: "close" }
@@ -18,12 +18,19 @@ function row(content: string, width: number): string {
 
 export class UnifyDashboardComponent implements Component {
 	private cursor = 0;
+	private readonly theme: Theme;
+	private readonly providers: ProviderConfigRecord[];
+	private readonly done: (action: DashboardAction) => void;
 
 	constructor(
-		private readonly theme: Theme,
-		private readonly providers: ProviderConfigRecord[],
-		private readonly done: (action: DashboardAction) => void,
-	) {}
+		theme: Theme,
+		providers: ProviderConfigRecord[],
+		done: (action: DashboardAction) => void,
+	) {
+		this.theme = theme;
+		this.providers = providers;
+		this.done = done;
+	}
 
 	handleInput(data: string): void {
 		if (matchesKey(data, "escape") || data === "q") {

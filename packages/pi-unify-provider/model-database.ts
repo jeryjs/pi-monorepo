@@ -1,4 +1,4 @@
-import type { UnifyModelConfig } from "./types.js";
+import type { UnifyModelConfig } from "./types.ts";
 
 export interface ModelMetadata {
 	contextWindow?: number;

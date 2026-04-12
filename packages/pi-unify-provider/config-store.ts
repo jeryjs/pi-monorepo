@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { ExtensionDatabase, ProviderConfigRecord } from "./types.js";
+import type { ExtensionDatabase, ProviderConfigRecord } from "./types.ts";
 
 const DB_PATH = join(homedir(), ".pi", "agent", "unify-providers-db.json");
 
@@ -34,7 +34,11 @@ function writeDb(filePath: string, db: ExtensionDatabase): void {
 }
 
 export class ConfigStore {
-	constructor(private readonly filePath = DB_PATH) {}
+	private readonly filePath: string;
+
+	constructor(filePath = DB_PATH) {
+		this.filePath = filePath;
+	}
 
 	get path(): string {
 		return this.filePath;

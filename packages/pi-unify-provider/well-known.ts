@@ -1,4 +1,4 @@
-import type { WellKnownProviderPreset } from "./types.js";
+import type { WellKnownProviderPreset } from "./types.ts";
 
 export const ALL_AUTH_METHODS: WellKnownProviderPreset["supportedAuth"] = [
 	"none",

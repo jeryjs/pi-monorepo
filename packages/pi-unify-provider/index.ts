@@ -2,19 +2,19 @@ import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@marioze
 import {
 	applyResolvedAuthToPayload,
 	resolveProviderAuth,
-} from "./auth.js";
-import { registerCommands } from "./commands.js";
-import { ConfigStore } from "./config-store.js";
-import { OfficialModelsFetcher } from "./fetcher.js";
-import { SecretStore } from "./secret-store.js";
+} from "./auth.ts";
+import { registerCommands } from "./commands.ts";
+import { ConfigStore } from "./config-store.ts";
+import { OfficialModelsFetcher } from "./fetcher.ts";
+import { SecretStore } from "./secret-store.ts";
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_MAX_TOKENS,
 	type ProviderConfigRecord,
 	type ResolvedAuth,
 	type UnifyModelConfig,
-} from "./types.js";
-import { getProviderPreset } from "./well-known.js";
+} from "./types.ts";
+import { getProviderPreset } from "./well-known.ts";
 
 interface ProviderAuthBinding {
 	name: string;

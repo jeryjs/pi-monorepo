@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { OAuth2TokenData, SecretsDatabase } from "./types.js";
+import type { OAuth2TokenData, SecretsDatabase } from "./types.ts";
 
 export const SECRET_REF_PREFIX = "$UPSECRET:";
 export const SECRET_REF_SUFFIX = "$";
@@ -53,7 +53,11 @@ export function createSecretRef(): string {
 }
 
 export class SecretStore {
-	constructor(private readonly filePath = SECRETS_PATH) {}
+	private readonly filePath: string;
+
+	constructor(filePath = SECRETS_PATH) {
+		this.filePath = filePath;
+	}
 
 	private load(): SecretsDatabase {
 		return readSecrets(this.filePath);

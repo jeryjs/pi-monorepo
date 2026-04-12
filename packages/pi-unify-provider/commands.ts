@@ -1,14 +1,14 @@
 import type { Api } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { ConfigStore } from "./config-store.js";
+import { ConfigStore } from "./config-store.ts";
 import {
 	type AuthConfig,
 	type AuthMethod,
 	type ProviderConfigRecord,
 	type UnifyModelConfig,
-} from "./types.js";
-import { WELL_KNOWN_PROVIDERS } from "./well-known.js";
-import { UnifyDashboardComponent, type DashboardAction } from "./ui.js";
+} from "./types.ts";
+import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
+import { UnifyDashboardComponent, type DashboardAction } from "./ui.ts";
 
 interface RegisterCommandsInput {
 	pi: ExtensionAPI;

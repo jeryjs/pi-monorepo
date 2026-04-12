@@ -6,8 +6,8 @@ import type {
 	OAuthDeviceCodeAuthConfig,
 	ProviderConfigRecord,
 	ResolvedAuth,
-} from "./types.js";
-import { isSecretRef, type SecretStore } from "./secret-store.js";
+} from "./types.ts";
+import { isSecretRef, type SecretStore } from "./secret-store.ts";
 
 const EXPIRY_BUFFER_MS = 60_000;
 

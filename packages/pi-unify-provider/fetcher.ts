@@ -1,11 +1,11 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { withModelMetadata } from "./model-database.js";
+import { withModelMetadata } from "./model-database.ts";
 import type {
 	ProviderConfigRecord,
 	ResolvedAuth,
 	UnifyModelConfig,
 	WellKnownProviderPreset,
-} from "./types.js";
+} from "./types.ts";
 
 export interface FetcherOptions {
 	retries?: number;
