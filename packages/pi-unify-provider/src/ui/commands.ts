@@ -9,6 +9,27 @@ import type { OfficialModelsFetcher } from "../providers/fetcher.js";
 import { WELL_KNOWN_PROVIDERS, getAllWellKnownProviders } from "../providers/well-known.js";
 import { AuthManager } from "../utils/auth.js";
 
+interface SelectItem<T extends string> {
+  label: string;
+  value: T;
+  detail?: string;
+}
+
+async function selectValue<T extends string>(
+  ctx: ExtensionContext,
+  title: string,
+  items: Array<SelectItem<T>>
+): Promise<T | undefined> {
+  const options = items.map((item) =>
+    item.detail ? `${item.label} — ${item.detail}` : item.label
+  );
+  const selected = await ctx.ui.select(title, options);
+  if (!selected) return undefined;
+
+  const index = options.indexOf(selected);
+  return index >= 0 ? items[index].value : undefined;
+}
+
 // ============================================================================
 // Main Dashboard
 // ============================================================================
@@ -20,23 +41,20 @@ export async function showProviderDashboard(
   const providers = configStore.getAllProviders();
 
   if (providers.length === 0) {
-    const choice = await ctx.ui.quickPick({
-      title: "Unify Provider - No Providers Configured",
-      items: [
-        { label: "📥 Add your first provider", value: "add", detail: "Set up a new LLM provider" },
-        { label: "❓ Learn more", value: "help", detail: "Open documentation" },
-      ],
-    });
+    const choice = await selectValue(ctx, "Unify Provider - No Providers Configured", [
+      { label: "📥 Add your first provider", value: "add", detail: "Set up a new LLM provider" },
+      { label: "❓ Learn more", value: "help", detail: "Open documentation" },
+    ]);
 
     if (choice === "add") {
-      // This would redirect to showAddProviderFlow, but we need ExtensionAPI
       ctx.ui.notify("Run /unify-add to add a provider", "info");
+    } else if (choice === "help") {
+      ctx.ui.notify("Use /unify-add to configure providers and /unify-refresh to fetch official models.", "info");
     }
     return;
   }
 
-  // Build provider list
-  const items = providers.map((p) => {
+  const items: Array<SelectItem<string>> = providers.map((p) => {
     const wellKnown = WELL_KNOWN_PROVIDERS[p.type];
     const status = p.lastFetchError
       ? "⚠️ Error"
@@ -58,10 +76,11 @@ export async function showProviderDashboard(
     detail: "Configure another provider",
   });
 
-  const choice = await ctx.ui.quickPick({
-    title: `Unify Provider Dashboard (${providers.length} configured)`,
-    items,
-  });
+  const choice = await selectValue(
+    ctx,
+    `Unify Provider Dashboard (${providers.length} configured)`,
+    items
+  );
 
   if (choice === "__add__") {
     ctx.ui.notify("Run /unify-add to add a provider", "info");
@@ -81,15 +100,15 @@ export async function showAddProviderFlow(
 ): Promise<void> {
   // Step 1: Choose provider type
   const wellKnown = getAllWellKnownProviders();
-  const providerChoice = await ctx.ui.quickPick({
-    title: "Unify Provider - Add Provider",
-    items: wellKnown.map((p) => ({
+  const providerChoice = await selectValue<keyof typeof WELL_KNOWN_PROVIDERS>(
+    ctx,
+    "Unify Provider - Add Provider",
+    wellKnown.map((p) => ({
       label: `${p.displayName}`,
       value: p.type,
       detail: `${p.description} (${p.authType === "oauth" ? "OAuth" : "API Key"})`,
     })),
-    placeholder: "Select a provider type...",
-  });
+  );
 
   if (!providerChoice) return;
 
@@ -107,16 +126,16 @@ export async function showAddProviderFlow(
   ctx.ui.notify(`Configuring ${providerDef.displayName}...`, "info");
 
   if (providerDef.authType === "api_key" || providerDef.authType === "both") {
-    const useApiKey = await ctx.ui.confirm({
-      message: "Use API Key authentication?",
-      details: "Recommended for server-to-server use",
-    });
+    const useApiKey = await ctx.ui.confirm(
+      "Authentication",
+      "Use API Key authentication? Recommended for server-to-server use."
+    );
 
     if (useApiKey) {
-      const envVar = await ctx.ui.input({
-        title: "API Key Environment Variable",
-        placeholder: `${providerChoice.toUpperCase()}_API_KEY`,
-      });
+      const envVar = await ctx.ui.input(
+        "API Key Environment Variable",
+        `${providerChoice.toUpperCase()}_API_KEY`
+      );
 
       config.auth = {
         type: "api_key",
@@ -126,10 +145,10 @@ export async function showAddProviderFlow(
       } as AuthConfig;
 
       // For testing: allow direct input (for development only)
-      const testKey = await ctx.ui.input({
-        title: "Test API Key (optional, for verification)",
-        placeholder: "sk-... (or leave empty to configure manually)",
-      });
+      const testKey = await ctx.ui.input(
+        "Test API Key (optional, for verification)",
+        "sk-... (or leave empty to configure manually)"
+      );
 
       if (testKey) {
         const authManager = new AuthManager();
@@ -154,18 +173,17 @@ export async function showAddProviderFlow(
   }
 
   // Step 4: Auto-fetch settings
-  const enableAutoFetch = await ctx.ui.confirm({
-    message: "Enable automatic model fetching?",
-    details: "Periodically fetch official model list from provider",
-    default: true,
-  });
+  const enableAutoFetch = await ctx.ui.confirm(
+    "Auto-Fetch Official Models",
+    "Enable automatic official model fetching for this provider?"
+  );
   config.autoFetchOfficialModels = enableAutoFetch;
 
   // Step 5: Provider name
-  const customName = await ctx.ui.input({
-    title: "Provider Name (optional)",
-    placeholder: providerDef.displayName,
-  });
+  const customName = await ctx.ui.input(
+    "Provider Name (optional)",
+    providerDef.displayName
+  );
   config.name = customName || providerDef.displayName;
 
   // Save provider
@@ -197,7 +215,7 @@ export async function showAddProviderFlow(
 
     ctx.ui.notify(
       `✅ Provider "${fullConfig.name}" added and registered. Models will appear in /model once fetched.`,
-      "success"
+      "info"
     );
   } catch (error) {
     ctx.ui.notify(`Provider saved but registration failed: ${error}`, "warning");
@@ -224,10 +242,7 @@ async function showProviderDetails(
     { label: "⬅️ Back", value: "back" },
   ];
 
-  const choice = await ctx.ui.quickPick({
-    title: `${providerName} - Options`,
-    items,
-  });
+  const choice = await selectValue(ctx, `${providerName} - Options`, items);
 
   switch (choice) {
     case "refresh":
@@ -243,10 +258,10 @@ async function showProviderDetails(
       ctx.ui.notify(`Auto-fetch ${provider.autoFetchOfficialModels ? "enabled" : "disabled"}`, "info");
       break;
     case "delete":
-      const confirm = await ctx.ui.confirm({
-        message: `Delete provider "${providerName}"?`,
-        details: "This cannot be undone",
-      });
+      const confirm = await ctx.ui.confirm(
+        "Delete Provider",
+        `Delete provider "${providerName}"? This cannot be undone.`
+      );
       if (confirm) {
         configStore.deleteProvider(providerName);
         ctx.ui.notify(`Provider "${providerName}" deleted`, "info");
@@ -282,7 +297,7 @@ export async function showModelsList(
     for (const model of provider.models) {
       const capabilities = [];
       if (model.capabilities?.toolCalling) capabilities.push("🔧");
-      if (model.capabilities?.vision) capabilities.push("👁️");
+      if (model.capabilities?.imageInput) capabilities.push("👁️");
       if (model.capabilities?.reasoning) capabilities.push("🧠");
 
       const costStr = model.cost
@@ -302,13 +317,13 @@ export async function showModelsList(
     return;
   }
 
-  const choice = await ctx.ui.quickPick({
-    title: providerName
+  const choice = await selectValue(
+    ctx,
+    providerName
       ? `Models for ${providerName} (${items.length})`
       : `All Provider Models (${items.length})`,
-    items,
-    placeholder: "Select a model to use...",
-  });
+    items
+  );
 
   if (choice) {
     ctx.ui.notify(`Model selected: ${choice}. Use /model to view all available models.`, "info");
@@ -321,7 +336,7 @@ export async function showModelsList(
 
 export async function refreshAllProviders(
   fetcher: OfficialModelsFetcher,
-  configStore: ConfigStore,
+  _configStore: ConfigStore,
   ctx: ExtensionContext
 ): Promise<void> {
   ctx.ui.notify("🔄 Fetching official model lists from all providers...", "info");
@@ -330,7 +345,7 @@ export async function refreshAllProviders(
 
   if (results.refreshed > 0) {
     ctx.ui.notify(`✅ Refreshed ${results.refreshed} provider(s). ${results.failed > 0 ? `${results.failed} failed.` : ""}`,
-      results.failed > 0 ? "warning" : "success"
+      results.failed > 0 ? "warning" : "info"
     );
   } else if (results.failed > 0) {
     ctx.ui.notify(`⚠️ All ${results.failed} refresh(es) failed. Check /unify-providers for errors.`, "error");

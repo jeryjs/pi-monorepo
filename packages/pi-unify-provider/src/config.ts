@@ -48,7 +48,7 @@ export interface UnifyModelConfig {
   capabilities?: ModelCapabilities;
   cost?: ModelCost;
   tokenizer?: string;
- temperature?: number;
+  temperature?: number;
   topP?: number;
   topK?: number;
   presencePenalty?: number;
@@ -428,6 +428,16 @@ export class ConfigStore {
   // --------------------------------------------------------------------------
   // Private
   // --------------------------------------------------------------------------
+
+  private notifyChange(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("[UnifyProvider] Change listener failed:", error);
+      }
+    }
+  }
 
   private load(): UnifyDatabase {
     if (!existsSync(DB_PATH)) {

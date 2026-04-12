@@ -4,9 +4,11 @@
     "module": "ESNext",
     "lib": ["ES2020"],
     "moduleResolution": "node",
+    "types": ["node"],
     "esModuleInterop": true,
     "strict": false,
     "skipLibCheck": true,
+    "ignoreDeprecations": "6.0",
     "noEmit": true,
     "allowJs": true
   },

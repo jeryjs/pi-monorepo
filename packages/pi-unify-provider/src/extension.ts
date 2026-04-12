@@ -55,9 +55,8 @@ export default function (pi: ExtensionAPI) {
   // Command: /unify-models - View models
   pi.registerCommand("unify-models", {
     description: "View models for a provider",
-    usage: "[provider-name] (shows all if omitted)",
     handler: async (args, ctx) => {
-      const providerName = args[0];
+      const providerName = args.trim() || undefined;
       await showModelsList(configStore, providerName, ctx);
     },
   });
@@ -146,9 +145,13 @@ async function registerProviderWithPi(
   }));
 
   // Register with Pi
+  const apiKeyEnvVar = provider.auth?.type === "api_key"
+    ? provider.auth.envVar
+    : `${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+
   pi.registerProvider(provider.name, {
     baseUrl: provider.baseUrl,
-    apiKey: provider.auth?.apiKeyEnvVar || `${provider.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
+    apiKey: apiKeyEnvVar,
     api: wellKnown.apiType,
     models: piModels,
     headers: provider.extraHeaders,

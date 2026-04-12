@@ -294,7 +294,7 @@ export class OfficialModelsFetcher {
         capabilities: {
           textInput: true,
           toolCalling: model.capabilities?.function_calling ?? true,
-          vision: model.capabilities?.vision ?? false,
+          imageInput: model.capabilities?.vision ?? false,
         },
         cost: model.pricing ? {
           input: model.pricing.input * 1000000, // Convert to per-1M
@@ -337,7 +337,7 @@ export class OfficialModelsFetcher {
           capabilities: {
             textInput: true,
             toolCalling: true, // Most Fireworks models support tools
-            vision: false, // Would need capability detection
+            imageInput: false, // Would need capability detection
           },
           cost: { input: 0.9, output: 0.9 }, // Default pricing
           source: "fetched",
@@ -375,7 +375,7 @@ export class OfficialModelsFetcher {
         capabilities: {
           textInput: true,
           toolCalling: model.id.includes("jamba"),
-          vision: false,
+          imageInput: false,
           reasoning: model.id.includes("jamba-l"),
         },
         cost: model.input_token_price && model.output_token_price ? {
@@ -412,7 +412,7 @@ export class OfficialModelsFetcher {
         capabilities: {
           textInput: true,
           toolCalling: true,
-          vision: false,
+          imageInput: false,
         },
         cost: { input: 0, output: 0 }, // Pricing varies by model
         source: "fetched",
@@ -429,7 +429,7 @@ export class OfficialModelsFetcher {
         family: "sonar",
         contextWindow: 128000,
         maxOutputTokens: 4096,
-        capabilities: { textInput: true, toolCalling: false, vision: false },
+        capabilities: { textInput: true, toolCalling: false, imageInput: false },
         cost: { input: 5, output: 5 },
         source: "builtin",
       },
@@ -439,7 +439,7 @@ export class OfficialModelsFetcher {
         family: "sonar",
         contextWindow: 200000,
         maxOutputTokens: 8192,
-        capabilities: { textInput: true, toolCalling: true, vision: false },
+        capabilities: { textInput: true, toolCalling: true, imageInput: false },
         cost: { input: 15, output: 60 },
         source: "builtin",
       },
@@ -449,7 +449,7 @@ export class OfficialModelsFetcher {
         family: "sonar",
         contextWindow: 128000,
         maxOutputTokens: 8192,
-        capabilities: { textInput: true, toolCalling: true, vision: false, reasoning: true },
+        capabilities: { textInput: true, toolCalling: true, imageInput: false, reasoning: true },
         cost: { input: 10, output: 40 },
         source: "builtin",
       },

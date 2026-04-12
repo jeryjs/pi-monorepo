@@ -285,7 +285,19 @@ export class AuthManager {
   private async initiateOAuth2(providerName: string, config: OAuth2AuthConfig): Promise<{ type: "url"; url: string; state: string }> {
     const state = Math.random().toString(36).substring(7);
     oauthStates.set(state, { providerName, state, expiresAt: Date.now() + 600000 });
-    const url = `${config.authUrl}?client_id=${config.clientId}&redirect_uri=${config.redirectUri}&response_type=code&state=${state}&scope=${config.scope || ""}`;
+    const params = new URLSearchParams({
+      response_type: "code",
+      state,
+    });
+    if (config.clientId) params.append("client_id", config.clientId);
+    if (config.scopes.length > 0) params.append("scope", config.scopes.join(" "));
+    if (config.extraAuthParams) {
+      for (const [key, value] of Object.entries(config.extraAuthParams)) {
+        params.append(key, value);
+      }
+    }
+
+    const url = `${config.authUrl}?${params.toString()}`;
     return { type: "url", url, state };
   }
 
@@ -293,7 +305,16 @@ export class AuthManager {
     const state = Math.random().toString(36).substring(7);
     const codeVerifier = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
     oauthStates.set(state, { providerName, state, codeVerifier, expiresAt: Date.now() + 600000 });
-    const url = `${config.authUrl}?client_id=${config.clientId}&redirect_uri=${config.redirectUri}&response_type=code&state=${state}&code_challenge=${codeVerifier}&code_challenge_method=plain&scope=${config.scope || ""}`;
+    const params = new URLSearchParams({
+      response_type: "code",
+      state,
+      client_id: config.clientId,
+      code_challenge: codeVerifier,
+      code_challenge_method: config.codeChallengeMethod ?? "plain",
+    });
+    if (config.scopes.length > 0) params.append("scope", config.scopes.join(" "));
+
+    const url = `${config.authUrl}?${params.toString()}`;
     return { type: "url", url, state };
   }
 
@@ -305,11 +326,9 @@ export class AuthManager {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: config.redirectUri,
-      client_id: config.clientId,
     });
+    if (config.clientId) body.append("client_id", config.clientId);
     if (codeVerifier) body.append("code_verifier", codeVerifier);
-    if ("clientSecret" in config && config.clientSecret) body.append("client_secret", config.clientSecret);
 
     const response = await fetch(config.tokenUrl, {
       method: "POST",
@@ -325,9 +344,8 @@ export class AuthManager {
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: config.clientId,
     });
-    if ("clientSecret" in config && config.clientSecret) body.append("client_secret", config.clientSecret);
+    if (config.clientId) body.append("client_id", config.clientId);
 
     const response = await fetch(config.tokenUrl, {
       method: "POST",
