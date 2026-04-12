@@ -69,7 +69,8 @@ function findBindingForPayload(
 		if (matchedByUrl) return matchedByUrl;
 	}
 	if (!modelId) return undefined;
-	return bindings.find((binding) => binding.modelIds.has(modelId));
+	const modelMatches = bindings.filter((binding) => binding.modelIds.has(modelId));
+	return modelMatches.length === 1 ? modelMatches[0] : undefined;
 }
 
 function toProviderModelConfig(
