@@ -178,7 +178,10 @@ export default function registerExtension(pi: ExtensionAPI): void {
 		return applyResolvedAuthToPayload(event.payload, binding.auth);
 	});
 
-	pi.on("session_start", async (_event, _ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		await refreshProviders();
+		if (ctx.hasUI) {
+			ctx.ui.setStatus("unify", `${store.getProviders().length} provider(s)`);
+		}
 	});
 }
