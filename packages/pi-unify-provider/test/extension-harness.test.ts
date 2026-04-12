@@ -67,6 +67,12 @@ test("extension works in pi-test-harness command flow", async () => {
 			cwd: workspace,
 			extensionFactories: [registerExtension],
 			mockUI: {
+				select: (title, options) => {
+					if (title === "Add provider preset") {
+						return options.find((option) => option === "Together AI") ?? options[0];
+					}
+					return options[0];
+				},
 				editor: (title) =>
 					title.includes("Paste provider import JSON")
 						? JSON.stringify(
