@@ -4,6 +4,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { resolve } from "path";
 import type { ConfigStore, UnifyProviderConfig, AuthConfig } from "../config.js";
 import type { OfficialModelsFetcher } from "../providers/fetcher.js";
 import { WELL_KNOWN_PROVIDERS, getAllWellKnownProviders } from "../providers/well-known.js";
@@ -356,6 +358,63 @@ export async function refreshAllProviders(
   if (results.errors.length > 0) {
     console.error("[UnifyProvider] Refresh errors:", results.errors);
   }
+}
+
+// ============================================================================
+// Import / Export
+// ============================================================================
+
+export async function exportProvidersConfig(
+  configStore: ConfigStore,
+  outputPathArg: string | undefined,
+  ctx: ExtensionContext
+): Promise<void> {
+  const outputPath = resolve(outputPathArg?.trim() || "unify-providers-export.json");
+
+  try {
+    writeFileSync(outputPath, configStore.exportToJson(), "utf-8");
+    ctx.ui.notify(`Exported ${configStore.getAllProviders().length} provider(s) to ${outputPath}`, "info");
+  } catch (error) {
+    ctx.ui.notify(`Failed to export providers: ${error}`, "error");
+  }
+}
+
+export async function importProvidersConfig(
+  configStore: ConfigStore,
+  inputPathArg: string | undefined,
+  ctx: ExtensionContext
+): Promise<void> {
+  let json: string | undefined;
+
+  const inputPath = inputPathArg?.trim();
+  if (inputPath) {
+    const resolvedPath = resolve(inputPath);
+    if (!existsSync(resolvedPath)) {
+      ctx.ui.notify(`Import file does not exist: ${resolvedPath}`, "error");
+      return;
+    }
+
+    try {
+      json = readFileSync(resolvedPath, "utf-8");
+    } catch (error) {
+      ctx.ui.notify(`Failed to read import file: ${error}`, "error");
+      return;
+    }
+  } else {
+    json = await ctx.ui.editor(
+      "Import Providers JSON",
+      '{\n  "version": 1,\n  "providers": {}\n}'
+    );
+    if (!json) return;
+  }
+
+  const result = configStore.importFromJson(json);
+  if (!result.success) {
+    ctx.ui.notify(`Import failed: ${result.error}`, "error");
+    return;
+  }
+
+  ctx.ui.notify(`Imported ${result.count} provider(s).`, "info");
 }
 
 // ============================================================================

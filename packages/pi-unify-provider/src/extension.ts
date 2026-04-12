@@ -7,7 +7,14 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { ConfigStore, type UnifyProviderConfig } from "./config.js";
 import { OfficialModelsFetcher } from "./providers/fetcher.js";
 import { WELL_KNOWN_PROVIDERS } from "./providers/well-known.js";
-import { showProviderDashboard, showAddProviderFlow, showModelsList, refreshAllProviders } from "./ui/commands.js";
+import {
+  showProviderDashboard,
+  showAddProviderFlow,
+  showModelsList,
+  refreshAllProviders,
+  exportProvidersConfig,
+  importProvidersConfig,
+} from "./ui/commands.js";
 
 let configStore: ConfigStore;
 let fetcher: OfficialModelsFetcher;
@@ -69,6 +76,23 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // Command: /unify-export - Export providers config to JSON file
+  pi.registerCommand("unify-export", {
+    description: "Export provider config to JSON (optional arg: output file path)",
+    handler: async (args, ctx) => {
+      await exportProvidersConfig(configStore, args.trim() || undefined, ctx);
+    },
+  });
+
+  // Command: /unify-import - Import providers config from JSON file or editor
+  pi.registerCommand("unify-import", {
+    description: "Import provider config from JSON (optional arg: input file path)",
+    handler: async (args, ctx) => {
+      await importProvidersConfig(configStore, args.trim() || undefined, ctx);
+      await registerAllProviders(pi, ctx);
+    },
+  });
+
   // Keyboard shortcut: Ctrl+Shift+U for dashboard
   pi.registerShortcut("ctrl+shift+u", {
     description: "Open Unify Provider dashboard",
@@ -77,7 +101,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  console.log("[UnifyProvider] Extension loaded. Commands: /unify, /unify-add, /unify-providers, /unify-models, /unify-refresh");
+  console.log("[UnifyProvider] Extension loaded. Commands: /unify, /unify-add, /unify-providers, /unify-models, /unify-refresh, /unify-export, /unify-import");
 }
 
 /**
