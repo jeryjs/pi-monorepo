@@ -235,3 +235,105 @@ async function showProviderDetails(
       // Trigger fetch (would need fetcher instance)
       break;
     case "models":
+
+// ============================================================================
+// Show Models List
+// ============================================================================
+
+export async function showModelsList(
+  configStore: ConfigStore,
+  providerName: string | undefined,
+  ctx: ExtensionContext
+): Promise<void> {
+  const providers = providerName
+    ? [configStore.getProvider(providerName)].filter(Boolean)
+    : configStore.getAllProviders();
+
+  if (providers.length === 0) {
+    ctx.ui.notify("No providers configured.", "warning");
+    return;
+  }
+
+  // Build model list from all providers
+  const items: { label: string; value: string; detail: string }[] = [];
+
+  for (const provider of providers as UnifyProviderConfig[]) {
+    const wellKnown = WELL_KNOWN_PROVIDERS[provider.type];
+
+    for (const model of provider.models) {
+      const capabilities = [];
+      if (model.capabilities?.toolCalling) capabilities.push("🔧");
+      if (model.capabilities?.vision) capabilities.push("👁️");
+      if (model.capabilities?.reasoning) capabilities.push("🧠");
+
+      const costStr = model.cost
+        ? `$${model.cost.input}/${model.cost.output}`
+        : "N/A";
+
+      items.push({
+        label: model.name || model.id,
+        value: `${provider.name}/${model.id}`,
+        detail: `${wellKnown?.displayName || provider.type} • ${model.contextWindow?.toLocaleString() || "?"} ctx • ${costStr} ${capabilities.join(" ")}`,
+      });
+    }
+  }
+
+  if (items.length === 0) {
+    ctx.ui.notify("No models found. Run /unify-refresh to fetch models.", "warning");
+    return;
+  }
+
+  const choice = await ctx.ui.quickPick({
+    title: providerName
+      ? `Models for ${providerName} (${items.length})`
+      : `All Provider Models (${items.length})`,
+    items,
+    placeholder: "Select a model to use...",
+  });
+
+  if (choice) {
+    ctx.ui.notify(`Model selected: ${choice}. Use /model to view all available models.`, "info");
+  }
+}
+
+// ============================================================================
+// Refresh All Providers
+// ============================================================================
+
+export async function refreshAllProviders(
+  fetcher: OfficialModelsFetcher,
+  configStore: ConfigStore,
+  ctx: ExtensionContext
+): Promise<void> {
+  ctx.ui.notify("🔄 Fetching official model lists from all providers...", "info");
+
+  const results = await fetcher.refreshAll();
+
+  if (results.refreshed > 0) {
+    ctx.ui.notify(`✅ Refreshed ${results.refreshed} provider(s). ${results.failed > 0 ? `${results.failed} failed.` : ""}`,
+      results.failed > 0 ? "warning" : "success"
+    );
+  } else if (results.failed > 0) {
+    ctx.ui.notify(`⚠️ All ${results.failed} refresh(es) failed. Check /unify-providers for errors.`, "error");
+  } else {
+    ctx.ui.notify("No providers need refreshing (auto-fetch disabled or already up to date).", "info");
+  }
+
+  if (results.errors.length > 0) {
+    console.error("[UnifyProvider] Refresh errors:", results.errors);
+  }
+}
+
+// ============================================================================
+// Utility: Get Provider Status Summary
+// ============================================================================
+
+export function getProviderStatusSummary(configStore: ConfigStore): string {
+  const providers = configStore.getAllProviders();
+  if (providers.length === 0) return "No providers";
+
+  const autoCount = providers.filter((p) => p.autoFetchOfficialModels).length;
+  const totalModels = providers.reduce((sum, p) => sum + p.models.length, 0);
+
+  return `${providers.length} providers, ${autoCount} auto, ${totalModels} models`;
+}
