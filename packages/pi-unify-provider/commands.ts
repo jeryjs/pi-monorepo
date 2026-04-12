@@ -17,6 +17,7 @@ interface RegisterCommandsInput {
 	store: ConfigStore;
 	secrets: SecretStore;
 	refreshProviders: () => Promise<void>;
+	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>;
 }
 
 const API_OPTIONS: Api[] = [
@@ -314,21 +315,48 @@ async function runAddProviderFlow(
 	const preset = WELL_KNOWN_PROVIDERS.find((p) => p.name === cleanName);
 	if (!preset) return undefined;
 
-	const name = await ctx.ui.input("Provider name", preset.name);
-	if (!name) return undefined;
-	const resolvedName = await resolveProviderNameConflict(ctx, store, name.trim());
+	let resolvedName = await resolveProviderNameConflict(ctx, store, preset.name);
 	if (!resolvedName) return undefined;
-	const baseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
-	if (!baseUrl) return undefined;
-	const api = await promptApi(ctx, preset.api);
-	if (!api) return undefined;
+
+	let baseUrl = preset.baseUrl;
+	let api = preset.api;
+
+	if (preset.id === "custom") {
+		const customName = await ctx.ui.input("Provider name", preset.name);
+		if (!customName) return undefined;
+		resolvedName = await resolveProviderNameConflict(ctx, store, customName.trim());
+		if (!resolvedName) return undefined;
+
+		const customBaseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
+		if (!customBaseUrl) return undefined;
+		baseUrl = customBaseUrl.trim();
+
+		const customApi = await promptApi(ctx, preset.api);
+		if (!customApi) return undefined;
+		api = customApi;
+	} else {
+		const customize = await ctx.ui.confirm(
+			"Known provider defaults",
+			`Use defaults for ${preset.name}?\nEndpoint: ${preset.baseUrl}\nAPI: ${preset.api}`,
+		);
+		if (!customize) {
+			const customBaseUrl = await ctx.ui.input("Base URL", preset.baseUrl);
+			if (!customBaseUrl) return undefined;
+			baseUrl = customBaseUrl.trim();
+
+			const customApi = await promptApi(ctx, preset.api);
+			if (!customApi) return undefined;
+			api = customApi;
+		}
+	}
+
 	const auth = await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
 	if (!auth) return undefined;
 
 	const provider: ProviderConfigRecord = {
 		type: preset.id,
 		name: resolvedName,
-		baseUrl: baseUrl.trim(),
+		baseUrl,
 		api,
 		auth,
 		models: dedupeModels(preset.hardcodedModels ?? []),
@@ -397,6 +425,47 @@ async function runModelsEditFlow(
 	return true;
 }
 
+async function runOfficialModelsFlow(
+	ctx: ExtensionCommandContext,
+	store: ConfigStore,
+	providerName: string,
+	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>,
+): Promise<boolean> {
+	const provider = store.getProvider(providerName);
+	if (!provider) return false;
+
+	const officialModels = await fetchOfficialModels(providerName);
+	if (officialModels.length === 0) {
+		ctx.ui.notify(`No official models found for ${providerName}.`, "warning");
+		return false;
+	}
+
+	const addAllLabel = "[Add all official models]";
+	const selected = await ctx.ui.select(
+		`Official models: ${providerName}`,
+		[
+			addAllLabel,
+			...officialModels.map((model) => {
+				const exists = provider.models.some((m) => m.id === model.id);
+				return exists ? `${model.id} (already added)` : model.id;
+			}),
+		],
+	);
+	if (!selected) return false;
+
+	if (selected === addAllLabel) {
+		provider.models = dedupeModels([...provider.models, ...officialModels]);
+	} else {
+		const modelId = selected.replace(" (already added)", "");
+		const model = officialModels.find((m) => m.id === modelId) ?? { id: modelId };
+		provider.models = dedupeModels([...provider.models, model]);
+	}
+
+	provider.updatedAt = Date.now();
+	store.upsertProvider(provider);
+	return true;
+}
+
 async function pickProviderName(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
@@ -419,6 +488,7 @@ async function runDashboard(
 	store: ConfigStore,
 	secrets: SecretStore,
 	refreshProviders: () => Promise<void>,
+	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>,
 ): Promise<void> {
 	if (!ctx.hasUI) return;
 	while (true) {
@@ -473,6 +543,19 @@ async function runDashboard(
 			}
 			case "models": {
 				const changed = await runModelsEditFlow(ctx, store, action.providerName);
+				if (changed) {
+					await refreshProviders();
+					ctx.ui.notify(`Updated models for: ${action.providerName}`, "info");
+				}
+				break;
+			}
+			case "official-models": {
+				const changed = await runOfficialModelsFlow(
+					ctx,
+					store,
+					action.providerName,
+					fetchOfficialModels,
+				);
 				if (changed) {
 					await refreshProviders();
 					ctx.ui.notify(`Updated models for: ${action.providerName}`, "info");
@@ -551,12 +634,12 @@ async function runExport(
 }
 
 export function registerCommands(input: RegisterCommandsInput): void {
-	const { pi, store, secrets, refreshProviders } = input;
+	const { pi, store, secrets, refreshProviders, fetchOfficialModels } = input;
 
 	pi.registerCommand("unify", {
 		description: "Open unified provider dashboard",
 		handler: async (_args, ctx) => {
-			await runDashboard(ctx, store, secrets, refreshProviders);
+			await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
 		},
 	});
 
@@ -574,7 +657,26 @@ export function registerCommands(input: RegisterCommandsInput): void {
 	pi.registerCommand("unify-providers", {
 		description: "Open unified provider dashboard",
 		handler: async (_args, ctx) => {
-			await runDashboard(ctx, store, secrets, refreshProviders);
+			await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
+		},
+	});
+
+	pi.registerCommand("unify-official-models", {
+		description: "List and add official models for a provider",
+		handler: async (args, ctx) => {
+			if (!ctx.hasUI) return;
+			const requestedName = args.trim() || undefined;
+			const providerName = await pickProviderName(ctx, store, requestedName);
+			if (!providerName) return;
+			const changed = await runOfficialModelsFlow(
+				ctx,
+				store,
+				providerName,
+				fetchOfficialModels,
+			);
+			if (!changed) return;
+			await refreshProviders();
+			ctx.ui.notify(`Updated models for: ${providerName}`, "info");
 		},
 	});
 

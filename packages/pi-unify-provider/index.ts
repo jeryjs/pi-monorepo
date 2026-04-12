@@ -151,12 +151,25 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	const bindings: ProviderAuthBinding[] = [];
 	const refreshProviders = async () =>
 		registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
+	const fetchOfficialModels = async (providerName: string): Promise<UnifyModelConfig[]> => {
+		const provider = store.getProvider(providerName);
+		if (!provider) return [];
+		const preset = getProviderPreset(provider.type);
+		if (!preset) return [];
+		const auth = await resolveProviderAuth(provider, secrets);
+		return fetcher.fetchProviderModels({
+			provider: { ...provider, models: [] },
+			preset,
+			resolvedAuth: auth,
+		});
+	};
 
 	registerCommands({
 		pi,
 		store,
 		secrets,
 		refreshProviders,
+		fetchOfficialModels,
 	});
 
 	pi.on("before_provider_request", async (event) => {

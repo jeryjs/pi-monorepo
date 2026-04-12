@@ -7,6 +7,7 @@ export type DashboardAction =
 	| { kind: "close" }
 	| { kind: "add" }
 	| { kind: "refresh" }
+	| { kind: "official-models"; providerName: string }
 	| { kind: "edit"; providerName: string }
 	| { kind: "auth"; providerName: string }
 	| { kind: "models"; providerName: string }
@@ -67,6 +68,10 @@ export class UnifyDashboardComponent implements Component {
 			this.done({ kind: "models", providerName: selected.name });
 			return;
 		}
+		if (data === "o") {
+			this.done({ kind: "official-models", providerName: selected.name });
+			return;
+		}
 		if (data === "d") {
 			this.done({ kind: "delete", providerName: selected.name });
 			return;
@@ -91,7 +96,7 @@ export class UnifyDashboardComponent implements Component {
 			}
 		}
 		lines.push(this.theme.fg("dim", row("", inner)));
-		lines.push(this.theme.fg("dim", row("a:add  e:edit  h:auth  m:models  d:delete  r:refresh  q:close", inner)));
+		lines.push(this.theme.fg("dim", row("a:add  e:edit  h:auth  m:models  o:official  d:delete  r:refresh  q:close", inner)));
 		return lines;
 	}
 
