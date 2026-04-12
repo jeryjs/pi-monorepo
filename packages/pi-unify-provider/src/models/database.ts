@@ -212,4 +212,8 @@ export const MODEL_PARAMETERS_DB = new Map<string, Partial<UnifyModelConfig>>([
     name: "Jamba 1.5 Mini",
     contextWindow: 256000,
     maxOutputTokens: 4096,
-    capabilities: { textInput: true, image
+    capabilities: { textInput: true, imageInput: false, toolCalling: true, reasoning: true },
+    cost: { input: 0.2, output: 0.4 },
+    temperature: 0.7,
+  }],
+]);
