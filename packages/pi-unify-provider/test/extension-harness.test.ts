@@ -69,8 +69,24 @@ test("extension works in pi-test-harness command flow", async () => {
 			cwd: workspace,
 			extensionFactories: [registerExtension],
 			mockUI: {
-				editor: "alpha\nbeta",
-				input: "sk-known-provider",
+				editor: (title) =>
+					title.includes("Paste provider import JSON")
+						? JSON.stringify(
+							{
+								providers: [
+									{
+										type: "custom",
+										name: "AIClient2API",
+										baseUrl: "https://api.example.com/v1",
+										api: "openai-completions",
+										auth: { method: "api-key", apiKey: "sk-test" },
+										models: [{ id: "alpha" }, { id: "beta" }],
+										autoFetchOfficialModels: false,
+									},
+								],
+							},
+						)
+						: "",
 			},
 		});
 
@@ -78,7 +94,7 @@ test("extension works in pi-test-harness command flow", async () => {
 		await (t.session.agent as any).waitForIdle();
 		assert.ok(t.events.uiCallsFor("setEditorText").length > 0);
 
-		await t.session.prompt("/unify-models AIClient2API");
+		await t.session.prompt("/unify-import");
 		await (t.session.agent as any).waitForIdle();
 
 		const db = JSON.parse(readFileSync(dbPath, "utf8")) as {
@@ -104,7 +120,7 @@ test("extension works in pi-test-harness command flow", async () => {
 		assert.equal(together?.baseUrl, "https://api.together.xyz/v1");
 		assert.equal(together?.api, "openai-completions");
 
-		assert.ok(t.events.uiCallsFor("input").length > 0);
+		assert.equal(t.events.uiCallsFor("input").length, 0);
 	} finally {
 		t?.dispose();
 		globalThis.fetch = originalFetch;

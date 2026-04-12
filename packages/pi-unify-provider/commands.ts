@@ -10,7 +10,12 @@ import {
 	type UnifyModelConfig,
 } from "./types.ts";
 import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
-import { UnifyDashboardComponent, type DashboardAction } from "./ui.ts";
+import {
+	ModelManagerComponent,
+	type DashboardAction,
+	type ModelManagerAction,
+	UnifyDashboardComponent,
+} from "./ui.ts";
 
 interface RegisterCommandsInput {
 	pi: ExtensionAPI;
@@ -126,20 +131,16 @@ async function promptAuthConfig(
 	ctx: ExtensionCommandContext,
 	secrets: SecretStore,
 	current: AuthConfig,
-	skipMethodSelect = false,
 ): Promise<AuthConfig | undefined> {
-	let method: AuthMethod = current.method;
-	if (!skipMethodSelect) {
-		const methodOptions = authMethodOptions();
-		const selected = await ctx.ui.select(
-			"Authentication method",
-			methodOptions.map((candidate) =>
-				candidate === current.method ? `${candidate} (current)` : candidate,
-			),
-		);
-		if (!selected) return undefined;
-		method = selected.replace(" (current)", "") as AuthMethod;
-	}
+	const methodOptions = authMethodOptions();
+	const selected = await ctx.ui.select(
+		"Authentication method",
+		methodOptions.map((candidate) =>
+			candidate === current.method ? `${candidate} (current)` : candidate,
+		),
+	);
+	if (!selected) return undefined;
+	const method = selected.replace(" (current)", "") as AuthMethod;
 
 	switch (method) {
 		case "none":
@@ -354,22 +355,7 @@ async function runAddProviderFlow(
 		}
 	}
 
-	const auth = preset.id === "custom"
-		? await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig)
-		: await (async () => {
-			const useRecommended = await ctx.ui.confirm(
-				"Authentication setup",
-				`Use recommended auth method (${preset.defaultAuth}) for ${preset.name}?`,
-			);
-			return useRecommended
-				? promptAuthConfig(
-					ctx,
-					secrets,
-					{ method: preset.defaultAuth } as AuthConfig,
-					true,
-				)
-				: promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
-		})();
+	const auth = await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
 	if (!auth) return undefined;
 
 	const provider: ProviderConfigRecord = {
@@ -397,17 +383,56 @@ async function runEditProviderFlow(
 ): Promise<boolean> {
 	const provider = store.getProvider(providerName);
 	if (!provider) return false;
-	const baseUrl = await ctx.ui.input("Base URL", provider.baseUrl);
-	if (!baseUrl) return false;
-	const api = await promptApi(ctx, provider.api);
-	if (!api) return false;
-	const autoFetchOfficialModels = await ctx.ui.confirm(
-		"Auto-fetch official models",
-		"Enable official model refresh for this provider?",
-	);
-	provider.baseUrl = baseUrl.trim();
-	provider.api = api;
-	provider.autoFetchOfficialModels = autoFetchOfficialModels;
+
+	let changed = false;
+	while (true) {
+		const choice = await ctx.ui.select(`Edit provider: ${provider.name}`, [
+			`Name: ${provider.name}`,
+			`Base URL: ${provider.baseUrl}`,
+			`API: ${provider.api}`,
+			`Auto-fetch official models: ${provider.autoFetchOfficialModels ? "on" : "off"}`,
+			"Done",
+		]);
+
+		if (!choice || choice === "Done") {
+			break;
+		}
+
+		if (choice.startsWith("Name:")) {
+			const nextName = await ctx.ui.input("Provider name", provider.name);
+			if (!nextName) continue;
+			const trimmed = nextName.trim();
+			if (trimmed === provider.name) continue;
+			const resolved = await resolveProviderNameConflict(ctx, store, trimmed);
+			if (!resolved) continue;
+			provider.name = resolved;
+			changed = true;
+			continue;
+		}
+
+		if (choice.startsWith("Base URL:")) {
+			const nextBaseUrl = await ctx.ui.input("Base URL", provider.baseUrl);
+			if (!nextBaseUrl) continue;
+			provider.baseUrl = nextBaseUrl.trim();
+			changed = true;
+			continue;
+		}
+
+		if (choice.startsWith("API:")) {
+			const nextApi = await promptApi(ctx, provider.api);
+			if (!nextApi) continue;
+			provider.api = nextApi;
+			changed = true;
+			continue;
+		}
+
+		if (choice.startsWith("Auto-fetch official models:")) {
+			provider.autoFetchOfficialModels = !provider.autoFetchOfficialModels;
+			changed = true;
+		}
+	}
+
+	if (!changed) return false;
 	provider.updatedAt = Date.now();
 	store.upsertProvider(provider);
 	return true;
@@ -433,15 +458,158 @@ async function runModelsEditFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
 	providerName: string,
+	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>,
 ): Promise<boolean> {
 	const provider = store.getProvider(providerName);
 	if (!provider) return false;
-	const models = await promptModels(ctx, provider.models);
-	if (!models) return false;
-	provider.models = models;
-	provider.updatedAt = Date.now();
-	store.upsertProvider(provider);
-	return true;
+
+	const editModelFields = async (
+		model: UnifyModelConfig,
+	): Promise<UnifyModelConfig | "delete" | undefined> => {
+		const next: UnifyModelConfig = {
+			...model,
+			capabilities: { ...(model.capabilities ?? {}) },
+		};
+
+		while (true) {
+			const choice = await ctx.ui.select(`Edit model: ${next.id}`, [
+				`ID: ${next.id}`,
+				`Name: ${next.name ?? "(none)"}`,
+				`Family: ${next.family ?? "(none)"}`,
+				`Context Window: ${next.contextWindow ?? "(unset)"}`,
+				`Max Tokens: ${next.maxTokens ?? "(unset)"}`,
+				`Tool Calling: ${next.capabilities?.toolCalling ? "on" : "off"}`,
+				`Image Input: ${next.capabilities?.imageInput ? "on" : "off"}`,
+				`Reasoning: ${next.capabilities?.reasoning ? "on" : "off"}`,
+				"Delete model",
+				"Done",
+			]);
+
+			if (!choice || choice === "Done") return next;
+			if (choice === "Delete model") return "delete";
+
+			if (choice.startsWith("ID:")) {
+				const id = await ctx.ui.input("Model ID", next.id);
+				if (!id) continue;
+				next.id = id.trim();
+				continue;
+			}
+
+			if (choice.startsWith("Name:")) {
+				const name = await ctx.ui.input("Model name", next.name);
+				next.name = name?.trim() || undefined;
+				continue;
+			}
+
+			if (choice.startsWith("Family:")) {
+				const family = await ctx.ui.input("Model family", next.family);
+				next.family = family?.trim() || undefined;
+				continue;
+			}
+
+			if (choice.startsWith("Context Window:")) {
+				const value = await ctx.ui.input(
+					"Context window tokens",
+					next.contextWindow !== undefined ? String(next.contextWindow) : "",
+				);
+				if (!value) {
+					next.contextWindow = undefined;
+					continue;
+				}
+				const parsed = Number(value);
+				if (Number.isFinite(parsed) && parsed > 0) next.contextWindow = parsed;
+				continue;
+			}
+
+			if (choice.startsWith("Max Tokens:")) {
+				const value = await ctx.ui.input(
+					"Max output tokens",
+					next.maxTokens !== undefined ? String(next.maxTokens) : "",
+				);
+				if (!value) {
+					next.maxTokens = undefined;
+					continue;
+				}
+				const parsed = Number(value);
+				if (Number.isFinite(parsed) && parsed > 0) next.maxTokens = parsed;
+				continue;
+			}
+
+			if (choice.startsWith("Tool Calling:")) {
+				next.capabilities = {
+					...(next.capabilities ?? {}),
+					toolCalling: !next.capabilities?.toolCalling,
+				};
+				continue;
+			}
+
+			if (choice.startsWith("Image Input:")) {
+				next.capabilities = {
+					...(next.capabilities ?? {}),
+					imageInput: !next.capabilities?.imageInput,
+				};
+				continue;
+			}
+
+			if (choice.startsWith("Reasoning:")) {
+				next.capabilities = {
+					...(next.capabilities ?? {}),
+					reasoning: !next.capabilities?.reasoning,
+				};
+			}
+		}
+	};
+
+	let working = dedupeModels([...provider.models]);
+
+	while (true) {
+		const official = await fetchOfficialModels(providerName);
+		const allModels = dedupeModels([...official, ...working]);
+		const action = await ctx.ui.custom<ModelManagerAction>(
+			(_tui, theme, _kb, done) => new ModelManagerComponent(theme, allModels, working, done),
+			{ overlay: true, overlayOptions: { anchor: "center", width: 110, maxHeight: "85%" } },
+		);
+
+		if (!action || action.kind === "cancel") {
+			return false;
+		}
+
+		if (action.kind === "save") {
+			provider.models = dedupeModels(action.models);
+			provider.updatedAt = Date.now();
+			store.upsertProvider(provider);
+			return true;
+		}
+
+		if (action.kind === "add-custom") {
+			const id = await ctx.ui.input("New model ID", "");
+			if (!id) continue;
+			const name = await ctx.ui.input("Model name (optional)", "");
+			working = dedupeModels([
+				...working,
+				{
+					id: id.trim(),
+					name: name?.trim() || undefined,
+				},
+			]);
+			continue;
+		}
+
+		if (action.kind === "edit-model") {
+			const existing = working.find((m) => m.id === action.modelId);
+			if (!existing) continue;
+			const edited = await editModelFields(existing);
+			if (!edited) continue;
+			if (edited === "delete") {
+				working = working.filter((m) => m.id !== action.modelId);
+				continue;
+			}
+			working = dedupeModels([
+				...working.filter((m) => m.id !== action.modelId),
+				edited,
+			]);
+		}
+	}
 }
 
 async function runOfficialModelsFlow(
@@ -561,7 +729,12 @@ async function runDashboard(
 				break;
 			}
 			case "models": {
-				const changed = await runModelsEditFlow(ctx, store, action.providerName);
+				const changed = await runModelsEditFlow(
+					ctx,
+					store,
+					action.providerName,
+					fetchOfficialModels,
+				);
 				if (changed) {
 					await refreshProviders();
 					ctx.ui.notify(`Updated models for: ${action.providerName}`, "info");
@@ -706,7 +879,12 @@ export function registerCommands(input: RegisterCommandsInput): void {
 			const requestedName = args.trim() || undefined;
 			const providerName = await pickProviderName(ctx, store, requestedName);
 			if (!providerName) return;
-			const changed = await runModelsEditFlow(ctx, store, providerName);
+			const changed = await runModelsEditFlow(
+				ctx,
+				store,
+				providerName,
+				fetchOfficialModels,
+			);
 			if (!changed) return;
 			await refreshProviders();
 			ctx.ui.notify(`Updated models for: ${providerName}`, "info");
