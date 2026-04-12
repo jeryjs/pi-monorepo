@@ -494,6 +494,7 @@ async function runAddProviderFlow(
 async function runEditProviderFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
+	secrets: SecretStore,
 	providerName: string,
 ): Promise<boolean> {
 	const provider = store.getProvider(providerName);
@@ -505,6 +506,7 @@ async function runEditProviderFlow(
 			`Name: ${provider.name}`,
 			`Base URL: ${provider.baseUrl}`,
 			`API: ${provider.api}`,
+            {value: "auth", label: "Authentication", secondary: provider.auth.method},
 			"Delete provider",
 			"Done",
 		]);
@@ -538,6 +540,11 @@ async function runEditProviderFlow(
 			if (!nextApi) continue;
 			provider.api = nextApi;
 			changed = true;
+			continue;
+		}
+
+        if (choice === "auth") {
+            changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
 			continue;
 		}
 
@@ -889,24 +896,20 @@ async function runDashboard(
 			const enabledCount = provider.models.filter((m) => m.enabled !== false).length;
 
 			const choice = await selectWithSearch(ctx, `Provider: ${provider.name}`, [
-				{ value: "provider_settings", label: "Provider settings" },
-				{ value: "auth", label: "Authentication" },
 				{ value: "add_new_model", label: "Add new model" },
 				{ value: "add_official", label: "Add from official models" },
-				{ value: "fetch_official", label: `Fetch official models list (${fetchLabel})` },
-				{ value: "enabled_models", label: `Enabled models (${enabledCount})` },
+				{ value: "fetch_official", label: `Fetch official models list`, secondary: fetchLabel },
+                { label: "---------------------------", value: 'divider', disabled: true },
+				{ value: "manage_models", label: `Manage models`, secondary: `${enabledCount} configured` },
+                { label: "---------------------------", value: 'divider', disabled: true },
+				{ value: "provider_settings", label: "Provider settings" },
 				{ value: "back", label: "Back" },
 			]);
 
 			if (!choice || choice === "back") return;
 
 			if (choice === "provider_settings") {
-				const changed = await runEditProviderFlow(ctx, store, provider.name);
-				if (changed) await refreshProviders();
-				continue;
-			}
-			if (choice === "auth") {
-				const changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
+				const changed = await runEditProviderFlow(ctx, store, secrets, provider.name);
 				if (changed) await refreshProviders();
 				continue;
 			}
@@ -935,7 +938,7 @@ async function runDashboard(
 				ctx.ui.notify(fetchLabel, "info");
 				continue;
 			}
-			if (choice === "enabled_models") {
+			if (choice === "manage_models") {
 				const changed = await runModelsEditFlow(ctx, store, provider.name, fetchOfficialModels);
 				if (changed) await refreshProviders();
 			}
@@ -951,10 +954,13 @@ async function runDashboard(
 			"Unify Provider Manager",
 			[
 			{ value: "add_provider", label: "Add provider" },
+            { label: "-----------------", value: 'divider-1', disabled: true, visible: providers.length > 0 },
+			...providerItems,
+            { label: "-----------------", value: 'divider-2', disabled: true, visible: providers.length > 0 },
 			{ value: "refresh", label: "Refresh provider registrations" },
 			{ value: "import", label: "Import providers" },
 			{ value: "export", label: "Export providers" },
-			...providerItems,
+            { label: "-----------------", value: 'divider-3', disabled: true },
 			{ value: "close", label: "Close" },
 			],
 			"Enter:select  Type to filter providers/options  Esc:close",

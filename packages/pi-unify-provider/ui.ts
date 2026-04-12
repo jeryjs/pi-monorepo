@@ -21,6 +21,8 @@ export interface SearchSelectorItem {
 	label: string;
 	secondary?: string;
 	searchText?: string;
+    disabled?: boolean;
+    visible?: boolean;
 }
 
 function padLine(text: string, width: number): string {
@@ -129,7 +131,7 @@ export class SearchSelectorComponent extends Container {
 
 	updateList(): void {
 		this.listContainer.clear();
-		const maxVisible = 10;
+		const maxVisible = 15;
 		const startIndex = Math.max(0, Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredItems.length - maxVisible));
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredItems.length);
 
@@ -141,6 +143,11 @@ export class SearchSelectorComponent extends Container {
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredItems[i];
 			if (!item) continue;
+            if (item.visible === false) continue;
+			if (item.disabled) {
+				this.listContainer.addChild(new Text(this.theme.fg("dim", `  ${item.label}`), 0, 0));
+				continue;
+			}
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? this.theme.fg("accent", "→ ") : "  ";
 			const label = isSelected ? this.theme.fg("accent", item.label) : item.label;
@@ -158,12 +165,28 @@ export class SearchSelectorComponent extends Container {
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+            // If the newly selected item is not visible or disabled, keep moving up until we find an enabled item or loop back to the original index
+            if (this.filteredItems[this.selectedIndex].disabled || this.filteredItems[this.selectedIndex].visible === false) {
+                let direction = -1, newIndex = this.selectedIndex;
+                do {
+                    newIndex = newIndex === 0 && direction === -1 ? this.filteredItems.length - 1 : (newIndex + direction) % this.filteredItems.length;
+                } while ((this.filteredItems[newIndex].disabled || this.filteredItems[newIndex].visible === false) && newIndex !== this.selectedIndex);
+                this.selectedIndex = newIndex;
+            }
 			this.updateList();
 			return;
 		}
 		if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+            // If the newly selected item is not visible or disabled, keep moving down until we find an enabled item or loop back to the original index
+            if (this.filteredItems[this.selectedIndex].disabled || this.filteredItems[this.selectedIndex].visible === false) {
+                let direction = 1, newIndex = this.selectedIndex;
+                do {
+                    newIndex = newIndex === this.filteredItems.length - 1 && direction === 1 ? 0 : (newIndex + direction) % this.filteredItems.length;
+                } while ((this.filteredItems[newIndex].disabled || this.filteredItems[newIndex].visible === false) && newIndex !== this.selectedIndex);
+                this.selectedIndex = newIndex;
+            }
 			this.updateList();
 			return;
 		}
