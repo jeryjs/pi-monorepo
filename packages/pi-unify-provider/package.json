@@ -32,6 +32,10 @@
     "*.mjs",
     "README.md"
   ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "test:watch": "node --experimental-strip-types --test --watch \"test/**/*.test.ts\""
+  },
   "pi": {
     "extensions": [
       "./index.ts"
