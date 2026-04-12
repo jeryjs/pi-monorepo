@@ -455,4 +455,7 @@ export class ConfigStore {
       }
       writeFileSync(DB_PATH, JSON.stringify(this.data, null, 2), "utf-8");
     } catch (error) {
-      console.error("[UnifyProvider] Failed
+      console.error("[UnifyProvider] Failed to save database:", error);
+    }
+  }
+}
