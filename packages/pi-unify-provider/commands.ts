@@ -401,6 +401,73 @@ async function runDashboard(
 	}
 }
 
+function normalizeImportedProviders(raw: unknown): ProviderConfigRecord[] {
+	const source = Array.isArray(raw)
+		? raw
+		: raw && typeof raw === "object" && Array.isArray((raw as { providers?: unknown }).providers)
+			? ((raw as { providers: unknown[] }).providers)
+			: undefined;
+	if (!source) {
+		throw new Error("Import must be a providers array or an object with { providers: [...] }");
+	}
+	const out: ProviderConfigRecord[] = [];
+	for (const item of source) {
+		if (!item || typeof item !== "object") continue;
+		const provider = item as Partial<ProviderConfigRecord>;
+		if (!provider.name || !provider.baseUrl || !provider.api || !provider.type || !provider.auth) continue;
+		out.push({
+			type: provider.type,
+			name: provider.name,
+			baseUrl: provider.baseUrl,
+			api: provider.api,
+			auth: provider.auth,
+			models: Array.isArray(provider.models) ? provider.models : [],
+			extraHeaders: provider.extraHeaders,
+			extraQuery: provider.extraQuery,
+			extraBody: provider.extraBody,
+			autoFetchOfficialModels: provider.autoFetchOfficialModels,
+			updatedAt: Date.now(),
+		});
+	}
+	if (out.length === 0) {
+		throw new Error("No valid providers found in import payload");
+	}
+	return out;
+}
+
+async function runImport(
+	ctx: ExtensionCommandContext,
+	store: ConfigStore,
+	refreshProviders: () => Promise<void>,
+	args: string,
+): Promise<void> {
+	if (!ctx.hasUI) return;
+	const rawInput = args.trim()
+		? args.trim()
+		: await ctx.ui.editor("Paste provider import JSON", '{\n\t"providers": []\n}');
+	if (!rawInput) return;
+	const parsed = JSON.parse(rawInput);
+	const providers = normalizeImportedProviders(parsed);
+	const overwrite = await ctx.ui.confirm(
+		"Import providers",
+		`Replace current provider set with ${providers.length} imported provider(s)?`,
+	);
+	if (!overwrite) return;
+	store.replaceProviders(providers);
+	await refreshProviders();
+	ctx.ui.notify(`Imported ${providers.length} provider(s).`, "info");
+}
+
+async function runExport(
+	ctx: ExtensionCommandContext,
+	store: ConfigStore,
+): Promise<void> {
+	if (!ctx.hasUI) return;
+	const payload = JSON.stringify({ providers: store.getProviders() }, null, "\t");
+	ctx.ui.setEditorText(payload);
+	ctx.ui.notify("Export JSON was placed into the editor input.", "info");
+}
+
 export function registerCommands(input: RegisterCommandsInput): void {
 	const { pi, store, refreshProviders } = input;
 
@@ -450,6 +517,28 @@ export function registerCommands(input: RegisterCommandsInput): void {
 			if (ctx.hasUI) {
 				ctx.ui.notify("Providers refreshed.", "info");
 			}
+		},
+	});
+
+	pi.registerCommand("unify-import", {
+		description: "Import provider configuration JSON",
+		handler: async (args, ctx) => {
+			try {
+				await runImport(ctx, store, refreshProviders, args);
+			} catch (error) {
+				if (!ctx.hasUI) return;
+				ctx.ui.notify(
+					error instanceof Error ? error.message : String(error),
+					"error",
+				);
+			}
+		},
+	});
+
+	pi.registerCommand("unify-export", {
+		description: "Export provider configuration JSON",
+		handler: async (_args, ctx) => {
+			await runExport(ctx, store);
 		},
 	});
 }
