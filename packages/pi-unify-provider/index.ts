@@ -20,6 +20,7 @@ interface ProviderAuthBinding {
 	name: string;
 	origin: string;
 	pathPrefix: string;
+	modelIds: Set<string>;
 	auth: ResolvedAuth;
 }
 
@@ -41,6 +42,7 @@ function createAuthBinding(
 		name: provider.name,
 		origin: parsed.origin,
 		pathPrefix: parsed.pathname || "/",
+		modelIds: new Set(provider.models.map((model) => model.id)),
 		auth,
 	};
 }
@@ -50,16 +52,24 @@ function findBindingForPayload(
 	bindings: ProviderAuthBinding[],
 ): ProviderAuthBinding | undefined {
 	if (!payload || typeof payload !== "object") return undefined;
+	const modelId =
+		typeof (payload as { model?: unknown }).model === "string"
+			? ((payload as { model: string }).model)
+			: undefined;
 	const urlString =
 		typeof (payload as { url?: unknown }).url === "string"
 			? ((payload as { url: string }).url)
 			: undefined;
-	if (!urlString) return undefined;
-	const parsed = new URL(urlString);
-	return bindings.find((binding) => {
-		if (binding.origin !== parsed.origin) return false;
-		return parsed.pathname.startsWith(binding.pathPrefix);
-	});
+	if (urlString) {
+		const parsed = new URL(urlString);
+		const matchedByUrl = bindings.find((binding) => {
+			if (binding.origin !== parsed.origin) return false;
+			return parsed.pathname.startsWith(binding.pathPrefix);
+		});
+		if (matchedByUrl) return matchedByUrl;
+	}
+	if (!modelId) return undefined;
+	return bindings.find((binding) => binding.modelIds.has(modelId));
 }
 
 function toProviderModelConfig(

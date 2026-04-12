@@ -7,7 +7,7 @@ import {
 	type ProviderConfigRecord,
 	type UnifyModelConfig,
 } from "./types.js";
-import { WELL_KNOWN_PROVIDERS, type ALL_AUTH_METHODS } from "./well-known.js";
+import { WELL_KNOWN_PROVIDERS } from "./well-known.js";
 import { UnifyDashboardComponent, type DashboardAction } from "./ui.js";
 
 interface RegisterCommandsInput {
@@ -31,7 +31,7 @@ function dedupeModels(models: UnifyModelConfig[]): UnifyModelConfig[] {
 }
 
 function authMethodOptions(): AuthMethod[] {
-	return [...WELL_KNOWN_PROVIDERS[0]!.supportedAuth] as typeof ALL_AUTH_METHODS;
+	return [...WELL_KNOWN_PROVIDERS[0]!.supportedAuth];
 }
 
 async function promptApi(
