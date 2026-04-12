@@ -112,7 +112,8 @@ function mergeModels(
 	official: UnifyModelConfig[],
 	hardcoded: UnifyModelConfig[],
 ): UnifyModelConfig[] {
-	const ordered = [...manual, ...official, ...hardcoded].map(withModelMetadata);
+	// Precedence: hardcoded defaults < official fetched < manual overrides.
+	const ordered = [...hardcoded, ...official, ...manual].map(withModelMetadata);
 	return dedupeById(ordered);
 }
 
