@@ -420,14 +420,13 @@ async function runAddProviderFlow(
 	store: ConfigStore,
 	secrets: SecretStore,
 ): Promise<ProviderConfigRecord | undefined> {
-	const presetName = await selectWithSearch(
+	const presetId = await selectWithSearch(
 		ctx,
 		"Add provider preset",
-		WELL_KNOWN_PROVIDERS.map((preset) => `${preset.name} [${preset.category}]`),
+		WELL_KNOWN_PROVIDERS.map((preset) => ({ value: preset.id, label: preset.name, secondary: `${preset.description} [${preset.category}]`  })),
 	);
-	if (!presetName) return undefined;
-	const cleanName = presetName.replace(/ \[[^\]]+\]$/, "");
-	const preset = WELL_KNOWN_PROVIDERS.find((p) => p.name === cleanName);
+	if (!presetId) return undefined;
+	const preset = WELL_KNOWN_PROVIDERS.find((p) => p.id === presetId);
 	if (!preset) return undefined;
 
 	let resolvedName = await resolveProviderNameConflict(ctx, store, preset.name);
@@ -879,7 +878,7 @@ async function runDashboard(
 				...(modelItems.length > 0
 					? [{ value: "divider-models", label: "──────── models ────────", disabled: true }, ...modelItems]
 					: []),
-                { label: "-----------------", value: 'divider', disabled: true },
+                { label: "──────────────────────────", value: 'divider', disabled: true },
 				{ value: "provider_settings", label: "Provider settings" },
 				{ value: "back", label: "Back" },
 			]);
@@ -945,11 +944,11 @@ async function runDashboard(
                 { value: "add_provider", label: "Add provider" },
                 { label: "──────── providers ────────", value: 'divider-1', disabled: true, visible: providers.length > 0 },
                 ...providerItems,
-                { label: "-----------------", value: 'divider-2', disabled: true, visible: providers.length > 0 },
+                { label: "───────── manage ─────────", value: 'divider-2', disabled: true, visible: providers.length > 0 },
                 { value: "refresh", label: "Refresh provider registrations" },
                 { value: "import", label: "Import providers" },
                 { value: "export", label: "Export providers" },
-                { label: "-----------------", value: 'divider-3', disabled: true },
+                { label: "──────────────────────────", value: 'divider-3', disabled: true },
                 { value: "close", label: "Close" },
             ],
 			"Enter:select  Type to filter providers/options  Esc:close",

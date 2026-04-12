@@ -147,7 +147,7 @@ export class SearchSelectorComponent extends Container {
 			if (!item) continue;
             if (item.visible === false) continue;
 			if (item.disabled) {
-				this.listContainer.addChild(new Text(this.theme.fg("dim", `  ${item.label}`), 0, 0));
+				this.listContainer.addChild(new Text(this.theme.fg("dim", `  ${item.label}`), 0));
 				continue;
 			}
 			const isSelected = i === this.selectedIndex;

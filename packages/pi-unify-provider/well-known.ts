@@ -14,6 +14,16 @@ export const ALL_AUTH_METHODS: WellKnownProviderPreset["supportedAuth"] = [
 
 export const WELL_KNOWN_PROVIDERS: WellKnownProviderPreset[] = [
 	{
+		id: "custom",
+		name: "Custom",
+		category: "Custom",
+		description: "Bring your own OpenAI-compatible provider",
+		baseUrl: "https://api.example.com/v1",
+		api: "openai-completions",
+		supportedAuth: ALL_AUTH_METHODS,
+		defaultAuth: "api-key",
+	},
+	{
 		id: "together",
 		name: "Together AI",
 		category: "Hosted APIs",
@@ -73,16 +83,6 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderPreset[] = [
 			{ id: "sonar-reasoning" },
 			{ id: "sonar-reasoning-pro" },
 		],
-	},
-	{
-		id: "custom",
-		name: "Custom",
-		category: "Custom",
-		description: "Bring your own OpenAI-compatible provider",
-		baseUrl: "https://api.example.com/v1",
-		api: "openai-completions",
-		supportedAuth: ALL_AUTH_METHODS,
-		defaultAuth: "api-key",
 	},
 ];
 
