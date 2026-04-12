@@ -227,7 +227,7 @@ export function getRequiredEnvVars(auth: AuthConfig): string[] {
     case "custom_header":
       // Extract env vars from header values that start with env: prefix
       return Object.values(auth.headers)
-        .filter(v => v.startsWith("env:""))
+        .filter(v => v.startsWith("env:"))
         .map(v => v.slice(4));
     default:
       return [];
