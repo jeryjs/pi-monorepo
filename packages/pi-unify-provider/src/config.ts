@@ -62,14 +62,176 @@ export interface UnifyModelConfig {
   fetchedAt?: number;
 }
 
-export interface AuthConfig {
-  type: "api_key" | "oauth" | "none";
-  apiKeyEnvVar?: string;
-  // OAuth fields
+/**
+ * Authentication configuration - supports 7+ auth methods
+ * Inspired by vscode-unify-chat-provider auth system
+ */
+
+// Auth method types
+export type AuthMethodType =
+  | "api_key"           // Standard API key in header
+  | "bearer_token"      // Bearer token (different format)
+  | "oauth2"           // OAuth 2.0 authorization code
+  | "oauth2_pkce"      // OAuth 2.0 with PKCE
+  | "oauth_device_code" // Device code flow (for CLI)
+  | "custom_header"    // Custom header authentication
+  | "query_param"      // API key in query parameter
+  | "browser_session"  // Browser-based OAuth (like Claude Code)
+  | "none";            // No authentication
+
+// Base auth config
+export interface BaseAuthConfig {
+  type: AuthMethodType;
+}
+
+// API Key auth
+export interface ApiKeyAuthConfig extends BaseAuthConfig {
+  type: "api_key";
+  /** Environment variable name for the API key (e.g., "POE_API_KEY") */
+  envVar: string;
+  /** If true, store key in Pi's auth.json; if false, requires env var */
+  allowStoredKey?: boolean;
+  /** Custom header name (default: "Authorization") */
+  headerName?: string;
+  /** Key prefix (default: "Bearer ") */
+  prefix?: string;
+  /** Store key in Pi secret storage? */
+  useSecretStorage?: boolean;
+}
+
+// Bearer token auth
+export interface BearerTokenAuthConfig extends BaseAuthConfig {
+  type: "bearer_token";
+  envVar: string;
+  allowStoredToken?: boolean;
+  useSecretStorage?: boolean;
+}
+
+// OAuth 2.0 standard flow
+export interface OAuth2AuthConfig extends BaseAuthConfig {
+  type: "oauth2";
+  /** Display name for OAuth provider */
+  displayName: string;
+  /** Authorization endpoint URL */
+  authUrl: string;
+  /** Token endpoint URL */
+  tokenUrl: string;
+  /** Client ID (may be empty for some providers) */
   clientId?: string;
-  tokenUrl?: string;
-  authUrl?: string;
-  scopes?: string[];
+  /** OAuth scopes to request */
+  scopes: string[];
+  /** Additional parameters for auth URL */
+  extraAuthParams?: Record<string, string>;
+  /** Use PKCE? */
+  usePkce?: boolean;
+  /** For headless/device flows */
+  deviceCodeUrl?: string;
+}
+
+// OAuth 2.0 PKCE flow
+export interface OAuth2PkceAuthConfig extends BaseAuthConfig {
+  type: "oauth2_pkce";
+  displayName: string;
+  authUrl: string;
+  tokenUrl: string;
+  clientId: string;
+  scopes: string[];
+  /** Code challenge method (default: "S256") */
+  codeChallengeMethod?: "S256" | "plain";
+}
+
+// Device code flow (for CLI-only providers)
+export interface OAuthDeviceCodeAuthConfig extends BaseAuthConfig {
+  type: "oauth_device_code";
+  displayName: string;
+  /** Device code endpoint */
+  deviceCodeUrl: string;
+  /** Token endpoint (polling) */
+  tokenUrl: string;
+  clientId: string;
+  scopes: string[];
+  /** Polling interval in seconds */
+  interval?: number;
+}
+
+// Browser session OAuth (like Claude Code's approach)
+export interface BrowserSessionAuthConfig extends BaseAuthConfig {
+  type: "browser_session";
+  displayName: string;
+  /** URL to open in browser for auth */
+  loginUrl: string;
+  /** Callback URL or method to receive token */
+  callbackUrl?: string;
+  /** Use custom URI handler? */
+  useUriHandler?: boolean;
+}
+
+// Custom header auth
+export interface CustomHeaderAuthConfig extends BaseAuthConfig {
+  type: "custom_header";
+  headers: Record<string, string>;
+  /** Whether values are env var names or literal values */
+  valueSource?: "env" | "literal" | "mixed";
+}
+
+// Query parameter auth
+export interface QueryParamAuthConfig extends BaseAuthConfig {
+  type: "query_param";
+  /** Parameter name (default: "api_key") */
+  paramName: string;
+  /** Env var containing the key */
+  envVar: string;
+}
+
+// No auth
+export interface NoAuthConfig extends BaseAuthConfig {
+  type: "none";
+}
+
+// Union type for all auth configs
+export type AuthConfig =
+  | ApiKeyAuthConfig
+  | BearerTokenAuthConfig
+  | OAuth2AuthConfig
+  | OAuth2PkceAuthConfig
+  | OAuthDeviceCodeAuthConfig
+  | BrowserSessionAuthConfig
+  | CustomHeaderAuthConfig
+  | QueryParamAuthConfig
+  | NoAuthConfig;
+
+// Helper to check if auth requires OAuth flow
+export function isOAuthAuth(auth: AuthConfig): boolean {
+  return [
+    "oauth2",
+    "oauth2_pkce",
+    "oauth_device_code",
+    "browser_session",
+  ].includes(auth.type);
+}
+
+// Helper to check if auth requires API key
+export function isApiKeyAuth(auth: AuthConfig): boolean {
+  return auth.type === "api_key" || auth.type === "bearer_token" || auth.type === "query_param";
+}
+
+// Helper to get env var requirement
+export function getRequiredEnvVars(auth: AuthConfig): string[] {
+  switch (auth.type) {
+    case "api_key":
+      return [auth.envVar];
+    case "bearer_token":
+      return [auth.envVar];
+    case "query_param":
+      return [auth.envVar];
+    case "custom_header":
+      // Extract env vars from header values that start with env: prefix
+      return Object.values(auth.headers)
+        .filter(v => v.startsWith("env:""))
+        .map(v => v.slice(4));
+    default:
+      return [];
+  }
 }
 
 export interface RetryConfig {

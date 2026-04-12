@@ -40,6 +40,7 @@ export interface WellKnownProvider {
 export const WELL_KNOWN_PROVIDERS: Record<ProviderType, WellKnownProvider> = {
   // ==========================================================================
   // Poe - creator.poe.com/docs
+  // Supports API Key (preferred) or OAuth
   // ==========================================================================
   poe: {
     name: "poe",
@@ -52,9 +53,15 @@ export const WELL_KNOWN_PROVIDERS: Record<ProviderType, WellKnownProvider> = {
     defaultMaxTokens: 4096,
     supportsOfficialModelFetch: true,
     modelsEndpoint: "https://api.poe.com/machine/models",
-    authType: "api_key", // Uses API keys
+    authType: "both", // Supports both API key and OAuth
     defaultHeaders: {
       "Accept": "application/json",
+    },
+    oauth: {
+      name: "Poe (Sign in with Poe)",
+      authUrl: "https://creator.poe.com/oauth/authorize",
+      tokenUrl: "https://creator.poe.com/oauth/token",
+      scopes: ["read", "write"],
     },
     quirks: {
       modelIdTransform: (id) => id.replace(/^poe-/, ""), // Strip poe- prefix if present
