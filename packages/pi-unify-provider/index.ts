@@ -3,6 +3,7 @@ import {
 	applyResolvedAuthToPayload,
 	resolveProviderAuth,
 } from "./auth.js";
+import { registerCommands } from "./commands.js";
 import { ConfigStore } from "./config-store.js";
 import { OfficialModelsFetcher } from "./fetcher.js";
 import { SecretStore } from "./secret-store.js";
@@ -134,23 +135,13 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	const secrets = new SecretStore();
 	const fetcher = new OfficialModelsFetcher();
 	const bindings: ProviderAuthBinding[] = [];
+	const refreshProviders = async () =>
+		registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
 
-	pi.registerCommand("unify", {
-		description: "Open unify provider manager (rewrite in progress)",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) return;
-			ctx.ui.notify("Unify rewrite scaffold is active. Full TUI flow is being rebuilt.", "info");
-		},
-	});
-
-	pi.registerCommand("unify-refresh", {
-		description: "Refresh official models for configured providers",
-		handler: async (_args, ctx) => {
-			await registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
-			if (ctx.hasUI) {
-				ctx.ui.notify("Unify provider models refreshed.", "info");
-			}
-		},
+	registerCommands({
+		pi,
+		store,
+		refreshProviders,
 	});
 
 	pi.on("before_provider_request", async (event) => {
@@ -160,6 +151,6 @@ export default function registerExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, _ctx) => {
-		await registerConfiguredProviders(pi, store, secrets, fetcher, bindings);
+		await refreshProviders();
 	});
 }

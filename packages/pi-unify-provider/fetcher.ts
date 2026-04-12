@@ -38,7 +38,7 @@ function ensureAbsoluteUrl(baseUrl: string, endpoint: string): string {
 	return `${base}${path}`;
 }
 
-function toHeaders(provider: ProviderConfigRecord, auth?: ResolvedAuth): HeadersInit {
+function toHeaders(provider: ProviderConfigRecord, auth?: ResolvedAuth): Record<string, string> {
 	return {
 		accept: JSON_CONTENT_TYPE,
 		"content-type": JSON_CONTENT_TYPE,
