@@ -131,10 +131,12 @@ export interface UnifyModelConfig {
 export interface ProviderConfigRecord {
 	type: ProviderType;
 	name: string;
+	description?: string;
 	baseUrl: string;
 	api: Api;
 	auth: AuthConfig;
 	models: UnifyModelConfig[];
+	officialModelsEndpoint?: string;
 	extraHeaders?: Record<string, string>;
 	extraQuery?: Record<string, string>;
 	extraBody?: Record<string, unknown>;

@@ -163,12 +163,12 @@ export default function registerExtension(pi: ExtensionAPI): void {
 				id: "custom",
 				name: provider.name,
 				category: "Custom",
-				description: "Fallback official model discovery",
+				description: provider.description ?? "Fallback official model discovery",
 				baseUrl: provider.baseUrl,
 				api: provider.api,
 				supportedAuth: ALL_AUTH_METHODS,
 				defaultAuth: provider.auth.method,
-				officialModelsEndpoint: basePath === "/" ? "/v1/models" : "/models",
+				officialModelsEndpoint: provider.officialModelsEndpoint ?? (basePath === "/" ? "/v1/models" : "/models"),
 			};
 		const auth = await resolveProviderAuth(provider, secrets);
 		const models = await fetcher.fetchProviderModels({

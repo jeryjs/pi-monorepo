@@ -234,6 +234,11 @@ async function promptEditableValue(
 	return edited.trim();
 }
 
+function asOptionalText(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
 async function promptApi(
 	ctx: ExtensionCommandContext,
 	current: Api,
@@ -477,10 +482,12 @@ async function runAddProviderFlow(
 	const provider: ProviderConfigRecord = {
 		type: preset.id,
 		name: resolvedName,
+		description: preset.description,
 		baseUrl,
 		api,
 		auth,
 		models: [],
+		officialModelsEndpoint: preset.officialModelsEndpoint,
 		extraHeaders: preset.extraHeaders,
 		extraQuery: preset.extraQuery,
 		extraBody: preset.extraBody,
@@ -510,7 +517,9 @@ async function runEditProviderFlow(
 	while (true) {
 		const choice = await selectWithSearch(ctx, `Edit provider: ${provider.name}`, [
 			{ value: "name", label: "Name", secondary: provider.name },
+			{ value: "description", label: "Description", secondary: provider.description ?? "(unset)" },
 			{ value: "endpoint", label: "Base URL", secondary: provider.baseUrl },
+			{ value: "official_models_endpoint", label: "Official models endpoint", secondary: provider.officialModelsEndpoint ?? "(auto)" },
 			{ value: "api", label: `API`, secondary: provider.api },
 			{ value: "auth", label: "Authentication", secondary: provider.auth.method },
 			{ value: "delete", label: "Delete provider" },
@@ -533,10 +542,26 @@ async function runEditProviderFlow(
 			continue;
 		}
 
+		if (choice === "description") {
+			const nextDescription = await promptEditableValue(ctx, "Description", provider.description ?? "");
+			if (nextDescription === undefined) continue;
+			provider.description = asOptionalText(nextDescription);
+			changed = true;
+			continue;
+		}
+
 		if (choice === "endpoint") {
 			const nextBaseUrl = await promptEditableValue(ctx, "Base URL", provider.baseUrl);
 			if (!nextBaseUrl) continue;
 			provider.baseUrl = nextBaseUrl.trim();
+			changed = true;
+			continue;
+		}
+
+		if (choice === "official_models_endpoint") {
+			const nextEndpoint = await promptEditableValue(ctx, "Official models endpoint", provider.officialModelsEndpoint ?? "/models");
+			if (nextEndpoint === undefined) continue;
+			provider.officialModelsEndpoint = asOptionalText(nextEndpoint);
 			changed = true;
 			continue;
 		}
@@ -549,10 +574,10 @@ async function runEditProviderFlow(
 			continue;
 		}
 
-        if (choice === "auth") {
-            changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
-            continue;
-        }
+		if (choice === "auth") {
+			changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
+			continue;
+		}
 
 		if (choice === "delete") {
 			const ok = await ctx.ui.confirm(
@@ -1015,12 +1040,14 @@ function normalizeImportedProviders(raw: unknown): ProviderConfigRecord[] {
 		out.push({
 			type: provider.type,
 			name: provider.name,
+			description: provider.description,
 			baseUrl: provider.baseUrl,
 			api: provider.api,
 			auth: provider.auth,
 			models: Array.isArray(provider.models)
 				? provider.models.map((model) => ensureModelIdentity(model as UnifyModelConfig, "user"))
 				: [],
+			officialModelsEndpoint: provider.officialModelsEndpoint,
 			extraHeaders: provider.extraHeaders,
 			extraQuery: provider.extraQuery,
 			extraBody: provider.extraBody,
