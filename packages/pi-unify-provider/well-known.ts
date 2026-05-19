@@ -22,6 +22,7 @@ export const WELL_KNOWN_PROVIDERS: WellKnownProviderPreset[] = [
 		api: "openai-completions",
 		supportedAuth: ALL_AUTH_METHODS,
 		defaultAuth: "api-key",
+		officialModelsEndpoint: "/models",
 	},
 	{
 		id: "together",

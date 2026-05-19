@@ -19,6 +19,7 @@ import {
 	toDashboardItems,
 	toDashboardSelectorItems,
 } from "./ui.ts";
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "./types.ts";
 import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
 
 interface RegisterCommandsInput {
@@ -95,6 +96,12 @@ function ensureModelIdentity(model: UnifyModelConfig, source: "user" | "official
 		uid: model.uid ?? randomUUID(),
 		source: model.source ?? source,
 		enabled: model.enabled ?? (source === "user"),
+		contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+		maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
+		capabilities: {
+			...(model.capabilities ?? {}),
+			toolCalling: model.capabilities?.toolCalling ?? true,
+		},
 	};
 }
 
@@ -600,6 +607,12 @@ async function editSingleModelFlow(
 		source: "user",
 		capabilities: { ...(model.capabilities ?? {}) },
 	};
+	next.contextWindow ??= DEFAULT_CONTEXT_WINDOW;
+	next.maxTokens ??= DEFAULT_MAX_TOKENS;
+	next.capabilities = {
+		...(next.capabilities ?? {}),
+		toolCalling: next.capabilities?.toolCalling ?? true,
+	};
 
 	while (true) {
 		const choice = await selectWithSearch(ctx, `Edit model: ${next.id}`, [
@@ -643,10 +656,10 @@ async function editSingleModelFlow(
 			const value = await promptEditableValue(
 				ctx,
 				"Context window tokens",
-				next.contextWindow !== undefined ? String(next.contextWindow) : "",
+				next.contextWindow !== undefined ? String(next.contextWindow) : String(DEFAULT_CONTEXT_WINDOW),
 			);
 			if (!value) {
-				next.contextWindow = undefined;
+				next.contextWindow = DEFAULT_CONTEXT_WINDOW;
 				continue;
 			}
 			const parsed = Number(value);
@@ -657,10 +670,10 @@ async function editSingleModelFlow(
 			const value = await promptEditableValue(
 				ctx,
 				"Max output tokens",
-				next.maxTokens !== undefined ? String(next.maxTokens) : "",
+				next.maxTokens !== undefined ? String(next.maxTokens) : String(DEFAULT_MAX_TOKENS),
 			);
 			if (!value) {
-				next.maxTokens = undefined;
+				next.maxTokens = DEFAULT_MAX_TOKENS;
 				continue;
 			}
 			const parsed = Number(value);
@@ -668,7 +681,10 @@ async function editSingleModelFlow(
 			continue;
 		}
 		if (choice.startsWith("Tool Calling:")) {
-			next.capabilities = { ...(next.capabilities ?? {}), toolCalling: !next.capabilities?.toolCalling };
+			next.capabilities = {
+				...(next.capabilities ?? {}),
+				toolCalling: !next.capabilities?.toolCalling,
+			};
 			continue;
 		}
 		if (choice.startsWith("Image Input:")) {
@@ -722,7 +738,6 @@ async function runModelsEditFlow(
 				onPersist: (enabledIds) => done({ kind: "save", enabledIds }),
 				onCancel: () => done({ kind: "cancel" }),
 			}),
-		{ overlay: true, overlayOptions: { anchor: "center", width: 98, maxHeight: "85%" } },
 	);
 
 	if (!action || action.kind === "cancel") return false;
@@ -941,14 +956,13 @@ async function runDashboard(
 			ctx,
             "Unify Provider Manager",
             [
-                { value: "add_provider", label: "Add provider" },
+				{ value: "add_provider", label: "Add provider" },
+                { value: "refresh", label: "Refresh provider registrations" },
                 { label: "──────── providers ────────", value: 'divider-1', disabled: true, visible: providers.length > 0 },
                 ...providerItems,
-                { label: "───────── manage ─────────", value: 'divider-2', disabled: true, visible: providers.length > 0 },
-                { value: "refresh", label: "Refresh provider registrations" },
+                { label: "─────────—————————─────────", value: 'divider-2', disabled: true, visible: providers.length > 0 },
                 { value: "import", label: "Import providers" },
                 { value: "export", label: "Export providers" },
-                { label: "──────────────────────────", value: 'divider-3', disabled: true },
                 { value: "close", label: "Close" },
             ],
 			"Enter:select  Type to filter providers/options  Esc:close",
@@ -1057,23 +1071,23 @@ async function runExport(
 export function registerCommands(input: RegisterCommandsInput): void {
 	const { pi, store, secrets, refreshProviders, fetchOfficialModels } = input;
 
-	pi.registerCommand("unify", {
-		description: "Open unified provider dashboard",
-		handler: async (_args, ctx) => {
-			await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
-		},
-	});
+	// pi.registerCommand("unify", {
+	// 	description: "Open unified provider dashboard",
+	// 	handler: async (_args, ctx) => {
+	// 		await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
+	// 	},
+	// });
 
-	pi.registerCommand("unify-add", {
-		description: "Add provider with guided flow",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) return;
-			const provider = await runAddProviderFlow(ctx, store, secrets);
-			if (!provider) return;
-			await refreshProviders();
-			ctx.ui.notify(`Added provider: ${provider.name}`, "info");
-		},
-	});
+	// pi.registerCommand("unify-add", {
+	// 	description: "Add provider with guided flow",
+	// 	handler: async (_args, ctx) => {
+	// 		if (!ctx.hasUI) return;
+	// 		const provider = await runAddProviderFlow(ctx, store, secrets);
+	// 		if (!provider) return;
+	// 		await refreshProviders();
+	// 		ctx.ui.notify(`Added provider: ${provider.name}`, "info");
+	// 	},
+	// });
 
 	pi.registerCommand("unify-providers", {
 		description: "Open unified provider dashboard",
@@ -1082,24 +1096,24 @@ export function registerCommands(input: RegisterCommandsInput): void {
 		},
 	});
 
-	pi.registerCommand("unify-official-models", {
-		description: "List and add official models for a provider",
-		handler: async (args, ctx) => {
-			if (!ctx.hasUI) return;
-			const requestedName = args.trim() || undefined;
-			const providerName = await pickProviderName(ctx, store, requestedName);
-			if (!providerName) return;
-			const changed = await runOfficialModelsFlow(
-				ctx,
-				store,
-				providerName,
-				fetchOfficialModels,
-			);
-			if (!changed) return;
-			await refreshProviders();
-			ctx.ui.notify(`Updated models for: ${providerName}`, "info");
-		},
-	});
+	// pi.registerCommand("unify-official-models", {
+	// 	description: "List and add official models for a provider",
+	// 	handler: async (args, ctx) => {
+	// 		if (!ctx.hasUI) return;
+	// 		const requestedName = args.trim() || undefined;
+	// 		const providerName = await pickProviderName(ctx, store, requestedName);
+	// 		if (!providerName) return;
+	// 		const changed = await runOfficialModelsFlow(
+	// 			ctx,
+	// 			store,
+	// 			providerName,
+	// 			fetchOfficialModels,
+	// 		);
+	// 		if (!changed) return;
+	// 		await refreshProviders();
+	// 		ctx.ui.notify(`Updated models for: ${providerName}`, "info");
+	// 	},
+	// });
 
 	pi.registerCommand("unify-models", {
 		description: "Edit provider models",
@@ -1130,25 +1144,25 @@ export function registerCommands(input: RegisterCommandsInput): void {
 		},
 	});
 
-	pi.registerCommand("unify-import", {
-		description: "Import provider configuration JSON",
-		handler: async (args, ctx) => {
-			try {
-				await runImport(ctx, store, refreshProviders, args);
-			} catch (error) {
-				if (!ctx.hasUI) return;
-				ctx.ui.notify(
-					error instanceof Error ? error.message : String(error),
-					"error",
-				);
-			}
-		},
-	});
+	// pi.registerCommand("unify-import", {
+	// 	description: "Import provider configuration JSON",
+	// 	handler: async (args, ctx) => {
+	// 		try {
+	// 			await runImport(ctx, store, refreshProviders, args);
+	// 		} catch (error) {
+	// 			if (!ctx.hasUI) return;
+	// 			ctx.ui.notify(
+	// 				error instanceof Error ? error.message : String(error),
+	// 				"error",
+	// 			);
+	// 		}
+	// 	},
+	// });
 
-	pi.registerCommand("unify-export", {
-		description: "Export provider configuration JSON",
-		handler: async (_args, ctx) => {
-			await runExport(ctx, store);
-		},
-	});
+	// pi.registerCommand("unify-export", {
+	// 	description: "Export provider configuration JSON",
+	// 	handler: async (_args, ctx) => {
+	// 		await runExport(ctx, store);
+	// 	},
+	// });
 }
