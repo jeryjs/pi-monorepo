@@ -3,11 +3,9 @@ import type {ExtensionAPI,ExtensionCommandContext } from "@earendil-works/pi-cod
 import { randomUUID } from "node:crypto";
 import { ConfigStore } from "./config-store.ts";
 import { verboseLog } from "./debug.ts";
-import { SecretStore } from "./secret-store.ts";
 import {
 	type AuthConfig,
 	type AuthMethod,
-	type OAuth2TokenData,
 	type ProviderConfigRecord,
 	type UnifyModelConfig,
 } from "./types.ts";
@@ -25,7 +23,6 @@ import { WELL_KNOWN_PROVIDERS } from "./well-known.ts";
 interface RegisterCommandsInput {
 	pi: ExtensionAPI;
 	store: ConfigStore;
-	secrets: SecretStore;
 	refreshProviders: () => Promise<void>;
 	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>;
 }
@@ -179,49 +176,15 @@ function authMethodOptions(): AuthMethod[] {
 	return [...WELL_KNOWN_PROVIDERS[0]!.supportedAuth];
 }
 
-function parseTokenData(raw: string): OAuth2TokenData {
-	try {
-		const parsed = JSON.parse(raw) as Partial<OAuth2TokenData>;
-		if (parsed && typeof parsed.accessToken === "string" && parsed.accessToken.trim()) {
-			return {
-				accessToken: parsed.accessToken,
-				refreshToken: parsed.refreshToken,
-				tokenType: parsed.tokenType ?? "Bearer",
-				expiresAt: parsed.expiresAt,
-				scope: parsed.scope,
-			};
-		}
-	} catch {
-		// fallthrough to raw token wrapping.
-	}
-	return { accessToken: raw, tokenType: "Bearer" };
-}
-
 async function captureSecretValue(
 	ctx: ExtensionCommandContext,
-	secrets: SecretStore,
 	label: string,
 	prefill: string | undefined,
-	kind: "api-key" | "generic" | "oauth-token",
 ): Promise<string | undefined> {
 	const value = await ctx.ui.editor(label, prefill ?? "");
-	if (!value) return undefined;
-	const secure = await ctx.ui.confirm(
-		"Store as secret reference",
-		"Store this value in local secret storage and keep only a reference?",
-	);
-	if (!secure) return value;
-	const ref = secrets.createRef();
-	if (kind === "api-key") {
-		secrets.setApiKey(ref, value);
-		return ref;
-	}
-	if (kind === "oauth-token") {
-		secrets.setOAuthToken(ref, parseTokenData(value));
-		return ref;
-	}
-	secrets.setGeneric(ref, value);
-	return ref;
+	if (value === undefined) return undefined;
+	const trimmed = value.trim();
+	return trimmed ? trimmed : undefined;
 }
 
 async function promptEditableValue(
@@ -254,7 +217,6 @@ async function promptApi(
 
 async function promptAuthConfig(
 	ctx: ExtensionCommandContext,
-	secrets: SecretStore,
 	current: AuthConfig,
 ): Promise<AuthConfig | undefined> {
 	const methodOptions = authMethodOptions();
@@ -273,10 +235,8 @@ async function promptAuthConfig(
 		case "api-key": {
 			const apiKey = await captureSecretValue(
 				ctx,
-				secrets,
 				"API Key",
 				current.method === "api-key" ? current.apiKey : undefined,
-				"api-key",
 			);
 			if (!apiKey) return undefined;
 			return { method: "api-key", apiKey };
@@ -284,10 +244,8 @@ async function promptAuthConfig(
 		case "bearer-token": {
 			const token = await captureSecretValue(
 				ctx,
-				secrets,
 				"Bearer token",
 				current.method === "bearer-token" ? current.token : undefined,
-				"generic",
 			);
 			if (!token) return undefined;
 			const headerName = await promptEditableValue(
@@ -306,10 +264,8 @@ async function promptAuthConfig(
 			if (!headerName) return undefined;
 			const headerValue = await captureSecretValue(
 				ctx,
-				secrets,
 				"Header value",
 				current.method === "custom-header" ? current.headerValue : undefined,
-				"generic",
 			);
 			if (!headerValue) return undefined;
 			return { method: "custom-header", headerName, headerValue };
@@ -323,10 +279,8 @@ async function promptAuthConfig(
 			if (!paramName) return undefined;
 			const paramValue = await captureSecretValue(
 				ctx,
-				secrets,
 				"Query param value",
 				current.method === "query-param" ? current.paramValue : undefined,
-				"generic",
 			);
 			if (!paramValue) return undefined;
 			return { method: "query-param", paramName, paramValue };
@@ -334,10 +288,8 @@ async function promptAuthConfig(
 		case "browser-session": {
 			const cookieHeader = await captureSecretValue(
 				ctx,
-				secrets,
 				"Cookie header",
 				current.method === "browser-session" ? current.cookieHeader : undefined,
-				"generic",
 			);
 			if (!cookieHeader) return undefined;
 			return { method: "browser-session", cookieHeader };
@@ -355,17 +307,13 @@ async function promptAuthConfig(
 			);
 			const clientSecret = await captureSecretValue(
 				ctx,
-				secrets,
 				"OAuth client secret (optional)",
 				current.method === "oauth2" ? current.clientSecret : undefined,
-				"generic",
 			);
 			const token = await captureSecretValue(
 				ctx,
-				secrets,
 				"Access token (or JSON token payload)",
 				current.method === "oauth2" ? current.token : undefined,
-				"oauth-token",
 			);
 			if (!tokenUrl || !clientId || !token) return undefined;
 			return { method: "oauth2", tokenUrl, clientId, clientSecret, token };
@@ -388,10 +336,8 @@ async function promptAuthConfig(
 			);
 			const token = await captureSecretValue(
 				ctx,
-				secrets,
 				"Access token (or JSON token payload)",
 				current.method === "oauth2-pkce" ? current.token : undefined,
-				"oauth-token",
 			);
 			if (!authorizationUrl || !tokenUrl || !clientId || !token) return undefined;
 			return { method: "oauth2-pkce", authorizationUrl, tokenUrl, clientId, token };
@@ -416,10 +362,8 @@ async function promptAuthConfig(
 			);
 			const token = await captureSecretValue(
 				ctx,
-				secrets,
 				"Access token (or JSON token payload)",
 				current.method === "oauth-device-code" ? current.token : undefined,
-				"oauth-token",
 			);
 			if (!deviceAuthorizationUrl || !tokenUrl || !clientId || !token) return undefined;
 			return { method: "oauth-device-code", deviceAuthorizationUrl, tokenUrl, clientId, token };
@@ -430,7 +374,6 @@ async function promptAuthConfig(
 async function runAddProviderFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
-	secrets: SecretStore,
 ): Promise<ProviderConfigRecord | undefined> {
 	const presetId = await selectWithSearch(
 		ctx,
@@ -476,7 +419,7 @@ async function runAddProviderFlow(
 		}
 	}
 
-	const auth = await promptAuthConfig(ctx, secrets, { method: preset.defaultAuth } as AuthConfig);
+	const auth = await promptAuthConfig(ctx, { method: preset.defaultAuth } as AuthConfig);
 	if (!auth) return undefined;
 
 	const provider: ProviderConfigRecord = {
@@ -507,7 +450,6 @@ async function runAddProviderFlow(
 async function runEditProviderFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
-	secrets: SecretStore,
 	providerName: string,
 ): Promise<boolean> {
 	const provider = store.getProvider(providerName);
@@ -517,11 +459,11 @@ async function runEditProviderFlow(
 	while (true) {
 		const choice = await selectWithSearch(ctx, `Edit provider: ${provider.name}`, [
 			{ value: "name", label: "Name", secondary: provider.name },
-			{ value: "description", label: "Description", secondary: provider.description ?? "(unset)" },
 			{ value: "endpoint", label: "Base URL", secondary: provider.baseUrl },
-			{ value: "official_models_endpoint", label: "Official models endpoint", secondary: provider.officialModelsEndpoint ?? "(auto)" },
 			{ value: "api", label: `API`, secondary: provider.api },
 			{ value: "auth", label: "Authentication", secondary: provider.auth.method },
+			{ value: "description", label: "Description", secondary: provider.description ?? "(unset)" },
+			{ value: "official_models_endpoint", label: "Official models endpoint", secondary: provider.officialModelsEndpoint ?? "(auto)" },
 			{ value: "delete", label: "Delete provider" },
 			{ value: "done", label: "Done" },
 		]);
@@ -575,7 +517,7 @@ async function runEditProviderFlow(
 		}
 
 		if (choice === "auth") {
-			changed = await runAuthEditFlow(ctx, store, secrets, provider.name);
+			changed = await runAuthEditFlow(ctx, store, provider.name);
 			continue;
 		}
 
@@ -606,12 +548,11 @@ async function runEditProviderFlow(
 async function runAuthEditFlow(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
-	secrets: SecretStore,
 	providerName: string,
 ): Promise<boolean> {
 	const provider = store.getProvider(providerName);
 	if (!provider) return false;
-	const auth = await promptAuthConfig(ctx, secrets, provider.auth);
+	const auth = await promptAuthConfig(ctx, provider.auth);
 	if (!auth) return false;
 	provider.auth = auth;
 	provider.updatedAt = Date.now();
@@ -893,7 +834,6 @@ async function pickProviderName(
 async function runDashboard(
 	ctx: ExtensionCommandContext,
 	store: ConfigStore,
-	secrets: SecretStore,
 	refreshProviders: () => Promise<void>,
 	fetchOfficialModels: (providerName: string) => Promise<UnifyModelConfig[]>,
 ): Promise<void> {
@@ -966,7 +906,7 @@ async function runDashboard(
 				continue;
 			}
 			if (choice === "provider_settings") {
-				const changed = await runEditProviderFlow(ctx, store, secrets, provider.name);
+				const changed = await runEditProviderFlow(ctx, store, provider.name);
 				if (changed) await refreshProviders();
 				continue;
 			}
@@ -985,7 +925,7 @@ async function runDashboard(
                 { value: "refresh", label: "Refresh provider registrations" },
                 { label: "──────── providers ────────", value: 'divider-1', disabled: true, visible: providers.length > 0 },
                 ...providerItems,
-                { label: "─────────—————————─────────", value: 'divider-2', disabled: true, visible: providers.length > 0 },
+                { label: "───────────────────────────", value: 'divider-2', disabled: true, visible: providers.length > 0 },
                 { value: "import", label: "Import providers" },
                 { value: "export", label: "Export providers" },
                 { value: "close", label: "Close" },
@@ -995,7 +935,7 @@ async function runDashboard(
 
 		if (!choice || choice === "close") return;
 		if (choice === "add_provider") {
-			const added = await runAddProviderFlow(ctx, store, secrets);
+			const added = await runAddProviderFlow(ctx, store);
 			if (added) {
 				await refreshProviders();
 				ctx.ui.notify(`Added provider: ${added.name}`, "info");
@@ -1096,12 +1036,12 @@ async function runExport(
 }
 
 export function registerCommands(input: RegisterCommandsInput): void {
-	const { pi, store, secrets, refreshProviders, fetchOfficialModels } = input;
+	const { pi, store, refreshProviders, fetchOfficialModels } = input;
 
 	// pi.registerCommand("unify", {
 	// 	description: "Open unified provider dashboard",
 	// 	handler: async (_args, ctx) => {
-	// 		await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
+	// 		await runDashboard(ctx, store, refreshProviders, fetchOfficialModels);
 	// 	},
 	// });
 
@@ -1109,7 +1049,7 @@ export function registerCommands(input: RegisterCommandsInput): void {
 	// 	description: "Add provider with guided flow",
 	// 	handler: async (_args, ctx) => {
 	// 		if (!ctx.hasUI) return;
-	// 		const provider = await runAddProviderFlow(ctx, store, secrets);
+	// 		const provider = await runAddProviderFlow(ctx, store);
 	// 		if (!provider) return;
 	// 		await refreshProviders();
 	// 		ctx.ui.notify(`Added provider: ${provider.name}`, "info");
@@ -1119,7 +1059,7 @@ export function registerCommands(input: RegisterCommandsInput): void {
 	pi.registerCommand("unify-providers", {
 		description: "Open unified provider dashboard",
 		handler: async (_args, ctx) => {
-			await runDashboard(ctx, store, secrets, refreshProviders, fetchOfficialModels);
+			await runDashboard(ctx, store, refreshProviders, fetchOfficialModels);
 		},
 	});
 

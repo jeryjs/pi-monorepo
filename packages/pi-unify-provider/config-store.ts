@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionDatabase, ProviderConfigRecord } from "./types.ts";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const DB_PATH = join(homedir(), ".pi", "agent", "unify-providers-db.json");
+const DB_PATH = join(getAgentDir(), "extensions", "pi-unify-provider", "providers-db.json");
 
 function createEmptyDb(): ExtensionDatabase {
 	return {
-		version: 2,
+		version: 1,
 		providers: [],
 	};
 }
@@ -22,7 +23,7 @@ function readDb(filePath: string): ExtensionDatabase {
 	}
 	const raw = readFileSync(filePath, "utf8");
 	const parsed = JSON.parse(raw) as ExtensionDatabase;
-	if (parsed.version !== 2 || !Array.isArray(parsed.providers)) {
+	if (parsed.version !== 1 || !Array.isArray(parsed.providers)) {
 		throw new Error(`Invalid unify provider DB format at ${filePath}`);
 	}
 	return parsed;
@@ -61,7 +62,7 @@ export class ConfigStore {
 	}
 
 	replaceProviders(providers: ProviderConfigRecord[]): void {
-		this.save({ version: 2, providers });
+		this.save({ version: 1, providers });
 	}
 
 	upsertProvider(provider: ProviderConfigRecord): void {

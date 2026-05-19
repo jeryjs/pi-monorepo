@@ -8,7 +8,6 @@ import type {
 	ResolvedAuth,
 } from "./types.ts";
 import { verboseLog } from "./debug.ts";
-import { isSecretRef, type SecretStore } from "./secret-store.ts";
 
 const EXPIRY_BUFFER_MS = 60_000;
 
@@ -113,48 +112,18 @@ async function refreshOAuthToken(
 	};
 }
 
-async function resolveSecretString(
-	value: string | undefined,
-	secretStore: SecretStore,
-	kind: "api-key" | "generic",
-): Promise<string | undefined> {
-	const normalized = asString(value);
-	if (!normalized) return undefined;
-	if (!isSecretRef(normalized)) return normalized;
-	if (kind === "api-key") return secretStore.getApiKey(normalized);
-	return secretStore.getGeneric(normalized);
-}
-
-async function resolveOAuthToken(
-	tokenRaw: string | undefined,
-	secretStore: SecretStore,
-): Promise<{ token?: OAuth2TokenData; tokenRef?: string }> {
-	const tokenValue = asString(tokenRaw);
-	if (!tokenValue) return {};
-	if (!isSecretRef(tokenValue)) {
-		return { token: parseOAuthToken(tokenValue) };
-	}
-	return {
-		token: secretStore.getOAuthToken(tokenValue),
-		tokenRef: tokenValue,
-	};
-}
-
-export async function resolveAuth(
-	auth: AuthConfig,
-	secretStore: SecretStore,
-): Promise<ResolvedAuth> {
+export async function resolveAuth(auth: AuthConfig): Promise<ResolvedAuth> {
 	verboseLog("auth", "resolveAuth", { method: auth.method });
 	switch (auth.method) {
 		case "none":
 			return {};
 		case "api-key": {
-			const apiKey = await resolveSecretString(auth.apiKey, secretStore, "api-key");
+			const apiKey = asString(auth.apiKey);
 			if (!apiKey) throw new Error("API key auth is configured but key is missing");
 			return { headers: { Authorization: `Bearer ${apiKey}` } };
 		}
 		case "bearer-token": {
-			const token = await resolveSecretString(auth.token, secretStore, "generic");
+			const token = asString(auth.token);
 			if (!token) throw new Error("Bearer auth is configured but token is missing");
 			const headerName = auth.headerName?.trim() || "Authorization";
 			const headerValue = headerName.toLowerCase() === "authorization" ? `Bearer ${token}` : token;
@@ -163,37 +132,28 @@ export async function resolveAuth(
 		case "custom-header": {
 			const headerName = auth.headerName.trim();
 			if (!headerName) throw new Error("Custom header auth missing headerName");
-			const value = await resolveSecretString(auth.headerValue, secretStore, "generic");
+			const value = asString(auth.headerValue);
 			if (!value) throw new Error("Custom header auth missing headerValue");
 			return { headers: { [headerName]: value } };
 		}
 		case "query-param": {
 			const paramName = auth.paramName.trim();
 			if (!paramName) throw new Error("Query param auth missing paramName");
-			const value = await resolveSecretString(auth.paramValue, secretStore, "generic");
+			const value = asString(auth.paramValue);
 			if (!value) throw new Error("Query param auth missing paramValue");
 			return { query: { [paramName]: value } };
 		}
 		case "browser-session": {
-			const cookie = await resolveSecretString(auth.cookieHeader, secretStore, "generic");
+			const cookie = asString(auth.cookieHeader);
 			if (!cookie) throw new Error("Browser session auth missing cookieHeader");
 			return { headers: { Cookie: cookie } };
 		}
 		case "oauth2":
 		case "oauth2-pkce":
 		case "oauth-device-code": {
-			const refreshAuth = "clientSecret" in auth
-				? {
-					...auth,
-					clientSecret: await resolveSecretString(auth.clientSecret, secretStore, "generic"),
-				}
-				: auth;
-			const { token, tokenRef } = await resolveOAuthToken(auth.token, secretStore);
+			const token = parseOAuthToken(auth.token);
 			if (!token?.accessToken) throw new Error(`${auth.method} auth missing access token`);
-			const next = shouldRefresh(token) ? await refreshOAuthToken(refreshAuth, token) : token;
-			if (tokenRef && next !== token) {
-				secretStore.setOAuthToken(tokenRef, next);
-			}
+			const next = shouldRefresh(token) ? await refreshOAuthToken(auth, token) : token;
 			return {
 				headers: {
 					Authorization: `${next.tokenType ?? "Bearer"} ${next.accessToken}`,
@@ -205,13 +165,12 @@ export async function resolveAuth(
 
 export async function resolveProviderAuth(
 	provider: ProviderConfigRecord,
-	secretStore: SecretStore,
 ): Promise<ResolvedAuth> {
-	const auth = await resolveAuth(provider.auth, secretStore);
+	const auth = await resolveAuth(provider.auth);
 	const resolved = {
 		headers: mergeHeaders(provider.extraHeaders, auth.headers),
 		query: mergeQuery(provider.extraQuery, auth.query),
-		body: mergeBody(provider.extraBody, auth.body),
+	body: mergeBody(provider.extraBody, auth.body),
 	};
 	verboseLog("auth", "resolveProviderAuth", {
 		provider: provider.name,

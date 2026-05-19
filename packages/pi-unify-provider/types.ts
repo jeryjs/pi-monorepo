@@ -144,15 +144,8 @@ export interface ProviderConfigRecord {
 }
 
 export interface ExtensionDatabase {
-	version: 2;
-	providers: ProviderConfigRecord[];
-}
-
-export interface SecretsDatabase {
 	version: 1;
-	apiKeys: Record<string, string>;
-	oauthTokens: Record<string, OAuth2TokenData>;
-	generic: Record<string, string>;
+	providers: ProviderConfigRecord[];
 }
 
 export interface WellKnownProviderPreset {

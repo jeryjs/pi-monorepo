@@ -4,3 +4,6 @@ old_src/
 dist/
 .env
 .vscode/
+new-plan.md
+.pi/
+providers-db.json
