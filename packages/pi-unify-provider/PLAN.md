@@ -5,7 +5,7 @@
 The implementation is being rebuilt to follow Pi-native patterns more strictly:
 - Flat file layout like `pi-subagents` (minimal architecture overhead).
 - Prefer peer dependency exports over custom utility rewrites.
-- Use `ctx.ui.custom` + `@mariozechner/pi-tui` for persistent TUI flows.
+- Use `ctx.ui.custom` + `@earendil-works/pi-tui` for persistent TUI flows.
 - Keep code compact and DRY (fail-fast style).
 
 ## Target Scope (v0.2 rewrite)
@@ -38,13 +38,13 @@ register.ts                 # provider registration coordinator
 
 ## Dependency Reuse Policy
 
-- `@mariozechner/pi-coding-agent`
+- `@earendil-works/pi-coding-agent`
     - `ExtensionAPI`, `ExtensionContext`, `ToolDefinition`, `ProviderConfig`, `ProviderModelConfig`, `defineTool`, `loadSkills`, `getMarkdownTheme`.
-- `@mariozechner/pi-ai`
+- `@earendil-works/pi-ai`
     - `Api`, `Model`, `Message`, `Usage`, `TextContent`, `ToolCall`, `StreamOptions`, `SimpleStreamOptions`, `AssistantMessageEventStream` types.
-- `@mariozechner/pi-agent-core`
+- `@earendil-works/pi-agent-core`
     - `AgentToolResult`, `AgentToolUpdateCallback`, `ThinkingLevel`, `AgentMessage` types for strongly-typed tool/update state.
-- `@mariozechner/pi-tui`
+- `@earendil-works/pi-tui`
     - `Component`, `Container`, `Box`, `Text`, `Markdown`, `matchesKey`, `Key`, `truncateToWidth`, `visibleWidth` for interactive views.
 
 ## Implementation Order

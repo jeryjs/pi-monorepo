@@ -6,7 +6,7 @@ Generated at: 2026-04-12T06:22:41.531Z
 
 ## pi-coding-agent
 
-- package root: `C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@mariozechner/pi-coding-agent`
+- package root: `C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@earendil-works/pi-coding-agent`
 - files (excluding nested node_modules): 671
 - dist files: 525
 - dist .d.ts files: 129
@@ -279,7 +279,7 @@ Available terminal components rendering within `InteractiveMode`.
 
 ## pi-ai
 
-- package root: `C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@mariozechner/pi-ai`
+- package root: `C:/Users/jery/.pi/agent/extensions/pi-unify-provider/node_modules/@earendil-works/pi-ai`
 - files (excluding nested node_modules): 174
 - dist files: 172
 - dist .d.ts files: 43

@@ -1,5 +1,5 @@
-import type { Api } from "@mariozechner/pi-ai";
-import type {ExtensionAPI,ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { Api } from "@earendil-works/pi-ai";
+import type {ExtensionAPI,ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { ConfigStore } from "./config-store.ts";
 import { verboseLog } from "./debug.ts";

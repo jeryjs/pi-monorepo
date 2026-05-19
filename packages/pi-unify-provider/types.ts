@@ -1,5 +1,5 @@
-import type { ThinkingLevel as CoreThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { Api, ThinkingLevel as AiThinkingLevel } from "@mariozechner/pi-ai";
+import type { ThinkingLevel as CoreThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Api, ThinkingLevel as AiThinkingLevel } from "@earendil-works/pi-ai";
 
 export type ProviderType =
 	| "custom"

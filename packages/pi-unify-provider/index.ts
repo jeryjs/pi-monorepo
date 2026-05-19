@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import {
 	applyResolvedAuthToPayload,
 	resolveProviderAuth,
@@ -205,8 +205,5 @@ export default function registerExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		await refreshProviders();
-		if (ctx.hasUI) {
-			ctx.ui.setStatus("unify", `${store.getProviders().length} provider(s)`);
-		}
 	});
 }

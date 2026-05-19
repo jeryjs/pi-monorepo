@@ -3,7 +3,7 @@ import {
 	keyHint,
 	rawKeyHint,
 	type Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	Container,
 	fuzzyFilter,
@@ -15,7 +15,7 @@ import {
 	Text,
 	truncateToWidth,
 	type Component,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import type { UnifyModelConfig } from "./types.ts";
 
 export interface SearchSelectorItem {
