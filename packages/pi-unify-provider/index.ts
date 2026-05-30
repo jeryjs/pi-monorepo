@@ -17,7 +17,7 @@ import {
 } from "./types.ts";
 import { ALL_AUTH_METHODS, getProviderPreset } from "./well-known.ts";
 
-const DYNAMIC_API_KEY_PLACEHOLDER = "UNIFY_DYNAMIC_AUTH";
+const DYNAMIC_API_KEY_PLACEHOLDER = "unify_dynamic_auth";
 
 interface ProviderAuthBinding {
 	name: string;
