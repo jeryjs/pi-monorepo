@@ -361,9 +361,9 @@ same-task ordering — and changes the model-facing surface:
 - **`read` replaces `bg_logs`.** It adds `lines` (default 100, max 5000) and
   `offset` pagination with a `[lines A-B of N]` footer, and keeps `stream`
   selection.
-- **`attach` is now model-facing.** Upstream exposed attachment only through the
+- **`attach` is now model-facing.** Upstream exposed attachment only through its
   `/bg-attach` command; the same console is now reachable with
-  `bg_terminal action=attach`.
+  `bg_terminal action=attach` as well.
 - **`wait` supports a regex `pattern`** and defaults to 30 seconds (upstream
   defaulted to 300).
 - **Compact outputs.** `start` returns a minimal `id`/`name`/`status` line, and
@@ -375,6 +375,9 @@ same-task ordering — and changes the model-facing surface:
   `@99percentpeople/pi-shared-settings` dependency. Configuration now lives in
   `<pi agent dir>/pi-bg-terminal.json` and is edited with the extension's own
   `/bg-terminal-settings` command instead of a shared `/99settings` menu.
+- **Prefixed commands.** The interactive commands were renamed
+  `/bg-attach` → `/bg-terminal-attach`, `/bg-kill` → `/bg-terminal-kill`, and
+  the new settings menu is `/bg-terminal-settings`.
 - **Package identity.** Renamed to `@jeryjs/pi-bg-terminal` at version `3.0.0`.
   Install and update commands must use the new name.
 
