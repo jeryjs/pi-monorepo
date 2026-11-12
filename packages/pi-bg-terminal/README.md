@@ -273,17 +273,27 @@ widget.
 
 ## Settings
 
-The extension stores its configuration in the shared settings file
-(`~/.pi/agent/99extensions.json`, namespace `background-tasks`) and exposes a
-panel in the `/99settings` menu. Two options are available:
+Settings are self-contained: the extension reads and writes its own file at
+`<pi agent dir>/pi-bg-terminal.json` (normally `~/.pi/agent/pi-bg-terminal.json`,
+namespace `background-tasks`) and does not depend on any shared settings
+package. Configure it with the `/bg-settings` command:
 
-- **Collapsed tasks** — how many task rows the widget shows before it is
-  expanded (`Summary only`, `1`, `3`, or `5`).
-- **Output preview** — which pipe-task rows include their latest output
-  (`Off`, `Failures`, `Finished`, or `All pipe tasks`).
+```text
+/bg-settings                 # interactive prompts for both options
+/bg-settings collapsed 3
+/bg-settings preview failures
+```
 
-Changes apply immediately. Operational commands such as `/bg-attach` and
-`/bg-kill` remain separate from settings.
+Two options are available:
+
+- **Collapsed tasks** (`collapsed`) — how many task rows the widget shows before
+  it is expanded (`Summary only`, `1`, `3`, or `5`; any value from 0 to 10).
+- **Output preview** (`preview`) — which pipe-task rows include their latest
+  output (`Off`, `Failures`, `Finished`, or `All pipe tasks`).
+
+Changes apply immediately, and `/bg-settings` autocompletes both the setting
+name and its values. Operational commands such as `/bg-attach` and `/bg-kill`
+remain separate from settings.
 
 ## Shell and platform behavior
 
@@ -362,6 +372,10 @@ same-task ordering — and changes the model-facing surface:
   conversation turns small.
 - **Runtime-validated signals.** `signal` is a plain string validated at
   runtime rather than an enum of 34 names in the schema.
+- **Self-contained settings.** Removed the
+  `@99percentpeople/pi-shared-settings` dependency. Configuration now lives in
+  `<pi agent dir>/pi-bg-terminal.json` and is edited with the extension's own
+  `/bg-settings` command instead of a shared `/99settings` menu.
 - **Package identity.** Renamed to `@jeryjs/pi-bg-terminal` at version `3.0.0`.
   Install and update commands must use the new name.
 
@@ -398,10 +412,9 @@ runtime, but `node-pty` is still installed as a package dependency.
 This project is a fork of
 [`@99percentpeople/pi-background-tasks`](https://www.npmjs.com/package/@99percentpeople/pi-background-tasks)
 by 99percentpeople / Zach Yuen, used under the MIT License. The runtime,
-attachment, widget, and settings implementation originate there. The upstream
-`/99settings` menu and namespaced settings store are provided by
-[`@99percentpeople/pi-shared-settings`](https://www.npmjs.com/package/@99percentpeople/pi-shared-settings),
-which is bundled into this package's build.
+attachment, widget, and settings implementation originate there. The settings
+store and menu from upstream's shared-settings package were replaced with a
+small self-contained implementation in this fork.
 
 ## License
 

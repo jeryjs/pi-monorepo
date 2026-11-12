@@ -11,11 +11,6 @@
       "./index.ts"
     ]
   },
-  "piBuild": {
-    "bundlePackages": [
-      "@99percentpeople/pi-shared-settings"
-    ]
-  },
   "keywords": [
     "pi-package",
     "pi",
@@ -38,7 +33,6 @@
     "typebox": "*"
   },
   "dependencies": {
-    "@99percentpeople/pi-shared-settings": "0.1.4",
     "@xterm/addon-serialize": "0.14.0",
     "@xterm/headless": "6.0.0",
     "node-pty": "1.2.0-beta.14"
