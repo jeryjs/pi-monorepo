@@ -10,7 +10,7 @@ This is a fork of
 [Credits](#credits).
 
 All background behavior is exposed through a **single tool**, `bg_terminal`,
-whose `action` parameter selects the operation. `/bg-attach` opens a live
+whose `action` parameter selects the operation. `/bg-terminal-attach` opens a live
 terminal (`Ctrl+]` detaches without stopping the task).
 
 ## Highlights
@@ -79,8 +79,8 @@ with `start` → `wait` → `read`.
 Users normally need only two interactive commands:
 
 ```text
-/bg-attach <task-id>
-/bg-kill <task-id>
+/bg-terminal-attach <task-id>
+/bg-terminal-kill <task-id>
 ```
 
 Omit the task ID to choose from an interactive list. Both commands autocomplete
@@ -157,7 +157,7 @@ terminal.
 ## Live attach and final snapshots
 
 Each task owns a virtual console from the moment it starts. Output is processed
-continuously whether attached or not. When `/bg-attach` (or the `attach` action)
+continuously whether attached or not. When `/bg-terminal-attach` (or the `attach` action)
 opens the console, it first renders the retained terminal buffer and buffers
 only the small amount of output arriving during that replay. The child process is
 never paused and its stdout or stderr is never reconnected to the physical
@@ -276,24 +276,23 @@ widget.
 Settings are self-contained: the extension reads and writes its own file at
 `<pi agent dir>/pi-bg-terminal.json` (normally `~/.pi/agent/pi-bg-terminal.json`,
 namespace `background-tasks`) and does not depend on any shared settings
-package. Configure it with the `/bg-settings` command:
+package. Open the menu with:
 
 ```text
-/bg-settings                 # interactive prompts for both options
-/bg-settings collapsed 3
-/bg-settings preview failures
+/bg-terminal-settings
 ```
 
-Two options are available:
+The menu mirrors Pi's own `/settings` screen: a themed, searchable list between
+dynamic borders. Move with the arrow keys, press `Enter` or `Space` to cycle a
+value, and press `Esc` to close. Two options are available:
 
-- **Collapsed tasks** (`collapsed`) — how many task rows the widget shows before
-  it is expanded (`Summary only`, `1`, `3`, or `5`; any value from 0 to 10).
-- **Output preview** (`preview`) — which pipe-task rows include their latest
-  output (`Off`, `Failures`, `Finished`, or `All pipe tasks`).
+- **Collapsed tasks** — how many task rows the widget shows before it is
+  expanded (`Summary only`, `1`, `3`, or `5`; any value from 0 to 10).
+- **Output preview** — which pipe-task rows include their latest output
+  (`Off`, `Failures`, `Finished`, or `All pipe tasks`).
 
-Changes apply immediately, and `/bg-settings` autocompletes both the setting
-name and its values. Operational commands such as `/bg-attach` and `/bg-kill`
-remain separate from settings.
+Changes apply immediately. Operational commands such as `/bg-terminal-attach`
+and `/bg-terminal-kill` remain separate from settings.
 
 ## Shell and platform behavior
 
@@ -349,7 +348,7 @@ unavailable until the task is terminated or confirmed finished.
 
 This fork keeps the upstream runtime intact — process-tree cleanup on shutdown
 (including Windows `taskkill /T`), PTY + headless xterm formatting, the bounded
-in-memory log store, the status widget, `/bg-attach` and `/bg-kill`, and
+in-memory log store, the status widget, `/bg-terminal-attach` and `/bg-terminal-kill`, and
 same-task ordering — and changes the model-facing surface:
 
 - **One tool instead of seven.** Upstream registered `bg_start`, `bg_wait`,
@@ -375,7 +374,7 @@ same-task ordering — and changes the model-facing surface:
 - **Self-contained settings.** Removed the
   `@99percentpeople/pi-shared-settings` dependency. Configuration now lives in
   `<pi agent dir>/pi-bg-terminal.json` and is edited with the extension's own
-  `/bg-settings` command instead of a shared `/99settings` menu.
+  `/bg-terminal-settings` command instead of a shared `/99settings` menu.
 - **Package identity.** Renamed to `@jeryjs/pi-bg-terminal` at version `3.0.0`.
   Install and update commands must use the new name.
 

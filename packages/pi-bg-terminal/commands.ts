@@ -9,9 +9,9 @@ import {
 } from "./runtime.ts";
 
 export function registerBackgroundTaskCommands(pi: ExtensionAPI): void {
-  // ── /bg-attach command ─────────────────────────────────────────────
+  // ── /bg-terminal-attach command ────────────────────────────────────
 
-  pi.registerCommand("bg-attach", {
+  pi.registerCommand("bg-terminal-attach", {
     description: "Attach to a task (live while running, read-only final snapshot after exit; Ctrl+] to detach)",
     getArgumentCompletions: (prefix: string) => {
       const items = Array.from(tasks.values())
@@ -43,9 +43,9 @@ export function registerBackgroundTaskCommands(pi: ExtensionAPI): void {
     },
   });
 
-  // ── /bg-kill command ───────────────────────────────────────────────
+  // ── /bg-terminal-kill command ──────────────────────────────────────
 
-  pi.registerCommand("bg-kill", {
+  pi.registerCommand("bg-terminal-kill", {
     description: "Kill a background task by ID",
     getArgumentCompletions: (prefix: string) => {
       const items = Array.from(tasks.values())

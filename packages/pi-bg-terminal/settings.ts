@@ -1,4 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  DynamicBorder,
+  getSettingsListTheme,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 import {
   BACKGROUND_COLLAPSED_TASK_LIMIT_MAX,
   BACKGROUND_COLLAPSED_TASK_LIMIT_MIN,
@@ -7,9 +13,11 @@ import {
   type BackgroundTasksConfig,
 } from "./config.ts";
 
-const SETTINGS_COMMAND = "bg-settings";
-const COLLAPSED_KEY = "collapsed";
-const PREVIEW_KEY = "preview";
+const SETTINGS_COMMAND = "bg-terminal-settings";
+const MAX_VISIBLE_SETTINGS = 10;
+
+const COLLAPSED_SETTING_ID = "collapsedTaskLimit";
+const PREVIEW_SETTING_ID = "outputPreview";
 
 const OUTPUT_PREVIEW_LABELS: Record<BackgroundOutputPreview, string> = {
   off: "Off",
@@ -35,7 +43,7 @@ function collapsedTaskLimitValues(current: number): string[] {
 
 function outputPreviewForLabel(value: string): BackgroundOutputPreview | undefined {
   return (Object.entries(OUTPUT_PREVIEW_LABELS) as Array<[BackgroundOutputPreview, string]>)
-    .find(([, label]) => label.toLowerCase() === value.trim().toLowerCase())?.[0];
+    .find(([, label]) => label === value)?.[0];
 }
 
 function collapsedTaskLimitForValue(value: string): number | undefined {
@@ -50,104 +58,85 @@ function collapsedTaskLimitForValue(value: string): number | undefined {
 }
 
 /**
- * Registers the extension's own `/bg-settings` command.
- *
- * This replacement keeps configuration self-contained: values are persisted by
- * the extension's config module instead of a shared settings store.
+ * Settings menu modeled on Pi's own `/settings` screen: a themed `SettingsList`
+ * between two dynamic borders, with search enabled and Enter/Space cycling each
+ * value. The list updates its own display, so changes persist immediately.
  */
+class BackgroundTasksSettingsComponent extends Container {
+  private readonly settingsList: SettingsList;
+
+  constructor(
+    getConfig: () => BackgroundTasksConfig,
+    updateConfig: (config: BackgroundTasksConfig) => void,
+    onCancel: () => void,
+  ) {
+    super();
+    const config = getConfig();
+    const items: SettingItem[] = [
+      {
+        id: COLLAPSED_SETTING_ID,
+        label: "Collapsed tasks",
+        description: "Number of task rows shown below the editor before the widget is expanded",
+        currentValue: collapsedTaskLimitLabel(config.collapsedTaskLimit),
+        values: collapsedTaskLimitValues(config.collapsedTaskLimit),
+      },
+      {
+        id: PREVIEW_SETTING_ID,
+        label: "Output preview",
+        description: "Which pipe-task rows include their latest output line",
+        currentValue: OUTPUT_PREVIEW_LABELS[config.outputPreview],
+        values: Object.values(OUTPUT_PREVIEW_LABELS),
+      },
+    ];
+
+    this.addChild(new DynamicBorder());
+    this.settingsList = new SettingsList(
+      items,
+      Math.min(items.length, MAX_VISIBLE_SETTINGS),
+      getSettingsListTheme(),
+      (id, newValue) => {
+        const current = getConfig();
+        if (id === COLLAPSED_SETTING_ID) {
+          const limit = collapsedTaskLimitForValue(newValue);
+          if (limit !== undefined) updateConfig({ ...current, collapsedTaskLimit: limit });
+          return;
+        }
+        if (id === PREVIEW_SETTING_ID) {
+          const preview = outputPreviewForLabel(newValue);
+          if (preview !== undefined) updateConfig({ ...current, outputPreview: preview });
+        }
+      },
+      onCancel,
+      { enableSearch: true },
+    );
+    this.addChild(this.settingsList);
+    this.addChild(new DynamicBorder());
+  }
+
+  handleInput(data: string): void {
+    this.settingsList.handleInput(data);
+  }
+}
+
+/** Registers the extension's own `/bg-terminal-settings` command. */
 export function registerBackgroundTasksSettings(
   pi: ExtensionAPI,
   controller: BackgroundTasksSettingsController,
 ): void {
-  const applyCollapsed = (value: string, ctx: ExtensionContext): boolean => {
-    const limit = collapsedTaskLimitForValue(value);
-    if (limit === undefined) return false;
-    controller.updateConfig({ ...controller.getConfig(), collapsedTaskLimit: limit }, ctx);
-    return true;
-  };
-
-  const applyPreview = (value: string, ctx: ExtensionContext): boolean => {
-    const preview = outputPreviewForLabel(value);
-    if (preview === undefined) return false;
-    controller.updateConfig({ ...controller.getConfig(), outputPreview: preview }, ctx);
-    return true;
-  };
-
   pi.registerCommand(SETTINGS_COMMAND, {
     description: "Configure the background task widget (collapsed rows and output preview)",
-    getArgumentCompletions: (prefix: string) => {
-      const trimmed = prefix.trimStart();
-      const [key, ...rest] = trimmed.split(/\s+/);
-      if (!key || rest.length === 0) {
-        const keys = [
-          { value: COLLAPSED_KEY, label: "collapsed: task rows shown when collapsed" },
-          { value: PREVIEW_KEY, label: "preview: which pipe rows show output" },
-        ];
-        if (!key) return keys;
-        const collapsedMatch = COLLAPSED_KEY.startsWith(key);
-        const previewMatch = PREVIEW_KEY.startsWith(key);
-        const matches = keys.filter((_, index) => index === 0 ? collapsedMatch : previewMatch);
-        return matches.length > 0 ? matches : null;
-      }
-      if (key === COLLAPSED_KEY) {
-        return collapsedTaskLimitValues(controller.getConfig().collapsedTaskLimit)
-          .map((value) => ({ value: `${COLLAPSED_KEY} ${value}`, label: value }))
-          .filter((item) => item.value.startsWith(trimmed));
-      }
-      if (key === PREVIEW_KEY) {
-        return Object.values(OUTPUT_PREVIEW_LABELS)
-          .map((value) => ({ value: `${PREVIEW_KEY} ${value}`, label: value }))
-          .filter((item) => item.value.startsWith(trimmed));
-      }
-      return null;
-    },
-    handler: async (args, ctx) => {
-      const [rawKey, ...rest] = args.trim().split(/\s+/);
-      const suppliedValue = rest.join(" ");
-
-      if (!rawKey) {
-        const collapsed = await ctx.ui.select(
-          "Collapsed task rows (before the widget is expanded)",
-          collapsedTaskLimitValues(controller.getConfig().collapsedTaskLimit),
-        );
-        if (collapsed && !applyCollapsed(collapsed, ctx)) {
-          ctx.ui.notify(`Invalid collapsed task count: ${collapsed}`, "error");
-        }
-        const preview = await ctx.ui.select(
-          "Which pipe tasks include their latest output?",
-          Object.values(OUTPUT_PREVIEW_LABELS),
-        );
-        if (preview && !applyPreview(preview, ctx)) {
-          ctx.ui.notify(`Invalid output preview: ${preview}`, "error");
-        }
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("Background task settings require Pi TUI mode.", "warning");
         return;
       }
-
-      if (rawKey === COLLAPSED_KEY) {
-        const value = suppliedValue || await ctx.ui.select(
-          "Collapsed task rows (before the widget is expanded)",
-          collapsedTaskLimitValues(controller.getConfig().collapsedTaskLimit),
-        );
-        if (!value) return;
-        if (!applyCollapsed(value, ctx)) {
-          ctx.ui.notify(`Invalid collapsed task count: ${value}`, "error");
-        }
-        return;
-      }
-
-      if (rawKey === PREVIEW_KEY) {
-        const value = suppliedValue || await ctx.ui.select(
-          "Which pipe tasks include their latest output?",
-          Object.values(OUTPUT_PREVIEW_LABELS),
-        );
-        if (!value) return;
-        if (!applyPreview(value, ctx)) {
-          ctx.ui.notify(`Invalid output preview: ${value}`, "error");
-        }
-        return;
-      }
-
-      ctx.ui.notify(`Unknown setting "${rawKey}". Use "${COLLAPSED_KEY}" or "${PREVIEW_KEY}".`, "error");
+      await ctx.ui.custom<void>((_tui, _theme, _keybindings, done) =>
+        new BackgroundTasksSettingsComponent(
+          () => controller.getConfig(),
+          (config) => controller.updateConfig(config, ctx),
+          () => done(undefined),
+        )
+      );
     },
   });
 }
