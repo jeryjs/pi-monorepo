@@ -7,8 +7,9 @@ locally for builds, servers, tests, and TUIs—or combine it with
 to run and interact with the same workloads on a remote Unix or Windows host.
 
 Just ask Pi to *"start the dev server in the background"* and keep chatting.
-`bg_*` tools start, wait on, inspect, interact with, and stop tasks;
-`/bg-attach` opens a live terminal (`Ctrl+]` detaches without stopping it).
+The single `bg_terminal` tool starts, waits on, inspects, interacts with, and
+stops tasks through an `action` parameter; `/bg-attach` opens a live terminal
+(`Ctrl+]` detaches without stopping it).
 
 ## Demo
 
@@ -31,7 +32,7 @@ is active—here, `htop` runs in a remote PTY:
 - Retain output while detached and replay it before seamlessly following live data
 - Track status, duration, environment, and optional output in a compact widget
 - Address tasks by stable, unique names as well as generated IDs
-- Compose start, wait, logs, input, signals, and termination without polling
+- Compose start, wait, read, input, signals, and termination without polling
 - Route tasks through named shell providers such as SSH Remote and Pwsh Adapter
 - Keep remote tasks bound to their original host and cwd across workspace switches
 - Reconcile SSH transport loss before reporting a remote task as finished
@@ -40,6 +41,7 @@ is active—here, `htop` runs in a remote PTY:
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Tool reference](#tool-reference)
 - [Run a remote TUI over SSH](#run-a-remote-tui-over-ssh)
 - [Tool ordering and parallelism](#tool-ordering-and-parallelism)
 - [Pipe and PTY modes](#pipe-and-pty-modes)
@@ -97,15 +99,15 @@ Run the test suite in the background and inspect the failures when it exits.
 
 Background execution is appropriate when the user asks for it, the process must
 remain available for later interaction, or Pi can perform useful independent
-work while it runs. Runtime alone is not a reason to use these tools. If Pi
+work while it runs. Runtime alone is not a reason to use this tool. If Pi
 needs a command's result before it can continue, it should use the foreground
 `bash` tool with an appropriate timeout instead of emulating synchronous
-execution with `bg_start` → `bg_wait` → `bg_logs`.
+execution with `start` → `wait` → `read`.
 
-The model can start, wait for, inspect, signal, and stop tasks. Model-facing
-tools have narrow responsibilities: `bg_wait` reports completion plus the latest
-pipe log line, `bg_status` reports metadata plus the latest pipe log line,
-`bg_logs` reads full retained output, and `bg_kill` reports termination.
+The model reaches all background behavior through one `bg_terminal` tool with an
+`action` parameter. Actions stay narrow: `wait` reports completion plus the
+latest pipe log line, `status` reports compact metadata, `read` pages retained
+output, and `kill` reports termination.
 Every model-facing `id` accepts either the generated task ID or its unique,
 case-insensitive name. Users normally need only these interactive commands:
 
@@ -116,6 +118,29 @@ case-insensitive name. Users normally need only these interactive commands:
 
 Omit the task ID to choose from an interactive list. Press `Ctrl+]` to leave
 an attached console without stopping its task.
+
+## Tool reference
+
+`bg_terminal` takes one required `action`. `id` accepts a task ID or unique
+name; omit it for `status` to list every retained task.
+
+| Action | Purpose | Key parameters |
+| --- | --- | --- |
+| `start` | Run a command detached | `name`, `command`, `cwd`, `mode` (`pipe`/`pty`), `cols`, `rows` |
+| `wait` | Block for exit or a matching output line | `id`, `timeout` (default 30s), `pattern` (regex) |
+| `status` | Inspect one task, or list all when `id` is omitted | `id` |
+| `read` | Page retained output | `id`, `lines` (default 100, max 5000), `offset`, `stream` |
+| `send` | Type input or send a signal | `id`, `input` xor `signal` |
+| `kill` | Signal a task | `id`, `signal` (default `SIGTERM`) |
+| `attach` | Open the live console | `id` |
+
+`start` returns a minimal `id`, `name`, and `status`; `status`, `wait`, `kill`,
+and `attach` return one compact summary line per task.
+
+`read` pages like a signed cursor over the retained lines: `offset` omitted or
+`0` returns the tail, a positive value skips that many recent lines (paging
+upward), and a negative value starts at that line from the top (`-1` is the
+first line). A truncated read appends a `[lines A-B of N]` footer.
 
 ## Run a remote TUI over SSH
 
@@ -133,7 +158,7 @@ Start lazygit in a background PTY named remote-git so I can attach to it.
 ```
 
 Run `/bg-attach` and select `remote-git` from the task list, or pass the task
-ID shown by `bg_start`:
+ID shown by `start`:
 
 ```text
 /bg-attach <task-id>
@@ -170,26 +195,26 @@ Important details:
 
 ## Tool ordering and parallelism
 
-Background tool calls that target the same task reference in one model response
-execute strictly in source order. A reference can be the generated ID or the
-unique task name. `bg_start` joins the same ordering chain by name, so the model
-does not need to spend a separate round learning the generated ID before it can
-compose the rest of a finite workflow:
+Background `bg_terminal` calls that target the same task reference in one model
+response execute strictly in source order. A reference can be the generated ID or
+the unique task name. The `start` action joins the same ordering chain by name,
+so the model does not need to spend a separate round learning the generated ID
+before it can compose the rest of a finite workflow:
 
 ```text
-bg_start(name=A) → bg_wait(id=A)                    # start, finish, latest pipe log line
-bg_start(name=A) → bg_wait(id=A) → bg_logs(id=A)   # add full/multiline or PTY output
-bg_status(A)                                        # status plus latest pipe log line
-bg_send(A) → bg_wait(A) → bg_logs(A)               # interact, wait, then read full output
-bg_kill(A) → bg_logs(A)                             # terminate, then read final output
+start(name=A) → wait(id=A)                    # start, finish, latest pipe log line
+start(name=A) → wait(id=A) → read(id=A)      # add full/multiline or PTY output
+status(A)                                    # compact status for one task
+send(A) → wait(A) → read(A)                  # interact, wait, then read output
+kill(A) → read(A)                            # terminate, then read final output
 ```
 
 The model should emit each complete chain in one response instead of waiting for
 one tool result before emitting the next call. Calls for different tasks remain
 independent and execute in parallel. Ordering is intentional:
-`bg_logs(A) → bg_wait(A)` reads available output first and only then waits.
-Multiple chains such as `bg_wait(A) → bg_logs(A)` and
-`bg_wait(B) → bg_logs(B)` can run concurrently. A `bg_status` call without an
+`read(A) → wait(A)` reads available output first and only then waits.
+Multiple chains such as `wait(A) → read(A)` and
+`wait(B) → read(B)` can run concurrently. A `status` call without an
 ID is a global snapshot and is not part of any single-task chain.
 
 ## Pipe and PTY modes
@@ -227,7 +252,7 @@ If a task exits while attached, the console stays open until `Ctrl+]`:
   application's final screen.
 
 The completion message exists only on the user's physical terminal. It is not
-written into retained logs, `bg_logs`, or the final virtual-terminal snapshot.
+written into retained logs, `read` output, or the final virtual-terminal snapshot.
 A finished task can be attached again in read-only mode while its snapshot is
 still retained.
 
@@ -310,31 +335,32 @@ dedicated kill operation when the goal is reliable process-tree termination.
 
 ## Output inspection
 
-For pipe tasks, `bg_wait` and `bg_status` include the latest non-empty log line
+For pipe tasks, `wait` and `status` include the latest non-empty log line
 and identify whether it came from stdout or stderr. The same value is available
 as `latestLog` in tool details; a status list includes it per task. They omit the
 field when no pipe output is available and never expose a PTY terminal snapshot.
 
-Use `bg_logs` when one latest line is insufficient or any PTY output is needed.
+Use `read` when one latest line is insufficient or any PTY output is needed.
 Pipe tasks retain stdout and stderr separately, while PTY tasks expose the parsed
 terminal buffer rather than raw ANSI escape sequences. Omitting `stream` works
 in both modes: pipe tasks return stdout and stderr, and PTY tasks return terminal
-output. Use `tail` or `from_line`/`max_lines` to select the retained range. An
+output. Use `lines` with `offset` to page the retained range. An
 empty running task reports `(no output yet)`; once it finishes, the same empty
 log is reported as `(no output)` (or `(no terminal output)` for PTY mode).
 
-`bg_kill` still returns no process output. Emit `bg_logs` after `bg_wait`,
-`bg_status`, or `bg_kill` only when fuller pipe output or PTY terminal output is
+`kill` still returns no process output. Emit `read` after `wait`,
+`status`, or `kill` only when fuller pipe output or PTY terminal output is
 needed.
 
 ## Pi capabilities
 
-The extension exposes a compact set of model-facing operations: start, wait,
-status, logs, send, and kill. Each operation has one responsibility, while
-same-reference source ordering—including `bg_start` by unique name—composes a
+The extension exposes one model-facing tool, `bg_terminal`, whose `action`
+selects start, wait, status, read, send, kill, or attach. Each action has one
+responsibility, while
+same-reference source ordering—including `start` by unique name—composes a
 complete workflow in one model response without sacrificing parallel execution
 across tasks. Users can usually describe the desired outcome in natural
-language instead of calling these operations manually. While a tool call is
+language instead of calling actions manually. While a tool call is
 streaming, fields appear only after the model writes them; missing arguments are
 omitted rather than rendered as placeholders.
 
@@ -352,13 +378,13 @@ Installing
 [`@99percentpeople/pi-ssh-remote`](https://www.npmjs.com/package/@99percentpeople/pi-ssh-remote)
 registers a higher-priority OpenSSH provider for pipe and PTY tasks whenever an
 SSH workspace is active. Commands, including full-screen PTY applications, run
-in the remote cwd; an explicit `bg_start.cwd` is mapped into the remote
+in the remote cwd; an explicit `cwd` on the `start` action is mapped into the remote
 workspace without requiring that absolute directory to exist locally. See
 [Run a remote TUI over SSH](#run-a-remote-tui-over-ssh) for a complete example.
 
 SSH launches are tagged with an immutable environment such as
-`SSH devbox:/srv/project`. `bg_start`, `bg_wait`, `bg_status`, `bg_logs`,
-`bg_send`, and `bg_kill` return that location in their task information, and
+`SSH devbox:/srv/project`. Every `bg_terminal` action returns that location in
+its task information, and
 finished snapshots retain it across extension reloads. A running task stays in
 the environment where it started; later tasks follow SSH host, cwd, and
 local/remote transitions.
@@ -370,7 +396,7 @@ exists, the adapter retries with key or agent authentication. Foreground
 passwords are not copied into background or signal processes. On Unix the
 control request targets the recorded remote process group; Windows termination
 uses the recorded remote process tree. This keeps
-`bg_send` signals, `bg_kill`, and normal Pi shutdown from treating termination
+`send` signals, `kill`, and normal Pi shutdown from treating termination
 of the local SSH transport as proof that the remote command exited. If an
 adapter cannot confirm cleanup after its local transport disappears, the task
 enters `disconnected`: retained logs remain readable and adapter signals can be
@@ -406,9 +432,9 @@ resolver returns `undefined`; throwing fails closed. Every registration requires
 an `id` and `resolveShell`; unnamed v1 registrations are rejected. Providers
 can unregister with
 `pi.events.emit("bg:unregister", { id })`. SSH task-control safety requires
-protocol v2, so SSH Remote blocks new remote `bg_start` calls when an older
-Background Tasks build is detected. `bg_send.signal` exposes a portable
-local/remote signal vocabulary and validates each request against the selected
+protocol v2, so SSH Remote blocks new remote `start` calls when an older
+Background Tasks build is detected. `send` and `kill` expose a portable
+local/remote signal vocabulary and validate each request against the selected
 task's capabilities rather than Pi's local operating system alone. Native
 Windows `ssh.exe -n` pipe launches advertise stdin as unavailable and direct
 interactive input to PTY mode instead of reporting a misleading successful

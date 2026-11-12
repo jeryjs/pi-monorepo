@@ -21,7 +21,7 @@ export interface BackgroundTaskControl {
   supportedSignals?: readonly BackgroundSignal[];
   /** Signals that should classify a later task exit as an intentional stop. */
   terminatingSignals?: readonly BackgroundSignal[];
-  /** Human-readable destination used in bg_send results. */
+  /** Human-readable destination used in bg_terminal send results. */
   signalTarget?: "process" | "process group" | "process tree";
   /** False when an adapter launch deliberately detached stdin (for example ssh -n). */
   stdinAvailable?: boolean;

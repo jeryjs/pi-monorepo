@@ -217,9 +217,10 @@ export const runningTasks = new Set<BgTask>();
 export const outputLogStore = new MemoryLogStore();
 // Pi preflights sibling calls in source order before executing them concurrently.
 // Build per-task chains during preflight so same-task calls preserve that order
-// without serializing unrelated tasks. bg_start joins the chain by task name,
-// allowing a model to compose start → wait → logs before a generated ID exists.
-export const ORDERED_TASK_TOOL_NAMES = new Set(["bg_start", "bg_wait", "bg_status", "bg_logs", "bg_send", "bg_kill"]);
+// without serializing unrelated tasks. The bg_terminal start action joins the
+// chain by task name, allowing a model to compose start → wait → read before a
+// generated ID exists; every other action joins by the id/name it targets.
+export const ORDERED_TASK_TOOL_NAMES = new Set(["bg_terminal"]);
 const orderedToolCalls = new Map<string, OrderedToolCall>();
 const orderedTaskTails = new Map<string, Promise<void>>();
 export const TASK_SNAPSHOT_CUSTOM_TYPE = "pi-background-task-snapshots";
@@ -365,12 +366,16 @@ function splitLogLines(text: string): string[] {
   return lines;
 }
 
+export function readLogLines(logKey: string): string[] {
+  return splitLogLines(outputLogStore.read(logKey));
+}
+
 export function readTail(logKey: string, lines: number): string {
-  return splitLogLines(outputLogStore.read(logKey)).slice(-lines).join("\n");
+  return readLogLines(logKey).slice(-lines).join("\n");
 }
 
 export function readRange(logKey: string, fromLine: number, maxLines: number): string {
-  return splitLogLines(outputLogStore.read(logKey)).slice(fromLine, fromLine + maxLines).join("\n");
+  return readLogLines(logKey).slice(fromLine, fromLine + maxLines).join("\n");
 }
 
 export function formatDuration(ms: number): string {
@@ -938,7 +943,7 @@ export async function sendProcessSignal(
     }
     if (taskProcess.kind === "pty") {
       if (localSignal !== "SIGTERM" && localSignal !== "SIGHUP") {
-        throw new Error(`${localSignal} is not supported by node-pty on Windows; send a terminal control key or use bg_kill.`);
+        throw new Error(`${localSignal} is not supported by node-pty on Windows; send a terminal control key or use bg_terminal kill.`);
       }
       taskProcess.pty.kill();
       return;

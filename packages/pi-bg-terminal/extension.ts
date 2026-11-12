@@ -122,7 +122,9 @@ export default function (
   pi.on("tool_call", async (event) => {
     if (!ORDERED_TASK_TOOL_NAMES.has(event.toolName)) return;
     const input = event.input as Record<string, unknown>;
-    const taskReference = event.toolName === "bg_start" ? input.name : input.id;
+    // The start action references the task by its name before an ID exists;
+    // every other action references an existing task by id or unique name.
+    const taskReference = input.action === "start" ? input.name : input.id;
     if (typeof taskReference !== "string" || taskReference.trim().length === 0) return;
     registerOrderedToolCall(event.toolCallId, taskOrderingKey(taskReference));
   });
