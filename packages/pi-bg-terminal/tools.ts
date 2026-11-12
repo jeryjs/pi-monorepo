@@ -11,7 +11,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import type * as NodePty from "node-pty";
 import { MAX_INPUT_BYTES, parseInput, type ParsedInput } from "./input.ts";
-import { nodePty } from "./runtime-dependencies.ts";
+import { loadNodePty } from "./runtime-dependencies.ts";
 import { attachTask } from "./attachment.ts";
 import {
   MAX_TERMINAL_COLS,
@@ -262,7 +262,7 @@ export function registerBackgroundTaskTools(
 
     try {
       if (mode === "pty") {
-        const ptyProcess: NodePty.IPty = (shell.ptySpawnProcess ?? dependencies.ptySpawnProcess ?? nodePty.spawn)(shell.file, shell.args, {
+        const ptyProcess: NodePty.IPty = (shell.ptySpawnProcess ?? dependencies.ptySpawnProcess ?? loadNodePty().spawn)(shell.file, shell.args, {
           name: shell.env.TERM || "xterm-256color",
           cols,
           rows,

@@ -10,9 +10,9 @@ import {
 import { MemoryLogStore } from "./memory-log-store.ts";
 import {
   HeadlessTerminal,
-  nodePty,
   SerializeAddon,
 } from "./runtime-dependencies.ts";
+import type * as NodePty from "node-pty";
 import type {
   BackgroundShellProviderRegistration,
   BackgroundSignal,
@@ -109,7 +109,7 @@ interface RegisteredShellProvider {
   order: number;
   resolveShell: ShellResolver;
   spawn?: typeof spawn;
-  ptySpawn?: typeof nodePty.spawn;
+  ptySpawn?: typeof NodePty.spawn;
 }
 
 let shellProviderOrder = 0;
@@ -129,7 +129,10 @@ export function resolveShell(
       return {
         ...launch,
         spawnProcess: provider.spawn ?? spawn,
-        ptySpawnProcess: provider.ptySpawn ?? nodePty.spawn,
+        // Deliberately left undefined unless the provider supplies one: PTY
+        // tasks fall back to node-pty at the spawn site so a missing native
+        // dependency never blocks pipe-only launches.
+        ptySpawnProcess: provider.ptySpawn,
       };
     }
   }
