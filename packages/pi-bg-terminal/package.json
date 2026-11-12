@@ -1,8 +1,7 @@
 {
-  "name": "@99percentpeople/pi-background-tasks",
-  "version": "2.1.2",
-  "private": true,
-  "description": "Background commands and attachable PTY/TUI sessions for Pi, with SSH Remote integration",
+  "name": "@jeryjs/pi-bg-terminal",
+  "version": "3.0.0",
+  "description": "Background commands and attachable PTY/TUI sessions for Pi, exposed through a single bg_terminal tool",
   "type": "module",
   "scripts": {
     "build": "bun run ../../scripts/build-package.ts"
@@ -21,23 +20,13 @@
     "pi-package",
     "pi",
     "coding-agent",
+    "background-terminal",
     "background-tasks",
     "pty",
-    "tui",
-    "ssh",
-    "remote-terminal"
+    "tui"
   ],
-  "author": "99percentpeople",
+  "author": "jeryjs",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/99percentpeople/pi-extensions.git",
-    "directory": "extensions/background-tasks"
-  },
-  "bugs": {
-    "url": "https://github.com/99percentpeople/pi-extensions/issues"
-  },
-  "homepage": "https://github.com/99percentpeople/pi-extensions#background-tasks",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
