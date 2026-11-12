@@ -104,6 +104,8 @@ name; omit it for `status` to list every retained task.
 
 `start` returns a minimal `id`, `name`, and `status`. `status`, `wait`, `kill`,
 and `attach` return one compact summary line per task to keep responses small.
+`attach` blocks until you detach, then follows the summary with the last few
+output lines and a reminder that `read` can return more.
 
 ### `read` pagination
 
