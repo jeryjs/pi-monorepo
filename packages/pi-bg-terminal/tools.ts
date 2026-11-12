@@ -75,6 +75,7 @@ const MAX_READ_LINES = 5000;
 const WAIT_POLL_INTERVAL_MS = 200;
 const MAX_SUMMARY_DETAIL_CHARS = 80;
 const MAX_MATCH_CHARS = 240;
+const ATTACH_EXCERPT_LINES = 10;
 
 const bgTerminalParameters = Type.Object({
   action: Type.Unsafe<BgAction>(StringEnum([...BG_ACTIONS], { description: "Operation to perform" })),
@@ -106,7 +107,7 @@ const bgTerminalParameters = Type.Object({
     description: "wait: regex on output; returns early on match",
   })),
   input: Type.Optional(Type.String({
-    description: "send: exact text; keys use <...> tokens, e.g. y<Enter>, <C-d>",
+    description: "send: exact text, no Enter implied; append <Enter> to submit and use <...> key tokens, e.g. \"y<Enter>\", \"<Down*3><Enter>\", \"<C-d>\"",
     minLength: 1,
     maxLength: MAX_INPUT_BYTES,
   })),
@@ -189,6 +190,28 @@ function clampOffset(value: unknown): number {
 function taskOutputLines(task: BgTask): string[] {
   if (task.mode === "pty") return getTerminalSnapshotLines(task);
   return [...readLogLines(task.stdoutLogKey), ...readLogLines(task.stderrLogKey)];
+}
+
+interface OutputExcerpt {
+  label: string;
+  lines: string[];
+}
+
+/**
+ * Latest output lines per stream, used to show what happened around the moment
+ * an attached console was closed. Combine with flushConsole() first for PTY.
+ */
+function recentTaskOutputExcerpts(task: BgTask, maxLines: number): OutputExcerpt[] {
+  if (task.mode === "pty") {
+    const lines = getTerminalSnapshotLines(task).slice(-maxLines);
+    return lines.length > 0 ? [{ label: "terminal", lines }] : [];
+  }
+  const excerpts: OutputExcerpt[] = [];
+  const stdout = readLogLines(task.stdoutLogKey).slice(-maxLines);
+  if (stdout.length > 0) excerpts.push({ label: "stdout", lines: stdout });
+  const stderr = readLogLines(task.stderrLogKey).slice(-maxLines);
+  if (stderr.length > 0) excerpts.push({ label: "stderr", lines: stderr });
+  return excerpts;
 }
 
 function findPatternMatch(lines: string[], pattern: RegExp): string | undefined {
@@ -726,9 +749,25 @@ export function registerBackgroundTaskTools(
     ctx: ExtensionToolContext,
   ): Promise<AgentToolResult<Record<string, unknown>>> => {
     const task = requireTask(params.id, "attach");
+    // The attach action blocks until the user detaches, so on return we can
+    // report what the console showed just before it closed. A future
+    // non-blocking attach should skip this excerpt.
     await attachTask(task, ctx);
+    await flushConsole(task);
+
+    const parts = [`${taskSummary(task)} — detached.`];
+    const excerpts = recentTaskOutputExcerpts(task, ATTACH_EXCERPT_LINES);
+    if (excerpts.length === 0) {
+      parts.push(`${emptyOutputMessage(task, "output")} Use action=read to check again.`);
+    } else {
+      for (const excerpt of excerpts) {
+        parts.push(`── ${excerpt.label} ──\n${excerpt.lines.join("\n")}`);
+      }
+      parts.push(`Use action=read id="${task.id}" for more output.`);
+    }
+
     return {
-      content: [{ type: "text", text: `${taskSummary(task)} — detached.` }],
+      content: [{ type: "text", text: parts.join("\n") }],
       details: { id: task.id, name: task.name, status: task.status, mode: task.mode, ...taskEnvironmentDetails(task) },
     };
   };
@@ -742,6 +781,7 @@ export function registerBackgroundTaskTools(
     promptGuidelines: [
       "Use only for genuine background needs: an explicit user request, a process kept for later interaction, or useful concurrent work; otherwise use foreground bash.",
       "Emit whole same-task chains in one response (e.g. start→wait→read); same id/name runs in source order, different tasks in parallel. Never poll.",
+      "send input is exact text and never appends Enter — end with <Enter> yourself to submit a line (e.g. \"y<Enter>\", \"<Down*3><Enter>\"). Keys are <...> tokens: <Tab>, <Esc>, <Up>, <C-c>, <C-d>, <A-f>, <Space>, repeat with <Down*3>, and escape a literal '<' as \\<; text and keys combine. For pipe tasks, <C-d> or <EOF> closes stdin.",
       "start defaults to pipe; use mode=pty for TUIs. wait already returns the latest pipe line, so read only for fuller, multiline, paginated, or PTY output.",
       "Session reload or shutdown terminates running tasks.",
     ],
