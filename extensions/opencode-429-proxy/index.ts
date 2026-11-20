@@ -1,6 +1,15 @@
 /**
  * oc-proxy — on-demand egress proxy for pi-free's `opencode-free` provider.
  *
+ * HARD REQUIREMENT — the `hook-stream` patch:
+ * This extension does not work on a stock pi. Everything below depends on the
+ * provider-request hook pipeline that `patches/all-patches/hook-stream` adds
+ * (`ExtensionRunner#createProviderHooks()`, `ExtensionContext#providerHooks()`).
+ * Without it there is no pipeline to stream the retry through, the 429
+ * fallthrough never engages, and the extension is inert. Check with
+ * `node ~/.pi/agent/patches/mainrunner.js status` (hook-stream must read
+ * `clean yes`). See README.md § Requirements.
+ *
  * Problem: opencode-free rate-limits by egress IP. When a 429 lands, you want
  * the *next* opencode-free request to leave through a proxy (different IP)
  * without touching credentials, pools, or any other extension.

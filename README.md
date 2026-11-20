@@ -9,7 +9,7 @@ live in `extensions/`.
 | keyrouter | [`packages/pi-keyrouter`](./packages/pi-keyrouter) — credential pools, automatic key/OAuth rotation on 429 failovers |
 | bg_terminal | [`packages/pi-bg-terminal`](./packages/pi-bg-terminal) — background commands, attachable PTY/TUI sessions |
 | unify_provider | [`packages/pi-unify-provider`](./packages/pi-unify-provider) — multi-provider LLM management and model discovery |
-| oc_proxy | [`extensions/opencode-429-proxy`](./extensions/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits |
+| oc_proxy | [`extensions/opencode-429-proxy`](./extensions/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits — **requires the `hook-stream` patch** |
 
 ## Install
 
@@ -31,12 +31,38 @@ packages/               # released npm packages, workspaces
   pi-unify-provider/
 extensions/             # single-feature extensions, never published
   opencode-429-proxy/   # index.ts only, loaded straight from the folder
+patches/                # pi-patches runner + patch modules for pi internals
+  all-patches/          # image-resize, refresh-coalesce, hermes-*, hook-stream
 ```
 
 Each package in `packages/` keeps its own `package.json`, lockfile, tests, docs,
 and README. The root `package.json` only declares the workspace (`packages/*`)
 and is never published. Entries under `extensions/` are deliberately outside the
 workspace: no `package.json`, no dependency graph, nothing to keep in sync.
+
+`patches/` is the [pi-patches](./patches/README.md) runner vendored here so the
+patches that extensions depend on are versioned next to them. `~/.pi/agent/patches`
+is a junction to this directory; the runner and its `patches.json` registry keep
+working unchanged.
+
+## Patch dependencies
+
+Some extensions are not standalone — they only work on a pi whose internals are
+patched:
+
+| Extension | Needs | Why |
+| --- | --- | --- |
+| `extensions/opencode-429-proxy` | `hook-stream` | the 429 retry streams through pi's provider-request hook pipeline, which only the patch exposes |
+
+Apply and verify:
+
+```bash
+node patches/mainrunner.js run       # apply every registered patch
+node patches/mainrunner.js status    # hook-stream must read "clean yes"
+```
+
+Without the patch such an extension does nothing at all — there is no degraded
+mode, and nothing in pi reports the missing dependency at load time.
 
 ## History
 

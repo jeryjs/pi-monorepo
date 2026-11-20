@@ -10,6 +10,13 @@ The switch is **transparent**: a request that the direct IP answers with `429`
 falls through to the configured proxy *inside that same request*, so the turn
 completes and you never have to type "Continue".
 
+> [!IMPORTANT]
+> **Patch required — this extension is not standalone.**
+> It only works with the **`hook-stream`** patch applied
+> ([`patches/all-patches/hook-stream`](../../patches/all-patches/hook-stream),
+> run by [`patches/`](../../patches)). On a stock pi it does nothing at all.
+> See [Requirements](#requirements) before installing.
+
 ```
 /oc-proxy                     # status (routes, cooldowns, relay)
 /oc-proxy set http://user:pass@host:port
@@ -90,7 +97,45 @@ port; point the URL at the HTTP port (e.g. `http://127.0.0.1:7890`).
 
 ## Requirements
 
-- `bun` on `PATH` (pi-free already needs it for the opencode-free anonymous lane).
+Everything in this section is mandatory. Missing any of it means the extension
+silently does nothing — there is no degraded mode.
+
+### The `hook-stream` patch
+
+**This extension does not work on a stock pi.** Its core function — retrying a
+`429` through a proxy inside the same request — is built entirely on the
+**`hook-stream`** patch, applied by the pi-patches runner in
+[`patches/`](../../patches) (module:
+[`patches/all-patches/hook-stream`](../../patches/all-patches/hook-stream)).
+
+That patch adds `ExtensionRunner#createProviderHooks()` and
+`ExtensionContext#providerHooks()`, exposing the same
+`before_provider_headers` → `before_provider_request` → `after_provider_response`
+→ `provider_stream_event` pipeline the agent loop installs. The relay streams the
+proxied request through that pipeline instead of issuing a bare `fetch` (a custom
+`fetch` is refused by pi-ai's adapter, and it would also skip pi-free's own
+handlers).
+
+Without the patch the relay has no pipeline to hand the request to, so the
+`429` fallthrough never engages and the first rate-limited response ends the turn
+— indistinguishable from not having oc-proxy installed.
+
+Verify the patch is applied and clean before blaming the extension:
+
+```bash
+node ~/.pi/agent/patches/mainrunner.js status
+# patch            STATUS  ON   FILES
+# hook-stream      clean   yes  15
+```
+
+`ON` must be `yes` and `STATUS` must be `clean` (or `drifted` until the next
+run — re-run `node mainrunner.js run`). If the entry is missing, the patch was
+never registered: `patches/patches.json` is the registry.
+
+### `bun` on `PATH`
+
+pi-free already needs it for the opencode-free anonymous lane; the relay reuses
+it for the TLS-fingerprint-preserving transport hop.
 
 ## How 429 detection works (and why it is not the obvious thing)
 
