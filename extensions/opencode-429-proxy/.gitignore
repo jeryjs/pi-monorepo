@@ -1,4 +1,6 @@
-# Local runtime state — never commit: contains real proxy credentials and logs
+# Legacy in-folder runtime files (older builds kept config/state/log here).
+# Current builds write opencode-429-proxy.json + .log beside the extension
+# folder; these rules stay so an older running pi cannot dirty the repo.
 config.json
 relay.json
 debug.log

@@ -1,13 +1,23 @@
 {
   "provider": "opencode-free",
+  "proxy": "",
   "proxies": [
     "http://user:pass@proxy.example.com:8888",
     "http://user:pass@proxy2.example.com:40000"
   ],
   "autoEnableOn429": true,
   "rotateOn429": true,
+  "preferDirect": true,
+  "proxyCooldownMs": 600000,
   "relayUpstream": "https://opencode.ai",
   "bunPath": "bun",
-  "proxyCooldownMs": 600000,
-  "preferDirect": true
+  "debugLog": "opencode-429-proxy.log",
+  "relay": {
+    "routes": [
+      "direct",
+      "http://user:pass@proxy.example.com:8888",
+      "http://user:pass@proxy2.example.com:40000"
+    ],
+    "blockedUntil": {}
+  }
 }

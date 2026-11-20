@@ -35,7 +35,7 @@ packages/               # released npm packages, workspaces
   pi-bg-terminal/
   pi-unify-provider/
 extensions/             # single-feature extensions, never published
-  opencode-429-proxy/   # index.ts + config, loaded straight from the folder
+  opencode-429-proxy/   # index.ts only; config lives beside the folder
   *.ts                  # single-file extensions (skills, screen, ...)
 patches/                # pi-patches runner + patch modules for pi internals
   all-patches/          # image-resize, refresh-coalesce, hermes-*, hook-stream

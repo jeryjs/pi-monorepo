@@ -36,9 +36,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -67,6 +67,11 @@ interface OcProxyConfig {
   relayUpstream: string;
   /** Advanced: bun executable. */
   bunPath: string;
+  /**
+   * Opt-in debug trace. A path (relative to this config file, or absolute) or
+   * undefined. When absent nothing is written — there is no log at all.
+   */
+  debugLog?: string;
 }
 
 /** Subset of pi-tui's AutocompleteItem used for `/oc-proxy` completion. */
@@ -78,7 +83,9 @@ interface CompletionItem {
 
 const DEFAULTS: OcProxyConfig = {
   provider: "opencode-free",
-  proxy: "http://1qaz@your-gcp-proxy-host:3128",
+  // Empty, not a placeholder URL: a fresh config must not activate a route
+  // that cannot work. Fill in `proxy` or `proxies` to switch proxying on.
+  proxy: "",
   proxies: [],
   autoEnableOn429: true,
   rotateOn429: true,
@@ -94,26 +101,59 @@ function extensionDir(): string {
   return join(homedir(), ".pi", "agent", "extensions", "opencode-429-proxy");
 }
 
-const CONFIG_PATH = () => join(extensionDir(), "config.json");
-const RELAY_STATE_PATH = () => join(extensionDir(), "relay.json");
+/**
+ * Config lives beside the extension folder, not inside it:
+ * ~/.pi/agent/extensions/opencode-429-proxy.json
+ *
+ * One file for everything: settings and the relay's runtime state (routes and
+ * cooldown deadlines, under `relay`). The relay child re-reads it per request,
+ * so writes are atomic (temp + rename) to never hand it a half-written file.
+ */
+const CONFIG_PATH = () => join(extensionDir(), "..", "opencode-429-proxy.json");
+
+/** Raw file contents, whatever keys it has (unknown keys survive a rewrite). */
+function readRawConfig(): Record<string, any> {
+  const path = CONFIG_PATH();
+  if (!existsSync(path)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Atomic replace: the relay may be reading the file on any request. */
+function writeRawConfig(raw: Record<string, any>): void {
+  const path = CONFIG_PATH();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = path + ".tmp";
+  writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", "utf8");
+  renameSync(tmp, path);
+}
+
+/** Absolute path of the debug log, or undefined when logging is off. */
+let logTarget: string | undefined;
+
+function resolveLogTarget(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const target = value.trim();
+  return isAbsolute(target) ? target : join(dirname(CONFIG_PATH()), target);
+}
 
 function loadConfig(): OcProxyConfig {
   const path = CONFIG_PATH();
   let raw: Partial<OcProxyConfig> = {};
   if (existsSync(path)) {
-    try {
-      raw = JSON.parse(readFileSync(path, "utf8")) as Partial<OcProxyConfig>;
-    } catch {
-      raw = {};
-    }
+    raw = readRawConfig() as Partial<OcProxyConfig>;
   } else {
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify(DEFAULTS, null, 2) + "\n", "utf8");
+      writeRawConfig({ ...DEFAULTS, relay: { routes: ["direct"], blockedUntil: {} } });
     } catch {
       /* read-only fs: defaults still work */
     }
   }
+  logTarget = resolveLogTarget(raw.debugLog);
   return {
     provider: typeof raw.provider === "string" && raw.provider ? raw.provider : DEFAULTS.provider,
     proxy: typeof raw.proxy === "string" ? raw.proxy : DEFAULTS.proxy,
@@ -129,13 +169,19 @@ function loadConfig(): OcProxyConfig {
     relayUpstream:
       typeof raw.relayUpstream === "string" && raw.relayUpstream ? raw.relayUpstream : DEFAULTS.relayUpstream,
     bunPath: typeof raw.bunPath === "string" && raw.bunPath ? raw.bunPath : DEFAULTS.bunPath,
+    debugLog: logTarget,
   };
 }
 
+/** Settings only — the `relay` block belongs to the relay and is preserved. */
 function saveConfig(cfg: OcProxyConfig): void {
   try {
-    mkdirSync(dirname(CONFIG_PATH()), { recursive: true });
-    writeFileSync(CONFIG_PATH(), JSON.stringify(cfg, null, 2) + "\n", "utf8");
+    const raw = readRawConfig();
+    const settings: Record<string, unknown> = { ...cfg };
+    delete settings.debugLog;
+    if (cfg.debugLog) settings.debugLog = cfg.debugLog;
+    if (settings.maxRetries === undefined) delete settings.maxRetries;
+    writeRawConfig({ ...raw, ...settings });
   } catch {
     /* ignore */
   }
@@ -186,17 +232,38 @@ function emittedRoutes(): string[] {
 }
 
 /**
- * The relay re-reads this file on every request, so activation is a single
- * small write — no relay restart, no new port, no dropped in-flight stream.
- *
- * It carries the ordered egress routes to try plus each route's cooldown
- * deadline, so the relay can walk to the next route — direct included — on
- * its own the moment an egress IP answers 429. That is what keeps a rate
- * limit inside one request instead of failing the turn.
+ * The relay's runtime state, kept in the `relay` block of the same JSON file.
+ * `routes` is what the relay walks per request; `blockedUntil` is the cooldown
+ * deadlines it parks a route on after a 429.
  */
+interface RelayFileState {
+  routes: string[];
+  blockedUntil: Record<string, number>;
+}
+
+/** `relay` block, falling back to a legacy top-level one. */
+function relayBlock(raw: Record<string, any>): Record<string, any> {
+  const relay = raw.relay;
+  if (relay && typeof relay === "object" && !Array.isArray(relay)) return relay as Record<string, any>;
+  return raw;
+}
+
+function readRelayFile(): RelayFileState {
+  const relay = relayBlock(readRawConfig());
+  const routes = Array.isArray(relay.routes) ? relay.routes.filter((r: unknown) => typeof r === "string" && r) : [];
+  const blockedUntil: Record<string, number> = {};
+  const now = Date.now();
+  if (relay.blockedUntil && typeof relay.blockedUntil === "object") {
+    for (const [route, until] of Object.entries(relay.blockedUntil)) {
+      if (typeof until === "number" && until > now) blockedUntil[route] = until;
+    }
+  }
+  return { routes: routes.length > 0 ? routes : ["direct"], blockedUntil };
+}
+
 function writeRelayState(): void {
   try {
-    mkdirSync(dirname(RELAY_STATE_PATH()), { recursive: true });
+    const raw = readRawConfig();
     // Merge, do not replace: cooldowns survive a session restart, and a
     // write from a fresh session must not resurrect a parked proxy.
     const blockedUntil = { ...readBlockedUntil(), ...state.blockedUntil };
@@ -204,11 +271,8 @@ function writeRelayState(): void {
     for (const proxy of Object.keys(blockedUntil)) {
       if (!(blockedUntil[proxy] > now)) delete blockedUntil[proxy];
     }
-    writeFileSync(
-      RELAY_STATE_PATH(),
-      JSON.stringify({ routes: emittedRoutes(), blockedUntil }) + "\n",
-      "utf8",
-    );
+    raw.relay = { routes: emittedRoutes(), blockedUntil };
+    writeRawConfig(raw);
   } catch {
     /* ignore */
   }
@@ -216,31 +280,23 @@ function writeRelayState(): void {
 
 /** Cooldown deadlines still in the future, as persisted by the last session. */
 function readBlockedUntil(): Record<string, number> {
-  const out: Record<string, number> = {};
-  try {
-    const parsed = JSON.parse(readFileSync(RELAY_STATE_PATH(), "utf8"));
-    const now = Date.now();
-    if (parsed && typeof parsed.blockedUntil === "object" && parsed.blockedUntil) {
-      for (const [proxy, until] of Object.entries(parsed.blockedUntil)) {
-        if (typeof until === "number" && until > now) out[proxy] = until;
-      }
-    }
-  } catch {
-    /* missing or unreadable state: no cooldowns */
-  }
-  return out;
+  return readRelayFile().blockedUntil;
 }
 
 // ── Debug log ───────────────────────────────────────────────────────────────
 
-/** Append-only trace, enabled with OC_PROXY_DEBUG=1. Never touches stdout. */
+/**
+ * Append-only trace. Off unless `debugLog` names a path in the config file;
+ * a relative path resolves next to that file. Nothing is written when unset —
+ * no log file is created at all. Never touches stdout.
+ */
 function debug(...parts: unknown[]): void {
-  if (!process.env.OC_PROXY_DEBUG) return;
+  if (!logTarget) return;
   try {
     const line = parts
       .map((p) => (typeof p === "string" ? p : p instanceof Error ? p.message : JSON.stringify(p)))
       .join(" ");
-    writeFileSync(join(extensionDir(), "debug.log"), line + "\n", { flag: "a" });
+    appendFileSync(logTarget, line + "\n", "utf8");
   } catch {
     /* ignore */
   }
@@ -286,28 +342,40 @@ function isRateLimited(message: unknown): boolean {
  * status is echoed on stdout so the extension gets the exact HTTP code.
  */
 const RELAY_SCRIPT = [
-  'const STATE = process.env.OC_PROXY_RELAY_STATE || "";',
+  'const CONFIG = process.env.OC_PROXY_CONFIG || "";',
   'const UP = (process.env.OC_PROXY_RELAY_UPSTREAM || "https://opencode.ai").replace(/\\/+$/, "");',
   'const ALLOW = /^\\/(zen|inference)\\/v1(\\/|$)/;',
   'const COOLDOWN = Number(process.env.OC_PROXY_RELAY_COOLDOWN_MS || 600000);',
   'const parked = {};',
+  'function relayOf(parsed) {',
+  '  const block = parsed && typeof parsed === "object" ? parsed.relay : null;',
+  '  return block && typeof block === "object" && !Array.isArray(block) ? block : parsed || {};',
+  '}',
   'function park(route, parsed) {',
   '  parked[route] = Date.now() + COOLDOWN;',
-  '  const next = Object.assign({}, parsed, { blockedUntil: Object.assign({}, (parsed && parsed.blockedUntil) || {}, parked) });',
+  '  const base = parsed && typeof parsed === "object" ? parsed : {};',
+  '  const block = relayOf(base);',
+  '  const next = Object.assign({}, base, {',
+  '    relay: Object.assign({}, block, {',
+  '      blockedUntil: Object.assign({}, block.blockedUntil || {}, parked),',
+  '    }),',
+  '  });',
   '  console.log("PARKED=" + route);',
-  '  Bun.write(STATE, JSON.stringify(next) + String.fromCharCode(10)).catch((e) => console.log("PARKERR=" + String((e && e.message) || e)));',
+  '  Bun.write(CONFIG, JSON.stringify(next, null, 2) + String.fromCharCode(10)).catch((e) => console.log("PARKERR=" + String((e && e.message) || e)));',
   '}',
   "async function readState() {",
   "  try {",
-  "    const parsed = JSON.parse(await Bun.file(STATE).text());",
-  '    let routes = Array.isArray(parsed.routes) ? parsed.routes.filter((r) => typeof r === "string" && r) : [];',
-  "    // Back-compat: an older state file only listed proxies.",
+  "    const text = await Bun.file(CONFIG).text();",
+  "    const parsed = JSON.parse(text);",
+  '    const block = relayOf(parsed);',
+  '    let routes = Array.isArray(block.routes) ? block.routes.filter((r) => typeof r === "string" && r) : [];',
+  "    // Back-compat: a state file written before routes were recorded.",
   '    if (routes.length === 0) {',
-  '      const listed = Array.isArray(parsed.proxies) ? parsed.proxies.filter((p) => typeof p === "string" && p) : typeof parsed.proxy === "string" && parsed.proxy ? [parsed.proxy] : [];',
-  '      routes = parsed.direct === false ? listed : [...listed, "direct"];',
+  '      const listed = Array.isArray(block.proxies) ? block.proxies.filter((p) => typeof p === "string" && p) : typeof block.proxy === "string" && block.proxy ? [block.proxy] : [];',
+  '      routes = block.direct === false ? listed : [...listed, "direct"];',
   "    }",
   '    if (routes.length === 0) routes = ["direct"];',
-  '    const blocked = Object.assign({}, (parsed && parsed.blockedUntil) || {}, parked);',
+  '    const blocked = Object.assign({}, block.blockedUntil || {}, parked);',
   "    return { routes, blocked, parsed };",
   "  } catch {",
   '    return { routes: ["direct"], blocked: Object.assign({}, parked), parsed: null };',
@@ -492,7 +560,7 @@ async function startRelayInner(): Promise<boolean> {
     child = spawn(cfg.bunPath, ["-e", RELAY_SCRIPT], {
       env: {
         ...process.env,
-        OC_PROXY_RELAY_STATE: RELAY_STATE_PATH(),
+        OC_PROXY_CONFIG: CONFIG_PATH(),
         OC_PROXY_RELAY_UPSTREAM: cfg.relayUpstream,
         OC_PROXY_RELAY_COOLDOWN_MS: String(cfg.proxyCooldownMs),
       },
@@ -843,7 +911,7 @@ export default function ocproxy(pi: ExtensionAPI): void {
     { name: "set", description: "Set the proxy URL: /oc-proxy set http://user:pass@host:port" },
     { name: "next", description: "Rotate the chain to the next configured proxy" },
     { name: "reset", description: "Clear proxy cooldowns so every proxy is retried" },
-    { name: "reload", description: "Re-read config.json" },
+    { name: "reload", description: "Re-read opencode-429-proxy.json" },
   ];
 
   pi.registerCommand("oc-proxy", {
@@ -957,6 +1025,7 @@ export default function ocproxy(pi: ExtensionAPI): void {
         "relay:       " + (state.relay ? state.relay.baseUrl : state.relayUnavailable ? "unavailable" : "not started"),
         "last 429:    " + (state.last429At ? new Date(state.last429At).toLocaleTimeString() : "-"),
         "config:      " + CONFIG_PATH(),
+        "debug log:   " + (logTarget ?? "off"),
       ];
       ctx.ui?.notify(lines.join("\n"), "info");
     },

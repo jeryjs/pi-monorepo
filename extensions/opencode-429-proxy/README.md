@@ -42,7 +42,7 @@ The relay walks that list per request:
 | --- | --- |
 | direct answers 200 | done; the proxy is never contacted (its quota is kept) |
 | direct answers 429 | that route is parked and the next route is tried **in the same request** |
-| a route is parked | skipped until its cooldown expires (persisted in `relay.json`) |
+| a route is parked | skipped until its cooldown expires (persisted in the config file) |
 | every route 429s | the `429` is returned — one attempt per route, **no retry loop** |
 | a route is unreachable | skipped, the walk continues |
 
@@ -57,24 +57,36 @@ direct and a `429` would kill the turn before any proxy could be reached.
 `autoEnableOn429` still starts the relay if it was not running (e.g. after
 `/oc-proxy off`, or a config change mid-session).
 
-## Config — `~/.pi/agent/extensions/opencode-429-proxy/config.json`
+## Config — `~/.pi/agent/extensions/opencode-429-proxy.json`
 
-Created with defaults on first load.
+One JSON file **beside** the extension folder (not inside it), created with
+defaults on first load. The relay reads and writes the same file, so there is no
+separate state file.
 
 ```json
 {
   "provider": "opencode-free",
-  "proxy": "http://1qaz@REPLACE_WITH_YOUR_GCP_PROXY_HOST:3128",
-  "proxies": [],
+  "proxy": "",
+  "proxies": [
+    "http://user:pass@REPLACE_WITH_YOUR_PROXY_HOST:3128"
+  ],
   "autoEnableOn429": true,
   "rotateOn429": true,
-  "proxyCooldownMs": 600000,
   "preferDirect": true,
-  "maxRetries": undefined,
+  "proxyCooldownMs": 600000,
   "relayUpstream": "https://opencode.ai",
-  "bunPath": "bun"
+  "bunPath": "bun",
+  "debugLog": "opencode-429-proxy.log",
+  "relay": {
+    "routes": ["direct", "http://user:pass@REPLACE_WITH_YOUR_PROXY_HOST:3128"],
+    "blockedUntil": {}
+  }
 }
 ```
+
+`relay` is runtime state owned by the relay — the extension rewrites it on every
+activation and the relay rewrites it when it parks a route. Leave it alone; a
+`/oc-proxy reload` does not disturb it.
 
 | Field | Meaning |
 | --- | --- |
@@ -87,6 +99,8 @@ Created with defaults on first load.
 | `maxRetries` | Override pi-ai's internal retry count for this provider. `undefined` = inherit pi's setting. |
 | `provider` | Provider id to watch and rewrite. Default `opencode-free`. |
 | `relayUpstream` / `bunPath` | Advanced. Upstream root for the relay, and the bun executable. |
+| `debugLog` | Opt-in trace. A path (relative = next to the config file) or omitted. **Absent means no log file is ever created.** |
+| `relay` | Runtime state: `routes` (what to try, in order) and `blockedUntil` (per-route cooldown deadlines). |
 
 A single proxy is a two-route chain (`direct` + proxy). A dead or exhausted
 route costs one round-trip, never a failed turn.
@@ -219,7 +233,7 @@ wraps the *same* captured original, so repeated installations never nest.
 | direct answers 429 | route parked, proxy tried **in the same request** → turn succeeds, no "Continue" |
 | all routes 429 | `429` returned after one attempt per route — no retry loop, no auto-resume |
 | unreachable route | skipped, the walk continues to the next route |
-| parked route | skipped for `proxyCooldownMs`, persisted in `relay.json` across sessions |
+| parked route | skipped for `proxyCooldownMs`, persisted in the config file across sessions |
 | `/oc-proxy reset` | clears every cooldown so all routes are retried |
 | non-allowlisted relay path | `404` |
 | `session_shutdown` | relay child terminated, no orphan `bun` process |
@@ -248,7 +262,10 @@ turn 2  →  502: {"type":"relay","message":"Unable to connect..."}
 
 ## Debugging
 
-Set `OC_PROXY_DEBUG=1` to append a trace to `~/.pi/agent/extensions/opencode-429-proxy/debug.log`:
+Logging is **off by default** — nothing is written until `debugLog` names a
+path. A relative path is resolved next to the config file, so
+`"debugLog": "opencode-429-proxy.log"` appends to
+`~/.pi/agent/extensions/opencode-429-proxy.log`:
 
 ```
 session_start startup

@@ -1,0 +1,5 @@
+# Runtime files for oc-proxy when the extension is loaded straight from this
+# folder (pi normally keeps them in ~/.pi/agent/extensions, outside the repo).
+# Never commit: real proxy credentials and logs.
+opencode-429-proxy.json
+opencode-429-proxy.log
