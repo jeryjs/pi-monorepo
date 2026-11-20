@@ -1,14 +1,15 @@
 # pi-extensions
 
-Monorepo for my [Pi](https://pi.dev/) extensions. Each package lives in
-`packages/` and is published to npm under its own name.
+Monorepo for my [Pi](https://pi.dev/) extensions. Packages that get released to
+npm live in `packages/`; small single-feature extensions that are never published
+live in `extensions/`.
 
-| Package | Directory |
+| Name | Directory |
 | --- | --- |
 | keyrouter | [`packages/pi-keyrouter`](./packages/pi-keyrouter) — credential pools, automatic key/OAuth rotation on 429 failovers |
 | bg_terminal | [`packages/pi-bg-terminal`](./packages/pi-bg-terminal) — background commands, attachable PTY/TUI sessions |
 | unify_provider | [`packages/pi-unify-provider`](./packages/pi-unify-provider) — multi-provider LLM management and model discovery |
-| oc_proxy | [`packages/opencode-429-proxy`](./packages/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits |
+| oc_proxy | [`extensions/opencode-429-proxy`](./extensions/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits |
 
 ## Install
 
@@ -24,26 +25,31 @@ The npm names are independent of the folder names; check each package's
 ## Layout
 
 ```
-packages/
-  pi-keyrouter/        # package.json, sources, tests, own docs
+packages/               # released npm packages, workspaces
+  pi-keyrouter/         # package.json, sources, tests, own docs
   pi-bg-terminal/
   pi-unify-provider/
+extensions/             # single-feature extensions, never published
+  opencode-429-proxy/   # index.ts only, loaded straight from the folder
 ```
 
-Each package keeps its own `package.json`, lockfile, tests, docs, and README.
-The root `package.json` only declares the workspace and is never published.
+Each package in `packages/` keeps its own `package.json`, lockfile, tests, docs,
+and README. The root `package.json` only declares the workspace (`packages/*`)
+and is never published. Entries under `extensions/` are deliberately outside the
+workspace: no `package.json`, no dependency graph, nothing to keep in sync.
 
 ## History
 
 This repository was created by renaming `jeryjs/pi-keyrouter` and importing the
 histories of `jeryjs/pi-unify-provider` and the standalone working copy of
-`pi-bg-terminal` into `packages/`. Commit messages carry the package they belong
+`pi-bg-terminal` into `packages/`. `opencode-429-proxy` had no git history and
+arrived as a single commit. Commit messages carry the package they belong
 to as a prefix:
 
 - `[keyrouter]` — `packages/pi-keyrouter` (original commits, hashes unchanged)
 - `[bg_terminal]` — `packages/pi-bg-terminal`
 - `[unify_provider]` — `packages/pi-unify-provider`
-- `[oc_proxy]` — `packages/opencode-429-proxy` (no git history existed; imported as one commit)
+- `[oc_proxy]` — `extensions/opencode-429-proxy` (no git history existed; imported as one commit)
 - `[monorepo]` — repo-root scaffolding
 
 Imported commits had their paths rewritten to their package directory, so their
