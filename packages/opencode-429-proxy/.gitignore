@@ -1,0 +1,4 @@
+# Local runtime state — never commit: contains real proxy credentials and logs
+config.json
+relay.json
+debug.log

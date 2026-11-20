@@ -8,6 +8,7 @@ Monorepo for my [Pi](https://pi.dev/) extensions. Each package lives in
 | keyrouter | [`packages/pi-keyrouter`](./packages/pi-keyrouter) — credential pools, automatic key/OAuth rotation on 429 failovers |
 | bg_terminal | [`packages/pi-bg-terminal`](./packages/pi-bg-terminal) — background commands, attachable PTY/TUI sessions |
 | unify_provider | [`packages/pi-unify-provider`](./packages/pi-unify-provider) — multi-provider LLM management and model discovery |
+| oc_proxy | [`packages/opencode-429-proxy`](./packages/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits |
 
 ## Install
 
@@ -42,6 +43,7 @@ to as a prefix:
 - `[keyrouter]` — `packages/pi-keyrouter` (original commits, hashes unchanged)
 - `[bg_terminal]` — `packages/pi-bg-terminal`
 - `[unify_provider]` — `packages/pi-unify-provider`
+- `[oc_proxy]` — `packages/opencode-429-proxy` (no git history existed; imported as one commit)
 - `[monorepo]` — repo-root scaffolding
 
 Imported commits had their paths rewritten to their package directory, so their
