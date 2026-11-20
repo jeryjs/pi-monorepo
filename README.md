@@ -10,6 +10,11 @@ live in `extensions/`.
 | bg_terminal | [`packages/pi-bg-terminal`](./packages/pi-bg-terminal) — background commands, attachable PTY/TUI sessions |
 | unify_provider | [`packages/pi-unify-provider`](./packages/pi-unify-provider) — multi-provider LLM management and model discovery |
 | oc_proxy | [`extensions/opencode-429-proxy`](./extensions/opencode-429-proxy) — egress-proxy fallback for `opencode-free` rate limits — **requires the `hook-stream` patch** |
+| compaction_model | [`extensions/compaction-model.ts`](./extensions/compaction-model.ts) — compaction on a dedicated large-context free model |
+| cx_providers | [`extensions/cx-providers.ts`](./extensions/cx-providers.ts) — custom providers with curated model catalogs |
+| reverse_gateway | [`extensions/pi-reverse-gateway.ts`](./extensions/pi-reverse-gateway.ts) — OpenAI/Anthropic-compatible API over pi's live registry — **requires the `hook-stream` patch** |
+| screen | [`extensions/screen.ts`](./extensions/screen.ts) — screen and window capture tool |
+| skills | [`extensions/skills.ts`](./extensions/skills.ts) — browse, inspect and load agent skills |
 
 ## Install
 
@@ -30,7 +35,8 @@ packages/               # released npm packages, workspaces
   pi-bg-terminal/
   pi-unify-provider/
 extensions/             # single-feature extensions, never published
-  opencode-429-proxy/   # index.ts only, loaded straight from the folder
+  opencode-429-proxy/   # index.ts + config, loaded straight from the folder
+  *.ts                  # single-file extensions (skills, screen, ...)
 patches/                # pi-patches runner + patch modules for pi internals
   all-patches/          # image-resize, refresh-coalesce, hermes-*, hook-stream
 ```
@@ -53,6 +59,7 @@ patched:
 | Extension | Needs | Why |
 | --- | --- | --- |
 | `extensions/opencode-429-proxy` | `hook-stream` | the 429 retry streams through pi's provider-request hook pipeline, which only the patch exposes |
+| `extensions/pi-reverse-gateway.ts` | `hook-stream` | proxied requests must go through `before_provider_*` / `provider_stream_event`, so credential pools and payload rewriters still apply |
 
 Apply and verify:
 
