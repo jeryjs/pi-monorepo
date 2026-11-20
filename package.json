@@ -2,14 +2,34 @@
   "name": "pi-extensions",
   "version": "0.0.0",
   "private": true,
-  "description": "Monorepo for @jeryjs Pi extensions: keyrouter, bg_terminal, unify_provider",
+  "description": "Monorepo for my Pi extensions: keyrouter, bg_terminal, unify_provider, etc",
   "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jeryjs/pi-extensions.git"
+    "url": "git+https://github.com/jeryjs/pi-monorepo.git"
+  },
+  "pi": {
+    "extensions": [
+      "./packages/pi-keyrouter/index.ts",
+      "./packages/pi-bg-terminal/index.ts",
+      "./packages/pi-unify-provider/index.ts",
+      "./extensions/opencode-429-proxy/index.ts",
+      "./extensions/compaction-model.ts",
+      "./extensions/cx-providers.ts",
+      "./extensions/pi-reverse-gateway.ts",
+      "./extensions/screen.ts",
+      "./extensions/skills.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
   },
   "author": "jeryjs",
   "license": "MIT"
