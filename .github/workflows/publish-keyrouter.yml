@@ -1,0 +1,62 @@
+name: Publish keyrouter
+
+# Monorepo port of the original single-package workflow. The tag is both the
+# release trigger and the source of the version, so a mismatched tag fails
+# before the version becomes immutable on the registry.
+#
+#   git tag pi-keyrouter@1.10.0
+#   git push origin pi-keyrouter@1.10.0
+on:
+  push:
+    tags: ["pi-keyrouter@*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/pi-keyrouter
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: npm ci
+      - run: npx tsc --noEmit -p tsconfig.json
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME##*@}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME is @$TAG but package.json is $VERSION"
+            exit 1
+          fi
+
+  publish:
+    needs: verify
+    # A branch carries no version, and publishing from one would burn an
+    # immutable version number against whatever happens to be on main.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      # Required: mints the OIDC token npm exchanges for publish rights.
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/pi-keyrouter
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm publish --provenance --access public

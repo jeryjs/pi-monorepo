@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+bun.lockb
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Logs and caches
+*.log
+.cache/
+.turbo/
+coverage/
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
