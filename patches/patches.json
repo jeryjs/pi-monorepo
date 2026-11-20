@@ -1,0 +1,116 @@
+{
+  "$comment": "Registry of local patches. Each entry points at a patch module anywhere on disk. See README.md.",
+  "schemaVersion": 1,
+  "settings": {
+    "autoRun": true,
+    "watch": {
+      "enabled": false,
+      "intervalMs": 300000,
+      "debounceMs": 1500,
+      "paths": [],
+      "watchPatchSources": true
+    },
+    "report": {
+      "path": "conflicts.html",
+      "openOnConflict": true,
+      "minOpenIntervalMs": 60000,
+      "refreshSeconds": 5,
+      "alwaysWrite": true
+    },
+    "backups": {
+      "dir": "backups",
+      "keepPerPatch": 200
+    },
+    "history": {
+      "keepPerPatch": 200,
+      "keepRuns": 100,
+      "keepConflicts": 50
+    },
+    "logging": {
+      "level": "info",
+      "file": "runner.log",
+      "maxBytes": 1048576
+    },
+    "daemon": {
+      "autostart": false
+    }
+  },
+  "patches": [
+    {
+      "id": "image-resize",
+      "name": "Cap image resize dimensions",
+      "description": "Injects maxWidth/maxHeight after `{ ...DEFAULT_OPTIONS, ...options }` in pi's image resize code so the configured cap wins over the per-model catalog limit.",
+      "module": "./all-patches/image-resize/index.js",
+      "enabled": true,
+      "priority": 100,
+      "params": {},
+      "tags": [
+        "pi",
+        "images",
+        "tokens"
+      ],
+      "notes": "Migrated from ~/.pi/agent/extensions/patch-image-resize.js. Params come from PI_IMAGE_RESIZE_WIDTH / PI_IMAGE_RESIZE_HEIGHT (default 480 / 640)."
+    },
+    {
+      "id": "refresh-coalesce",
+      "name": "Coalesce model catalog refreshes",
+      "description": "Shares one in-flight promise between concurrent ModelRuntime.refresh() calls so registering N providers stops rebuilding the whole model catalog N times at startup.",
+      "module": "./all-patches/refresh-coalesce/index.js",
+      "enabled": true,
+      "priority": 110,
+      "params": {},
+      "tags": [
+        "pi",
+        "startup",
+        "performance"
+      ],
+      "notes": "Migrated from ~/.pi/agent/scripts/apply-optimizations.mjs (core patch). Applies to dist/core/model-runtime.js and the matching dist/bundle/chunks/*.js in every pi install found. Marker: PATCH(pi-refresh-coalesce-v2)."
+    },
+    {
+      "id": "hermes-config",
+      "name": "Defer hermes memory startup work",
+      "description": "Sets lazyInitialization=true and quickCheckOnOpen=false in hermes-memory-config.json so the memory DB integrity scan and lock probe run on first use instead of during startup.",
+      "module": "./all-patches/hermes-config/index.js",
+      "enabled": true,
+      "priority": 120,
+      "params": {},
+      "tags": [
+        "hermes",
+        "startup",
+        "performance"
+      ],
+      "notes": "Migrated from ~/.pi/agent/scripts/apply-optimizations.mjs. JSON rewrite only touches the two keys; revert restores the runner's pre-patch backup."
+    },
+    {
+      "id": "hermes-bundle",
+      "name": "Precompile pi-hermes-memory",
+      "description": "Bundles pi-hermes-memory's TypeScript sources into dist/index.js with esbuild (watchdog + pi.extensions manifest wired) so pi stops transpiling 56 files through jiti on every start.",
+      "module": "./all-patches/hermes-bundle/index.js",
+      "enabled": true,
+      "priority": 130,
+      "params": {},
+      "tags": [
+        "hermes",
+        "startup",
+        "performance"
+      ],
+      "notes": "Migrated from ~/.pi/agent/scripts/build-hermes.mjs + apply-optimizations.mjs step 3. Runs as a task hook (build step, no file transform): rebuilds only when src/ is newer than dist/index.js. PI_ESBUILD_FROM / PI_HERMES_PACKAGE override discovery."
+    },
+    {
+      "id": "hook-stream",
+      "name": "Expose provider request hooks to extensions",
+      "description": "Adds ExtensionRunner#createProviderHooks() / ExtensionContext#providerHooks() so an extension can stream through pi's own before_provider_headers, before_provider_request, after_provider_response and provider_stream_event handlers. Lets out-of-band requests (HTTP gateways, scripts, nested agents) see key pools and payload transforms.",
+      "module": "./all-patches/hook-stream/index.js",
+      "enabled": true,
+      "priority": 90,
+      "params": {
+      },
+      "tags": [
+        "pi",
+        "extensions",
+        "providers"
+      ],
+      "notes": "Applied to dist/core/extensions/runner.js, the matching dist/bundle/chunks/*.js, and dist/core/extensions/types.d.ts in every pi install found. Additive: existing callers pass no ctxOverride, so emit()/emitBeforeProviderRequest()/emitBeforeProviderHeaders() behave as before. Marker: PATCH(pi-hook-stream-v1)."
+    }
+  ]
+}

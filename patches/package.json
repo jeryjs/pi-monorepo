@@ -1,0 +1,21 @@
+{
+  "name": "pi-patches",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local patch runner for pi: auto-apply, verify, revert and report conflicts for on-disk patches.",
+  "bin": {
+    "pi-patches": "./mainrunner.js"
+  },
+  "scripts": {
+    "run": "node mainrunner.js run",
+    "status": "node mainrunner.js status",
+    "daemon": "node mainrunner.js daemon start"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pi patches — conflicts</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0f14;
+    --bg-soft: #111823;
+    --bg-card: #141d29;
+    --bg-card-2: #18232f;
+    --line: #24313f;
+    --line-soft: #1b2733;
+    --fg: #e7eef7;
+    --fg-dim: #9bb0c6;
+    --fg-mute: #6d8299;
+    --accent: #5ab0ff;
+    --accent-2: #8b7dff;
+    --ok: #35d39a;
+    --warn: #ffc857;
+    --err: #ff6b6b;
+    --magenta: #d98bff;
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+    --radius: 14px;
+    --mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f5f7fa;
+    --bg-soft: #ffffff;
+    --bg-card: #ffffff;
+    --bg-card-2: #f0f4f9;
+    --line: #d8e0ea;
+    --line-soft: #e6ecf3;
+    --fg: #101a24;
+    --fg-dim: #4a5c6e;
+    --fg-mute: #7b8b9c;
+    --accent: #0a6ed1;
+    --accent-2: #6a5ae0;
+    --ok: #0f9d63;
+    --warn: #b87600;
+    --err: #d92d20;
+    --magenta: #9a34d6;
+    --shadow: 0 8px 24px rgba(16,26,36,.10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 15% -10%, rgba(90,176,255,.12), transparent 60%),
+                radial-gradient(900px 500px at 100% 0%, rgba(139,125,255,.10), transparent 55%),
+                var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1220px; margin: 0 auto; padding: 22px 22px 90px; }
+
+  header.top {
+    position: sticky; top: 0; z-index: 30;
+    backdrop-filter: blur(14px);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    border-bottom: 1px solid var(--line);
+    padding: 14px 22px 12px;
+  }
+  .top-inner { max-width: 1220px; margin: 0 auto; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 260px; }
+  .logo {
+    width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #04121f; font-weight: 800; font-size: 18px; letter-spacing: -.5px;
+  }
+  h1 { font-size: 17px; margin: 0; letter-spacing: -.2px; }
+  .sub { color: var(--fg-mute); font-size: 12px; }
+  .spacer { flex: 1 1 auto; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+    background: var(--bg-card); border: 1px solid var(--line);
+    padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+  }
+  .chip b { color: var(--fg); font-weight: 600; }
+
+  button, .btn {
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    background: var(--bg-card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 12px; display: inline-flex; align-items: center; gap: 7px;
+    transition: background .12s ease, border-color .12s ease, transform .06s ease;
+    white-space: nowrap;
+  }
+  button:hover, .btn:hover { background: var(--bg-card-2); border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  button.primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #05121e; border-color: transparent; font-weight: 650;
+  }
+  html[data-theme="light"] button.primary { color: #fff; }
+  button.ghost { background: transparent; }
+  button.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  #refresh.busy { opacity: .5; pointer-events: none; }
+  button.small { padding: 4px 9px; font-size: 11.5px; border-radius: 8px; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; margin: 18px 0 16px; }
+  .stat {
+    background: linear-gradient(180deg, var(--bg-card), var(--bg-soft));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 14px; position: relative; overflow: hidden;
+  }
+  .stat::after { content: ""; position: absolute; inset: 0 0 auto; height: 2px; background: var(--line); }
+  .stat.err::after { background: var(--err); }
+  .stat.warn::after { background: var(--warn); }
+  .stat.ok::after { background: var(--ok); }
+  .stat.info::after { background: var(--accent); }
+  .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-mute); }
+  .stat .v { font-size: 24px; font-weight: 700; letter-spacing: -.5px; margin-top: 2px; }
+  .stat .h { font-size: 11px; color: var(--fg-mute); font-family: var(--mono); }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; flex-wrap: wrap; }
+  .tab {
+    background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    color: var(--fg-mute); padding: 9px 14px; font-size: 13px; font-weight: 550;
+  }
+  .tab:hover { color: var(--fg); background: var(--bg-card); }
+  .tab.active { color: var(--fg); border-bottom-color: var(--accent); background: none; }
+  .tab .count { font-family: var(--mono); font-size: 11px; color: var(--fg-mute); margin-left: 6px; }
+  .tab.active .count { color: var(--accent); }
+
+  .toolbar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 9px 10px; margin-bottom: 14px;
+  }
+  .toolbar input[type="search"], .toolbar input[type="text"], .toolbar select {
+    font: inherit; font-size: 12.5px; color: var(--fg); background: var(--bg-soft);
+    border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; min-width: 150px;
+  }
+  .toolbar input:focus, .toolbar select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; background: transparent; padding: 6px 10px; font-size: 12px; color: var(--fg-mute); }
+  .seg button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--fg); }
+  .muted { color: var(--fg-mute); }
+  .mono { font-family: var(--mono); }
+
+  .card {
+    background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--radius);
+    margin-bottom: 12px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .card.err { border-left: 3px solid var(--err); }
+  .card.warn { border-left: 3px solid var(--warn); }
+  .card.resolved { border-left: 3px solid var(--ok); opacity: .62; }
+  .card.resolved:hover { opacity: 1; }
+  .card.resolved .card-head { background: linear-gradient(180deg, color-mix(in srgb, var(--ok) 9%, transparent), transparent); }
+  .card-head {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 12px 14px; cursor: pointer; background: linear-gradient(180deg, var(--bg-card-2), transparent);
+  }
+  .card-head:hover { background: var(--bg-card-2); }
+  .badge {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 6px; font-family: var(--mono);
+  }
+  .badge.err { background: color-mix(in srgb, var(--err) 20%, transparent); color: var(--err); }
+  .badge.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+  .badge.ok { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+  .badge.info { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+  .badge.mag { background: color-mix(in srgb, var(--magenta) 20%, transparent); color: var(--magenta); }
+  .badge.gray { background: var(--bg-card-2); color: var(--fg-mute); }
+  .card-title { font-weight: 600; font-size: 13.5px; }
+  .card-file { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); word-break: break-all; }
+  .card-body { padding: 0 14px 14px; border-top: 1px solid var(--line-soft); display: none; }
+  .card.open .card-body { display: block; }
+  .card-body .msg { margin: 12px 0; font-size: 13.5px; }
+  .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 18px; margin: 12px 0; }
+  .kv div { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+  .kv .k { color: var(--fg-mute); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; flex: 0 0 auto; }
+  .kv .v { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .hint {
+    border: 1px dashed var(--line); border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border-radius: 10px; padding: 9px 12px; font-size: 12.5px; color: var(--fg-dim); margin: 10px 0;
+  }
+  pre.stack {
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; overflow: auto; max-height: 320px; margin: 10px 0 0;
+    color: var(--fg-dim); white-space: pre;
+  }
+  pre.stack .ln { color: var(--fg-mute); user-select: none; display: inline-block; width: 2.4em; }
+  .row-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { color: var(--fg-mute); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+  tbody tr:hover { background: var(--bg-card-2); }
+  td.mono, th.mono { font-family: var(--mono); font-size: 11.5px; }
+  .tablewrap { background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-family: var(--mono); background: var(--bg-card-2); border: 1px solid var(--line); }
+  .pill.applied { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+  .pill.clean { color: var(--accent); }
+  .pill.failed, .pill.conflict { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+  .pill.disabled, .pill.skipped, .pill.unknown { color: var(--fg-mute); }
+  .pill.reverted { color: var(--magenta); }
+  .pill.would-apply, .pill.drift, .pill.pending, .pill.missing, .pill.no-targets { color: var(--warn); }
+
+  .empty { text-align: center; padding: 46px 20px; color: var(--fg-mute); border: 1px dashed var(--line); border-radius: var(--radius); }
+  .empty .big { font-size: 28px; margin-bottom: 6px; }
+  .ok-banner {
+    display: flex; gap: 12px; align-items: center; padding: 16px 18px;
+    border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+    background: color-mix(in srgb, var(--ok) 10%, transparent);
+    border-radius: var(--radius); margin-bottom: 14px;
+  }
+  .ok-banner .big { font-size: 24px; }
+  details.mod { border: 1px solid var(--line-soft); border-radius: 10px; padding: 8px 12px; margin: 8px 0; background: var(--bg-soft); }
+  details.mod summary { cursor: pointer; font-size: 12.5px; }
+  .timeline { position: relative; margin-left: 8px; padding-left: 20px; border-left: 1px solid var(--line); }
+  .tl-item { position: relative; padding: 6px 0 12px; }
+  .tl-item::before {
+    content: ""; position: absolute; left: -25px; top: 12px; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 0 3px var(--bg);
+  }
+  .tl-item.err::before { background: var(--err); }
+  .tl-item.warn::before { background: var(--warn); }
+  .tl-item.ok::before { background: var(--ok); }
+  .tl-time { font-family: var(--mono); font-size: 11px; color: var(--fg-mute); }
+
+  #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+  .toast {
+    background: var(--bg-card); border: 1px solid var(--line); border-left: 3px solid var(--ok);
+    color: var(--fg); border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow);
+    font-size: 12.5px; animation: pop .16s ease-out; max-width: 380px;
+  }
+  .toast.err { border-left-color: var(--err); }
+  @keyframes pop { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  .kbd {
+    font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--bg-soft); color: var(--fg-mute);
+  }
+  .footer { margin-top: 26px; color: var(--fg-mute); font-size: 11.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .hidden { display: none !important; }
+  @media print {
+    body { background: #fff; color: #000; }
+    header.top, .toolbar, .tabs, .row-btns, #toasts { display: none !important; }
+    .card-body { display: block !important; }
+    .card, .tablewrap { box-shadow: none; border: 1px solid #ccc; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <div class="logo">pi</div>
+      <div>
+        <h1>patches — conflict report</h1>
+        <div class="sub" id="subtitle">loading…</div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="chips" id="host-chips"></div>
+    <button class="primary" id="copy-agent" title="Copy a ready-to-paste brief for your coding agent (c)">
+      <span>⧉</span> Copy all for agent
+    </button>
+    <button id="copy-json" title="Copy the full report as JSON">JSON</button>
+    <button id="download-json" title="Download the full report as JSON">⤓</button>
+    <button id="refresh" title="Re-read state.json and repaint (r)">↻ Refresh</button>
+    <button id="live" class="ghost" title="Poll for changes automatically">◉ Live</button>
+    <button id="theme-toggle" title="Toggle light/dark (t)">◐</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="stats" id="stats"></div>
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="conflicts">Conflicts <span class="count" id="count-conflicts">0</span></button>
+    <button class="tab" data-tab="patches">Patches <span class="count" id="count-patches">0</span></button>
+    <button class="tab" data-tab="runs">Runs <span class="count" id="count-runs">0</span></button>
+    <button class="tab" data-tab="history">History <span class="count" id="count-history">0</span></button>
+    <button class="tab" data-tab="commands">Commands</button>
+    <button class="tab" data-tab="raw">Raw JSON</button>
+  </div>
+
+  <section id="panel-conflicts">
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Search message, file, patch, stack…  ( / )" />
+      <div class="seg" id="sev-filter">
+        <button data-sev="all" class="on">All</button>
+        <button data-sev="error">Errors</button>
+        <button data-sev="warn">Warnings</button>
+      </div>
+      <div class="seg" id="state-filter" title="Resolved conflicts are closed with: node mainrunner.js conflicts --resolve &lt;id&gt;">
+        <button data-state="open" class="on">Open</button>
+        <button data-state="all">All</button>
+        <button data-state="resolved">Resolved</button>
+      </div>
+      <select id="patch-filter"><option value="all">All patches</option></select>
+      <select id="sort">
+        <option value="time">Newest first</option>
+        <option value="patch">By patch</option>
+        <option value="kind">By kind</option>
+      </select>
+      <div class="spacer"></div>
+      <button class="small ghost" id="expand-all">Expand all (e)</button>
+      <button class="small ghost" id="collapse-all">Collapse all (C)</button>
+      <button class="small" id="copy-filtered">Copy filtered for agent</button>
+    </div>
+    <div id="conflicts"></div>
+  </section>
+
+  <section id="panel-patches" class="hidden"></section>
+  <section id="panel-runs" class="hidden"></section>
+  <section id="panel-history" class="hidden"></section>
+  <section id="panel-commands" class="hidden"></section>
+  <section id="panel-raw" class="hidden"></section>
+
+  <div class="footer">
+    <span id="footer-paths"></span>
+    <span>keys: <span class="kbd">/</span> search · <span class="kbd">e</span> expand · <span class="kbd">C</span> collapse · <span class="kbd">c</span> copy all · <span class="kbd">r</span> refresh · <span class="kbd">l</span> live · <span class="kbd">t</span> theme · <span class="kbd">1-6</span> tabs</span>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<script id="pi-data" type="application/json">/*__PI_PATCHES_DATA__*/null</script>
+<script>
+(() => {
+  "use strict";
+
+  function readInlineData() {
+    try { return JSON.parse(document.getElementById("pi-data").textContent || "{}"); } catch { return {}; }
+  }
+
+  let DATA = window.__PI_PATCHES_DATA__ || readInlineData();
+  let CONFLICTS = [];
+  let PATCHES = [];
+  let RUNS = [];
+  let HISTORY = [];
+  let META = {};
+  let SUMMARY = {};
+  let COMMANDS = [];
+  let LOADED_AT = Date.now();
+
+  function ingest(data) {
+    DATA = data && typeof data === "object" ? data : {};
+    CONFLICTS = DATA.conflicts || [];
+    PATCHES = DATA.patches || [];
+    RUNS = DATA.runs || [];
+    HISTORY = DATA.history || [];
+    META = DATA.meta || {};
+    SUMMARY = DATA.summary || {};
+    COMMANDS = DATA.commands || [];
+    LOADED_AT = Date.now();
+  }
+
+  ingest(DATA);
+
+  const store = {
+    get(key, fallback) {
+      try { const v = localStorage.getItem("pipatches." + key); return v === null ? fallback : JSON.parse(v); }
+      catch { return fallback; }
+    },
+    set(key, value) { try { localStorage.setItem("pipatches." + key, JSON.stringify(value)); } catch {} },
+  };
+
+  const ui = {
+    tab: store.get("tab", "conflicts"),
+    q: "",
+    severity: store.get("severity", "all"),
+    state: store.get("stateFilter", "open"),
+    patch: "all",
+    sort: store.get("sort", "time"),
+    // Few conflicts: open them so the stacktraces are visible immediately.
+    open: new Set(CONFLICTS.length <= 5 ? CONFLICTS.map((cf) => cf.id) : []),
+  };
+
+  // ------------------------------------------------------------------ helpers
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+  function esc(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function when(iso) {
+    if (!iso) return "—";
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return esc(iso);
+    const diff = Date.now() - t;
+    const s = Math.round(diff / 1000);
+    let rel = "just now";
+    if (s >= 45) {
+      const m = Math.round(s / 60);
+      if (m < 60) rel = m + "m ago";
+      else {
+        const h = Math.round(m / 60);
+        if (h < 24) rel = h + "h ago";
+        else rel = Math.round(h / 24) + "d ago";
+      }
+    }
+    return new Date(t).toLocaleString() + "  (" + rel + ")";
+  }
+
+  function dur(ms) {
+    if (ms === null || ms === undefined) return "—";
+    if (ms < 1000) return Math.round(ms) + "ms";
+    if (ms < 60000) return (ms / 1000).toFixed(2) + "s";
+    return Math.floor(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s";
+  }
+
+  function bytes(n) {
+    if (!Number.isFinite(n)) return "—";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(2) + " MB";
+  }
+
+  function baseName(p) {
+    if (!p) return "";
+    const parts = String(p).split(/[\\/]/);
+    return parts[parts.length - 1] || String(p);
+  }
+
+  function pill(status) {
+    return '<span class="pill ' + esc(status) + '">' + esc(status) + "</span>";
+  }
+
+  function badge(severity) {
+    if (severity === "resolved") return '<span class="badge ok">resolved</span>';
+    const kind = severity === "warn" ? "warn" : "err";
+    const label = severity === "warn" ? "warning" : "error";
+    return '<span class="badge ' + kind + '">' + label + "</span>";
+  }
+
+  function toast(message, isError) {
+    const el = document.createElement("div");
+    el.className = "toast" + (isError ? " err" : "");
+    el.textContent = message;
+    $("#toasts").appendChild(el);
+    setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; }, 2200);
+    setTimeout(() => el.remove(), 2700);
+  }
+
+  async function copy(text, label) {
+    if (!text) { toast("nothing to copy", true); return; }
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        const ok = document.execCommand("copy");
+        ta.remove();
+        if (!ok) throw new Error("execCommand copy failed");
+      }
+      toast("copied " + (label || "to clipboard") + " — paste it to your agent");
+    } catch (err) {
+      toast("copy failed: " + err.message, true);
+    }
+  }
+
+  // ------------------------------------------------------------------ agent briefs
+
+  function conflictBrief(cf) {
+    const lines = [];
+    lines.push("### patch conflict: " + cf.patchName + " (" + cf.patchId + ")");
+    lines.push("");
+    lines.push("- kind: " + cf.kind + " (" + (cf.severity || "error") + ")");
+    lines.push("- time: " + cf.ts);
+    if (cf.file) lines.push("- target file: " + cf.file);
+    if (cf.patchModule) lines.push("- patch module: " + cf.patchModule);
+    if (cf.message) lines.push("- message: " + cf.message);
+    const patch = PATCHES.find((p) => p.id === cf.patchId);
+    if (patch && patch.params && Object.keys(patch.params).length) {
+      lines.push("- params: " + JSON.stringify(patch.params));
+    }
+    if (cf.hint) { lines.push(""); lines.push("hint: " + cf.hint); }
+    if (cf.stack) {
+      lines.push("");
+      lines.push("stacktrace:");
+      lines.push("```");
+      lines.push(cf.stack.trim());
+      lines.push("```");
+    }
+    return lines.join("\n");
+  }
+
+  function fullBrief(list) {
+    const items = list && list.length ? list : CONFLICTS;
+    const out = [];
+    out.push("# pi patches — conflict report for agent review");
+    out.push("");
+    out.push("Generated: " + (META.generatedAt || "unknown"));
+    out.push("Host: " + [META.host && META.host.platform, META.host && META.host.arch, META.host && META.host.node].filter(Boolean).join(" / "));
+    out.push("Patches dir: " + (META.patchesDir || "?"));
+    out.push("Registry: " + (META.registryFile || "?"));
+    out.push("State: " + (META.stateFile || "?"));
+    out.push("Conflicts: " + items.length + " (" + (SUMMARY.errors || 0) + " errors, " + (SUMMARY.warnings || 0) + " warnings)");
+    out.push("");
+    out.push("## What I need");
+    out.push("");
+    out.push("The local patch runner in the patches dir could not apply (or could not verify) one or more patches.");
+    out.push("Fix the patch module, never pi's bundled dist files. For each conflict below:");
+    out.push("");
+    out.push("1. Open the patch module listed in `patch module` and re-check the anchor/regex it targets in the `target file`.");
+    out.push("2. Update the patch module so it matches the current upstream code (keep it idempotent and reversible).");
+    out.push("3. Re-run `node mainrunner.js run --force` from the patches dir and confirm the conflict is gone.");
+    out.push("4. If the patch is genuinely obsolete, disable it: `node mainrunner.js disable <patch-id>`.");
+    out.push("");
+    out.push("## Conflicts");
+    out.push("");
+    for (const cf of items) {
+      out.push(conflictBrief(cf));
+      out.push("");
+    }
+    out.push("## Current patch state");
+    out.push("");
+    for (const p of PATCHES) {
+      out.push("- " + p.id + " [" + p.status + "] " + (p.enabled ? "enabled" : "DISABLED") +
+        (p.version ? " v" + p.version : "") + " — " + (p.lastSummary || "no run yet"));
+      if (p.module) out.push("    module: " + p.module);
+    }
+    out.push("");
+    out.push("## CLI reference");
+    out.push("");
+    for (const cmd of COMMANDS) out.push("- " + cmd.label + ": `" + cmd.cmd + "`");
+    return out.join("\n");
+  }
+
+  function cardBrief(cf) {
+    return [conflictBrief(cf), "", "Fix the patch module (not pi's dist), then re-run:", "`node mainrunner.js run --force`"].join("\n");
+  }
+
+  // ------------------------------------------------------------------ stats
+
+  function renderStats() {
+    const cards = [
+      { k: "conflicts", v: SUMMARY.conflicts || 0, h: (SUMMARY.errors || 0) + " errors · " + (SUMMARY.warnings || 0) + " warnings", cls: (SUMMARY.conflicts ? "err" : "ok") },
+      { k: "resolved", v: SUMMARY.resolved || 0, h: "closed conflicts", cls: "ok" },
+      { k: "patches", v: SUMMARY.patches || 0, h: (SUMMARY.disabled || 0) + " disabled", cls: "info" },
+      { k: "applied", v: SUMMARY.applied || 0, h: "up to date", cls: "ok" },
+      { k: "failed", v: SUMMARY.failed || 0, h: "need attention", cls: (SUMMARY.failed ? "err" : "") },
+      { k: "files changed", v: SUMMARY.filesChanged || 0, h: "all time", cls: "" },
+      { k: "last run", v: SUMMARY.lastRunAt ? new Date(Date.parse(SUMMARY.lastRunAt)).toLocaleTimeString() : "—", h: dur(SUMMARY.lastDurationMs), cls: "" },
+    ];
+    $("#stats").innerHTML = cards.map((card) =>
+      '<div class="stat ' + card.cls + '"><div class="k">' + esc(card.k) + '</div><div class="v">' +
+      esc(card.v) + '</div><div class="h">' + esc(card.h) + "</div></div>").join("");
+  }
+
+  function renderHeader() {
+    const host = META.host || {};
+    $("#subtitle").textContent = "generated " + when(META.generatedAt) + " · " + (META.reportFile || "conflicts.html");
+    $("#host-chips").innerHTML = [
+      host.platform ? host.platform + "/" + (host.arch || "") : null,
+      host.node,
+      "pid " + (host.pid || "?"),
+      "agent: " + baseName(host.agentDir || ""),
+    ].filter(Boolean).map((t) => '<span class="chip">' + esc(t) + "</span>").join("");
+    $("#footer-paths").innerHTML = [
+      "patches: " + esc(META.patchesDir || ""),
+      "state: " + esc(baseName(META.stateFile || "state.json")),
+      "log: " + esc(baseName(META.logFile || "runner.log")),
+    ].map(esc).join(" · ");
+    const openConflicts = CONFLICTS.filter((c) => !c.resolved).length;
+    const resolvedConflicts = CONFLICTS.length - openConflicts;
+    $("#count-conflicts").textContent = String(openConflicts);
+    const tabConflicts = $('[data-tab="conflicts"]');
+    if (tabConflicts) {
+      tabConflicts.title = openConflicts + " open" + (resolvedConflicts ? " · " + resolvedConflicts + " resolved" : "");
+    }
+    $("#count-patches").textContent = String(PATCHES.length);
+    $("#count-runs").textContent = String(RUNS.length);
+    $("#count-history").textContent = String(HISTORY.length);
+  }
+
+  // ------------------------------------------------------------------ conflicts
+
+  function filteredConflicts() {
+    const q = ui.q.trim().toLowerCase();
+    let list = CONFLICTS.slice();
+    if (ui.state === "open") list = list.filter((c) => !c.resolved);
+    else if (ui.state === "resolved") list = list.filter((c) => c.resolved);
+    if (ui.severity === "error") list = list.filter((c) => (c.severity || "error") !== "warn");
+    if (ui.severity === "warn") list = list.filter((c) => c.severity === "warn");
+    if (ui.patch !== "all") list = list.filter((c) => c.patchId === ui.patch);
+    if (q) {
+      list = list.filter((c) =>
+        [c.message, c.file, c.patchId, c.patchName, c.kind, c.stack, c.hint]
+          .filter(Boolean).join(" ").toLowerCase().includes(q));
+    }
+    if (ui.sort === "patch") list.sort((a, b) => String(a.patchId).localeCompare(String(b.patchId)));
+    else if (ui.sort === "kind") list.sort((a, b) => String(a.kind).localeCompare(String(b.kind)));
+    else list.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+    return list;
+  }
+
+  function stackHtml(stack) {
+    if (!stack) return "";
+    const lines = stack.trim().split(/\r?\n/).slice(0, 400);
+    return lines.map((line, i) =>
+      '<span class="ln">' + String(i + 1).padStart(3, " ") + "</span>" + esc(line)).join("\n");
+  }
+
+  function conflictCard(cf) {
+    const isWarn = cf.severity === "warn";
+    const open = ui.open.has(cf.id);
+    const patch = PATCHES.find((p) => p.id === cf.patchId);
+    const kv = [
+      ["patch", cf.patchId + (patch && patch.version ? " v" + patch.version : "")],
+      ["kind", cf.kind],
+      ["severity", cf.severity || "error"],
+      cf.resolved ? ["resolved", when(cf.resolvedAt) + " · " + (cf.resolvedBy || "manual")] : null,
+      ["time", when(cf.ts)],
+      cf.file ? ["file", cf.file] : null,
+      cf.patchModule ? ["module", cf.patchModule] : null,
+      patch && patch.params && Object.keys(patch.params).length ? ["params", JSON.stringify(patch.params)] : null,
+    ].filter(Boolean);
+
+    return (
+      '<article class="card ' + (isWarn ? "warn" : "err") + (cf.resolved ? " resolved" : "") + (open ? " open" : "") + '" data-id="' + esc(cf.id) + '">' +
+        '<div class="card-head" data-toggle="' + esc(cf.id) + '">' +
+          badge(cf.severity) + (cf.resolved ? badge("resolved") : "") +
+          '<span class="card-title">' + esc(cf.patchName) + " · " + esc(cf.kind) + "</span>" +
+          '<span class="card-file">' + esc(cf.file ? baseName(cf.file) : cf.message) + "</span>" +
+          '<div class="spacer"></div>' +
+          '<span class="muted mono" style="font-size:11px">' + esc(when(cf.ts)) + "</span>" +
+          '<span class="muted" style="font-size:12px">' + (open ? "▾" : "▸") + "</span>" +
+        "</div>" +
+        '<div class="card-body">' +
+          '<div class="msg">' + esc(cf.message) + "</div>" +
+          '<div class="kv">' + kv.map((pair) =>
+            '<div><span class="k">' + esc(pair[0]) + '</span><span class="v">' + esc(pair[1]) + "</span></div>").join("") + "</div>" +
+          (cf.hint ? '<div class="hint"><b>Suggested fix · </b>' + esc(cf.hint) + "</div>" : "") +
+          (cf.stack ? '<pre class="stack">' + stackHtml(cf.stack) + "</pre>" : '<div class="muted" style="margin-top:8px">no stacktrace captured</div>') +
+          '<div class="row-btns">' +
+            '<button class="primary small" data-copy-stack="' + esc(cf.id) + '">⧉ Copy stacktrace</button>' +
+            '<button class="small" data-copy-card="' + esc(cf.id) + '">Copy full conflict</button>' +
+            '<button class="small" data-copy-file="' + esc(cf.id) + '">Copy file path</button>' +
+            '<button class="small" data-copy-module="' + esc(cf.id) + '">Copy module path</button>' +
+            '<button class="small" data-copy-json="' + esc(cf.id) + '">{ } Copy JSON</button>' +
+            '<button class="small ghost" data-copy-cmd="' + esc(cf.id) + '">Copy fix command</button>' +
+            (cf.resolved
+              ? '<button class="small ghost" data-copy-cmd-text="node mainrunner.js conflicts --reopen ' + esc(cf.id) + '">↺ Copy reopen command</button>'
+              : '<button class="small" data-copy-cmd-text="node mainrunner.js conflicts --resolve ' + esc(cf.id) + '">✓ Copy resolve command</button>' +
+                '<button class="small ghost" data-copy-cmd-text="node mainrunner.js conflicts --resolve all">✓ Copy resolve-all command</button>') +
+          "</div>" +
+        "</div>" +
+      "</article>"
+    );
+  }
+
+  function renderConflicts() {
+    const list = filteredConflicts();
+    const host = $("#conflicts");
+    if (!CONFLICTS.length) {
+      host.innerHTML =
+        '<div class="ok-banner"><div class="big">✓</div><div><b>No conflicts.</b><div class="muted">Every enabled patch applied cleanly on the last run. ' +
+        "This file is only rewritten when a run produces a conflict.</div></div></div>";
+      return;
+    }
+    if (!list.length) {
+      const hidden = CONFLICTS.filter((c) => c.resolved).length;
+      host.innerHTML = '<div class="empty"><div class="big">⌕</div>No conflicts match the current filters.' +
+        '<div class="muted" style="margin-top:8px">' + CONFLICTS.length + " total" +
+        (hidden && ui.state !== "all" ? " · " + hidden + " resolved hidden (switch to All)" : "") + "</div></div>";
+      return;
+    }
+    host.innerHTML = list.map(conflictCard).join("");
+  }
+
+  // ------------------------------------------------------------------ patches
+
+  function renderPatches() {
+    if (!PATCHES.length) {
+      $("#panel-patches").innerHTML = '<div class="empty"><div class="big">▦</div>No patches registered yet.<div class="muted">Add one to patches.json.</div></div>';
+      return;
+    }
+    const rows = PATCHES.map((p) => {
+      const files = p.files || [];
+      const fileRows = files.map((f) =>
+        "<tr><td class='mono'>" + esc(f.file) + "</td><td>" + pill(f.status) +
+        "</td><td class='mono'>" + esc(f.diffStat ? "+" + f.diffStat.added + " / -" + f.diffStat.removed : "—") +
+        "</td><td class='mono'>" + esc(bytes(f.bytesBefore) + " → " + bytes(f.bytesAfter)) +
+        "</td><td class='mono'>" + esc(f.backup || "—") + "</td></tr>").join("");
+      const params = Object.entries(p.params || {}).map(([k, v]) =>
+        '<span class="pill">' + esc(k) + "=" + esc(Array.isArray(v) ? v.join(";") : v) + "</span>").join(" ");
+      return (
+        '<article class="card">' +
+          '<div class="card-head" data-toggle-patch="' + esc(p.id) + '">' +
+            '<span class="badge ' + (p.status === "applied" ? "ok" : p.status === "failed" ? "err" : p.enabled ? "info" : "gray") + '">' + esc(p.status) + "</span>" +
+            '<span class="card-title">' + esc(p.name) + "</span>" +
+            '<span class="card-file mono">' + esc(p.id) + (p.version ? " v" + p.version : "") + "</span>" +
+            '<div class="spacer"></div>' +
+            (p.enabled ? "" : '<span class="badge gray">disabled</span>') +
+            '<span class="muted" style="font-size:11.5px">' + esc(p.lastSummary || "no run yet") + "</span>" +
+          "</div>" +
+          '<div class="card-body' + (ui.open.has("p:" + p.id) ? ' style="display:block"' : "") + '">' +
+            (p.description ? '<div class="msg">' + esc(p.description) + "</div>" : "") +
+            '<div class="kv">' +
+              '<div><span class="k">module</span><span class="v">' + esc(p.module || "—") + "</span></div>" +
+              '<div><span class="k">status</span><span class="v">' + esc(p.status) + "</span></div>" +
+              '<div><span class="k">last run</span><span class="v">' + esc(when(p.lastRunAt)) + "</span></div>" +
+              '<div><span class="k">applied</span><span class="v">' + esc(when(p.appliedAt)) + "</span></div>" +
+              '<div><span class="k">counters</span><span class="v">' + esc(JSON.stringify(p.counters || {})) + "</span></div>" +
+              '<div><span class="k">params</span><span class="v">' + (params || "—") + "</span></div>" +
+            "</div>" +
+            (files.length
+              ? '<div class="tablewrap"><table><thead><tr><th>file</th><th>status</th><th>diff</th><th>size</th><th>backup</th></tr></thead><tbody>' + fileRows + "</tbody></table></div>"
+              : '<div class="muted">No files recorded yet.</div>') +
+            (p.history && p.history.length
+              ? '<details class="mod"><summary>' + p.history.length + " recent history entries</summary>" +
+                '<div class="timeline" style="margin-top:10px">' + p.history.map((h) =>
+                  '<div class="tl-item ' + (h.status === "failed" ? "err" : h.status === "applied" ? "ok" : "") + '">' +
+                  '<div class="tl-time">' + esc(when(h.ts)) + "</div><div>" + pill(h.status || "?") + " " + esc(h.action || "") + " — " + esc(h.message || "") + "</div></div>").join("") +
+                "</div></details>"
+              : "") +
+            '<div class="row-btns">' +
+              '<button class="small" data-cmd-copy="node mainrunner.js apply ' + esc(p.id) + ' --force">Copy apply command</button>' +
+              '<button class="small" data-cmd-copy="node mainrunner.js revert ' + esc(p.id) + '">Copy revert command</button>' +
+              '<button class="small" data-cmd-copy="node mainrunner.js ' + (p.enabled ? "disable " : "enable ") + esc(p.id) + '">Copy ' + (p.enabled ? "disable" : "enable") + " command</button>" +
+            "</div>" +
+          "</div>" +
+        "</article>"
+      );
+    }).join("");
+    $("#panel-patches").innerHTML = rows;
+  }
+
+  // ------------------------------------------------------------------ runs / history / commands / raw
+
+  function renderRuns() {
+    if (!RUNS.length) {
+      $("#panel-runs").innerHTML = '<div class="empty"><div class="big">◷</div>No runs recorded yet.</div>';
+      return;
+    }
+    $("#panel-runs").innerHTML = '<div class="tablewrap"><table><thead><tr><th>when</th><th>trigger</th><th>result</th><th>changed</th><th>conflicts</th><th>duration</th><th>patches</th></tr></thead><tbody>' +
+      RUNS.map((r) =>
+        "<tr><td class='mono'>" + esc(when(r.startedAt)) + "</td><td class='mono'>" + esc(r.trigger || "cli") +
+        "</td><td>" + (r.ok ? '<span class="badge ok">ok</span>' : '<span class="badge err">conflicts</span>') +
+        (r.dryRun ? ' <span class="badge gray">dry-run</span>' : "") +
+        "</td><td class='mono'>" + esc(r.changed || 0) + "</td><td class='mono'>" + esc(r.conflicts || 0) +
+        "</td><td class='mono'>" + esc(dur(r.durationMs)) + "</td><td class='mono'>" +
+        esc((r.patches || []).map((p) => p.id + ":" + p.status).join(", ")) + "</td></tr>").join("") +
+      "</tbody></table></div>";
+  }
+
+  function renderHistory() {
+    if (!HISTORY.length) {
+      $("#panel-history").innerHTML = '<div class="empty"><div class="big">≡</div>No history yet.</div>';
+      return;
+    }
+    $("#panel-history").innerHTML = '<div class="timeline">' + HISTORY.map((h) => {
+      const cls = h.status === "failed" ? "err" : h.status === "applied" ? "ok" : h.status === "clean" ? "" : "warn";
+      const files = (h.files || []).map((f) => baseName(f.file) + ":" + f.status).join(", ");
+      return '<div class="tl-item ' + cls + '">' +
+        '<div class="tl-time">' + esc(when(h.ts)) + "</div>" +
+        "<div>" + pill(h.status || "?") + ' <b class="mono">' + esc(h.patchId || "—") + "</b> " +
+        esc(h.action || "") + " — " + esc(h.message || "") + "</div>" +
+        (files ? '<div class="muted mono" style="font-size:11px">' + esc(files) + "</div>" : "") +
+        "</div>";
+    }).join("") + "</div>";
+  }
+
+  function renderCommands() {
+    $("#panel-commands").innerHTML =
+      '<div class="toolbar"><span class="muted">Run these from <span class="mono">' + esc(META.patchesDir || "") + "</span></span></div>" +
+      '<div class="tablewrap"><table><thead><tr><th>action</th><th>command</th><th></th></tr></thead><tbody>' +
+      COMMANDS.map((cmd) =>
+        "<tr><td>" + esc(cmd.label) + "</td><td class='mono'>" + esc(cmd.cmd) +
+        "</td><td><button class='small' data-cmd-copy=\"" + esc(cmd.cmd) + "\">copy</button></td></tr>").join("") +
+      "</tbody></table></div>";
+  }
+
+  function renderRaw() {
+    const json = JSON.stringify(DATA, null, 2);
+    $("#panel-raw").innerHTML =
+      '<div class="toolbar"><span class="muted">Full report payload — ' + bytes(json.length) + "</span><div class='spacer'></div>" +
+      '<button class="small" id="copy-raw">Copy JSON</button><button class="small" id="download-raw">Download</button></div>' +
+      '<pre class="stack" style="max-height:70vh">' + esc(json) + "</pre>";
+    $("#copy-raw").addEventListener("click", () => copy(json, "report JSON"));
+    $("#download-raw").addEventListener("click", downloadJson);
+  }
+
+  function downloadJson() {
+    try {
+      const blob = new Blob([JSON.stringify(DATA, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "pi-patches-report-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast("downloaded report JSON");
+    } catch (err) {
+      toast("download failed: " + err.message, true);
+    }
+  }
+
+  // ------------------------------------------------------------------ wiring
+
+  function setTab(tab) {
+    ui.tab = tab;
+    store.set("tab", tab);
+    $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    ["conflicts", "patches", "runs", "history", "commands", "raw"].forEach((name) => {
+      const panel = $("#panel-" + name);
+      if (panel) panel.classList.toggle("hidden", name !== tab);
+    });
+  }
+
+  function toggleCard(id) {
+    if (ui.open.has(id)) ui.open.delete(id); else ui.open.add(id);
+    const card = $('[data-id="' + id + '"]');
+    if (card) {
+      card.classList.toggle("open", ui.open.has(id));
+      const chev = $(".card-head span:last-child", card);
+      if (chev) chev.textContent = ui.open.has(id) ? "▾" : "▸";
+    }
+  }
+
+  function applyFilters() {
+    ui.q = $("#q").value;
+    const sevOn = $("#sev-filter button.on");
+    ui.severity = sevOn && sevOn.dataset ? sevOn.dataset.sev : "all";
+    const stateOn = $("#state-filter button.on");
+    if (stateOn) ui.state = stateOn.dataset.state;
+    store.set("stateFilter", ui.state);
+    ui.patch = $("#patch-filter").value;
+    ui.sort = $("#sort").value;
+    store.set("severity", ui.severity);
+    store.set("sort", ui.sort);
+    renderConflicts();
+  }
+
+  function refreshPatchOptions() {
+    const ids = Array.from(new Set(CONFLICTS.map((c) => c.patchId)));
+    const select = $("#patch-filter");
+    if (!select) return;
+    select.innerHTML = '<option value="all">All patches</option>' +
+      ids.map((id) => '<option value="' + esc(id) + '">' + esc(id) + "</option>").join("");
+    if (ui.patch !== "all" && !ids.includes(ui.patch)) { ui.patch = "all"; }
+    select.value = ui.patch;
+  }
+
+  function initFilters() {
+    refreshPatchOptions();
+    $("#q").addEventListener("input", () => { ui.q = $("#q").value; renderConflicts(); });
+    $("#sort").value = ui.sort;
+    $("#sort").addEventListener("change", applyFilters);
+    $("#patch-filter").addEventListener("change", applyFilters);
+    $$("#sev-filter button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.sev === ui.severity);
+      b.addEventListener("click", () => {
+        $$("#sev-filter button").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        applyFilters();
+      });
+    });
+    $$("#state-filter button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.state === ui.state);
+      b.addEventListener("click", () => {
+        $$("#state-filter button").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        applyFilters();
+      });
+    });
+    $("#expand-all").addEventListener("click", () => {
+      CONFLICTS.forEach((c) => ui.open.add(c.id));
+      renderConflicts();
+    });
+    $("#collapse-all").addEventListener("click", () => {
+      ui.open.clear();
+      renderConflicts();
+    });
+    $("#copy-filtered").addEventListener("click", () => {
+      const list = filteredConflicts();
+      copy(fullBrief(list), list.length + " conflict(s)");
+    });
+  }
+
+  // ------------------------------------------------------------------ live refresh
+  // The page is a static file, so it re-reads conflicts.data.js (written by the runner next to
+  // this HTML) through a <script> tag — the one local read that works from file://.
+
+  const DATA_FILE = String(META.dataFile || "").split(String.fromCharCode(92)).join("/").split("/").pop() || "";
+
+  function loadFreshData() {
+    return new Promise((resolve, reject) => {
+      if (!DATA_FILE) { reject(new Error("this report has no data file")); return; }
+      const el = document.createElement("script");
+      el.async = true;
+      el.src = DATA_FILE + "?v=" + Date.now();
+      el.onload = () => {
+        el.remove();
+        if (!window.__PI_PATCHES_DATA__) { reject(new Error("data file defined nothing")); return; }
+        resolve(window.__PI_PATCHES_DATA__);
+      };
+      el.onerror = () => { el.remove(); reject(new Error("could not read " + DATA_FILE)); };
+      document.head.appendChild(el);
+    });
+  }
+
+  function rerender() {
+    renderHeader();
+    renderStats();
+    refreshPatchOptions();
+    renderConflicts();
+    renderPatches();
+    renderRuns();
+    renderHistory();
+    renderCommands();
+    renderRaw();
+  }
+
+  let busy = false;
+  async function refresh(options) {
+    const silent = Boolean(options && options.silent);
+    if (busy) return;
+    busy = true;
+    const btn = $("#refresh");
+    if (btn) btn.classList.add("busy");
+    try {
+      const next = await loadFreshData();
+      const changed = JSON.stringify(next) !== JSON.stringify(DATA);
+      ingest(next);
+      rerender();
+      if (btn) btn.textContent = changed ? "↻ Refreshed" : "↻ Up to date";
+      setTimeout(() => { if (btn) btn.textContent = "↻ Refresh"; }, 1800);
+      if (!silent) toast(changed ? "Report updated" : "Already up to date");
+    } catch (err) {
+      if (!silent) {
+        toast(err.message + " — reloading", true);
+        setTimeout(() => location.reload(), 700);
+      }
+    } finally {
+      busy = false;
+      if (btn) btn.classList.remove("busy");
+    }
+  }
+
+  let liveTimer = null;
+  function setLive(on) {
+    store.set("live", Boolean(on));
+    const btn = $("#live");
+    if (btn) btn.classList.toggle("on", Boolean(on));
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    const seconds = Number(META.refreshSeconds);
+    if (on && seconds > 0) {
+      liveTimer = setInterval(() => {
+        if (document.visibilityState === "visible") refresh({ silent: true });
+      }, Math.max(1, seconds) * 1000);
+    }
+  }
+
+  function initActions() {
+    $("#copy-agent").addEventListener("click", () => copy(fullBrief(CONFLICTS), "agent brief"));
+    $("#copy-json").addEventListener("click", () => copy(JSON.stringify(DATA, null, 2), "report JSON"));
+    $("#download-json").addEventListener("click", downloadJson);
+
+    const savedTheme = store.get("theme", "dark");
+    document.documentElement.dataset.theme = savedTheme;
+    $("#theme-toggle").addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = next;
+      store.set("theme", next);
+    });
+
+    $$(".tab").forEach((tab) => tab.addEventListener("click", () => setTab(tab.dataset.tab)));
+
+    if ($("#refresh")) $("#refresh").addEventListener("click", () => refresh());
+    if ($("#live")) $("#live").addEventListener("click", () => setLive(!$("#live").classList.contains("on")));
+    setLive(store.get("live", Number(META.refreshSeconds) > 0));
+
+    document.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-toggle],[data-toggle-patch],[data-copy-stack],[data-copy-card],[data-copy-file],[data-copy-module],[data-copy-json],[data-copy-cmd],[data-cmd-copy],[data-copy-cmd-text]");
+      if (!target) return;
+      const id = target.dataset.toggle || target.dataset.copyStack || target.dataset.copyCard ||
+        target.dataset.copyFile || target.dataset.copyModule || target.dataset.copyJson || target.dataset.copyCmd;
+      const cf = CONFLICTS.find((c) => c.id === id);
+
+      if (target.dataset.toggle) { toggleCard(id); return; }
+      if (target.dataset.togglePatch) {
+        const key = "p:" + target.dataset.togglePatch;
+        if (ui.open.has(key)) ui.open.delete(key); else ui.open.add(key);
+        renderPatches();
+        return;
+      }
+      if (target.dataset.copyStack) { copy(cf ? cf.stack : "", "stacktrace"); return; }
+      if (target.dataset.copyCard) { copy(cardBrief(cf), "conflict"); return; }
+      if (target.dataset.copyCmdText) { copy(target.dataset.copyCmdText, "command"); return; }
+      if (target.dataset.copyFile) { copy(cf && cf.file ? cf.file : "", "file path"); return; }
+      if (target.dataset.copyModule) { copy(cf && cf.patchModule ? cf.patchModule : "", "module path"); return; }
+      if (target.dataset.copyJson) { copy(JSON.stringify(cf, null, 2), "conflict JSON"); return; }
+      if (target.dataset.copyCmd) {
+        copy("cd \"" + (META.patchesDir || ".") + "\" && node mainrunner.js run --force", "fix command");
+        return;
+      }
+      if (target.dataset.cmdCopy) { copy(target.dataset.cmdCopy, "command"); return; }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.target.matches("input, textarea, select")) {
+        if (event.key === "Escape") event.target.blur();
+        return;
+      }
+      const key = event.key;
+      if (key === "/") { event.preventDefault(); $("#q").focus(); return; }
+      if (key === "t") { $("#theme-toggle").click(); return; }
+      if (key === "r") { refresh(); return; }
+      if (key === "l") { setLive(!$("#live").classList.contains("on")); return; }
+      if (key === "c") { copy(fullBrief(CONFLICTS), "agent brief"); return; }
+      if (key === "e") { CONFLICTS.forEach((c) => ui.open.add(c.id)); renderConflicts(); return; }
+      if (key === "C") { ui.open.clear(); renderConflicts(); return; }
+      const tabs = ["conflicts", "patches", "runs", "history", "commands", "raw"];
+      const n = Number(key);
+      if (n >= 1 && n <= tabs.length) setTab(tabs[n - 1]);
+    });
+  }
+
+  renderHeader();
+  renderStats();
+  initFilters();
+  initActions();
+  renderConflicts();
+  renderPatches();
+  renderRuns();
+  renderHistory();
+  renderCommands();
+  renderRaw();
+  setTab(ui.tab || "conflicts");
+  if (!CONFLICTS.length) {
+    $("#panel-conflicts").classList.remove("hidden");
+  }
+})();
+</script>
+</body>
+</html>
