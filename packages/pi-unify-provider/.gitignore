@@ -1,0 +1,9 @@
+node_modules/
+old_src/
+*.log
+dist/
+.env
+.vscode/
+new-plan.md
+.pi/
+providers-db.json

@@ -1,0 +1,58 @@
+{
+  "name": "pi-unify-provider",
+  "version": "0.3.0",
+  "description": "Multi-provider LLM management for Pi with automatic model discovery",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "pi-coding-agent",
+    "cli",
+    "llm",
+    "openai",
+    "anthropic",
+    "unify"
+  ],
+  "license": "MIT",
+  "author": "github.com/jeryjs",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeryjs/pi-unify-provider.git"
+  },
+  "homepage": "https://github.com/jeryjs/pi-unify-provider#readme",
+  "bugs": {
+    "url": "https://github.com/jeryjs/pi-unify-provider/issues"
+  },
+  "bin": {
+    "pi-unify-provider": "install.mjs"
+  },
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "*.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "test:watch": "node --experimental-strip-types --test --watch \"test/**/*.test.ts\""
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [],
+    "prompts": []
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@marcfargas/pi-test-harness": "^0.5.0",
+    "@types/node": "^25.9.0",
+    "typescript": "6.0.2"
+  }
+}
