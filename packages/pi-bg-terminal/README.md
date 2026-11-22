@@ -228,7 +228,8 @@ arrows, navigation keys, Insert/Delete, F1-F12, Space, Enter, Escape, Tab, and
 Backspace. Modifiers can be combined, such as `<C-A-d>` or `<S-A-Left>`, and key
 repetition uses forms such as `<Down*3>`. Use `\<` for a literal `<` and `\\`
 for a literal backslash. For a pipe task, `input=<C-d>` or `input=<EOF>` closes
-stdin.
+stdin, and it must be the only token in that call — write the text in one call,
+then close stdin in the next.
 
 Pipe attachments do not forward keyboard input directly, but Pi can still send
 stdin through `send`. PTY attachments forward input interactively and the same
@@ -358,8 +359,13 @@ same-task ordering — and changes the model-facing surface:
   tools. This fork registers a single `bg_terminal` tool with
   `action = start | wait | status | read | send | kill | attach`.
 - **Smaller prompt surface.** The compact schema, description, and guidelines
-  cost roughly 700 tokens, well under the ~3,000+ tokens the separate tool
-  schemas used.
+  cost roughly 660 tokens (460 tool schema + description, 200 guidelines), well
+  under the ~3,000+ tokens the separate tool schemas used. The action description carries the full usage contract (which
+  fields each action takes, defaults, and the input/key-token semantics) so
+  per-field descriptions are not repeated next to every property. Only
+  `minLength`/`minimum`/`maximum` stay on the fields, because runtime
+  validation depends on them. `promptGuidelines` strings must not carry their
+  own `- ` bullet: Pi prefixes each rule itself.
 - **`read` replaces `bg_logs`.** It adds `lines` (default 100, max 5000) and
   `offset` pagination with a `[lines A-B of N]` footer, and keeps `stream`
   selection.

@@ -72,60 +72,59 @@ const DEFAULT_WAIT_TIMEOUT_SECONDS = 30;
 const MAX_WAIT_TIMEOUT_SECONDS = 3600;
 const DEFAULT_READ_LINES = 100;
 const MAX_READ_LINES = 5000;
+const DEFAULT_TERMINAL_COLS = 120;
+const DEFAULT_TERMINAL_ROWS = 30;
 const WAIT_POLL_INTERVAL_MS = 200;
 const MAX_SUMMARY_DETAIL_CHARS = 80;
 const MAX_MATCH_CHARS = 240;
 const ATTACH_EXCERPT_LINES = 10;
 
 const bgTerminalParameters = Type.Object({
-  action: Type.Unsafe<BgAction>(StringEnum([...BG_ACTIONS], { description: "Operation to perform" })),
-  id: Type.Optional(Type.String({ description: "Task ID or unique name; omit for status to list all" })),
-  name: Type.Optional(Type.String({ description: "start: unique task name", minLength: 1 })),
-  command: Type.Optional(Type.String({ description: "start: command to run" })),
-  cwd: Type.Optional(Type.String({ description: "start: working directory" })),
+  action: Type.Unsafe<BgAction>(StringEnum([...BG_ACTIONS], {
+    description: [
+      `start(name,command,cwd?,mode=pipe(default)|pty(TUIs),cols=${DEFAULT_TERMINAL_COLS},rows=${DEFAULT_TERMINAL_ROWS})`,
+      `wait(id,pattern?=regex early-exit,timeout=${DEFAULT_WAIT_TIMEOUT_SECONDS}s)`,
+      "status(id? omit=list all)",
+      `read(id,lines=${DEFAULT_READ_LINES} max${MAX_READ_LINES},offset 0/omitted=tail +N=back N -N=from top,stream=stdout|stderr|both|terminal)`,
+      "send(id,input=text+<...> key tokens in ONE call (<Enter> <Tab> <Esc> <Up> <Down*3> <C-c> <C-d> <A-f> <Space>; Enter NOT implied - append <Enter> e.g. \"y<Enter>\",\"<Down*3><Enter>\"; pipe EOF = input=<C-d> alone, send text first),signal?)",
+      "kill(id,signal=SIGTERM)",
+      "attach(id)",
+      "id = an existing task's id or name, for wait/status/read/send/kill/attach only",
+      "name = unique task name, required by start only",
+    ].join(" | "),
+  })),
+  id: Type.Optional(Type.String()),
+  name: Type.Optional(Type.String({ minLength: 1 })),
+  command: Type.Optional(Type.String()),
+  cwd: Type.Optional(Type.String()),
   mode: Type.Optional(
-    Type.Unsafe<"pipe" | "pty">(StringEnum(["pipe", "pty"] as const, {
-      description: "start: pipe (default) or pty (TUIs)",
-    })),
+    Type.Unsafe<"pipe" | "pty">(StringEnum(["pipe", "pty"] as const)),
   ),
   cols: Type.Optional(Type.Number({
-    description: "start pty: columns (default 120)",
     minimum: MIN_TERMINAL_COLS,
     maximum: MAX_TERMINAL_COLS,
   })),
   rows: Type.Optional(Type.Number({
-    description: "start pty: rows (default 30)",
     minimum: MIN_TERMINAL_ROWS,
     maximum: MAX_TERMINAL_ROWS,
   })),
   timeout: Type.Optional(Type.Number({
-    description: `wait: max seconds (default ${DEFAULT_WAIT_TIMEOUT_SECONDS})`,
     minimum: 1,
     maximum: MAX_WAIT_TIMEOUT_SECONDS,
   })),
-  pattern: Type.Optional(Type.String({
-    description: "wait: regex on output; returns early on match",
-  })),
+  pattern: Type.Optional(Type.String()),
   input: Type.Optional(Type.String({
-    description: "send: exact text, no Enter implied; append <Enter> to submit and use <...> key tokens, e.g. \"y<Enter>\", \"<Down*3><Enter>\", \"<C-d>\"",
     minLength: 1,
     maxLength: MAX_INPUT_BYTES,
   })),
-  signal: Type.Optional(Type.String({
-    description: "send/kill: OS signal, e.g. SIGTERM/SIGINT/SIGKILL (kill default SIGTERM); validated at runtime",
-  })),
+  signal: Type.Optional(Type.String()),
   lines: Type.Optional(Type.Number({
-    description: `read: lines to return (default ${DEFAULT_READ_LINES}, max ${MAX_READ_LINES})`,
     minimum: 1,
     maximum: MAX_READ_LINES,
   })),
-  offset: Type.Optional(Type.Number({
-    description: "read: 0/omitted=tail, positive=skip back N, negative=start at line N from top (-1=first)",
-  })),
+  offset: Type.Optional(Type.Number()),
   stream: Type.Optional(
-    Type.Unsafe<"stdout" | "stderr" | "both" | "terminal">(StringEnum(["stdout", "stderr", "both", "terminal"] as const, {
-      description: "read: stdout, stderr, both (default), terminal (pty)",
-    })),
+    Type.Unsafe<"stdout" | "stderr" | "both" | "terminal">(StringEnum(["stdout", "stderr", "both", "terminal"] as const)),
   ),
 });
 
@@ -779,10 +778,11 @@ export function registerBackgroundTaskTools(
       "Background terminals: start runs detached, wait blocks for exit or a pattern, status lists or inspects, read pages output, send types input or a signal, kill signals, attach opens the live console.",
     promptSnippet: "Manage background terminal tasks (start, wait, status, read, send, kill, attach)",
     promptGuidelines: [
-      "Use only for genuine background needs: an explicit user request, a process kept for later interaction, or useful concurrent work; otherwise use foreground bash.",
+      "bg_terminal:",
+      "Use only for genuine background needs: an explicit user request, a process kept for later interaction, to spawn a TUI app like `Pi`, or useful concurrent work; otherwise use foreground `bash`.",
       "Emit whole same-task chains in one response (e.g. start→wait→read); same id/name runs in source order, different tasks in parallel. Never poll.",
-      "send input is exact text and never appends Enter — end with <Enter> yourself to submit a line (e.g. \"y<Enter>\", \"<Down*3><Enter>\"). Keys are <...> tokens: <Tab>, <Esc>, <Up>, <C-c>, <C-d>, <A-f>, <Space>, repeat with <Down*3>, and escape a literal '<' as \\<; text and keys combine. For pipe tasks, <C-d> or <EOF> closes stdin.",
-      "start defaults to pipe; use mode=pty for TUIs. wait already returns the latest pipe line, so read only for fuller, multiline, paginated, or PTY output.",
+      "`send` input is exact text and never appends Enter — end with <Enter> yourself to submit a line (e.g. \"y<Enter>\"). Key tokens are listed in the tool schema; escape a literal '<' as \\<. For pipe tasks, <C-d> or <EOF> closes stdin.",
+      "`start` defaults to pipe; use mode=pty for TUIs. `wait` already returns the latest pipe line, so `read` only for fuller, multiline, paginated, or PTY output.",
       "Session reload or shutdown terminates running tasks.",
     ],
     parameters: bgTerminalParameters,
