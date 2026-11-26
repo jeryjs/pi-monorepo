@@ -1,0 +1,265 @@
+/**
+ * A tiny RFC 6455 WebSocket *server* (handshake + frames) built only on
+ * `node:crypto` and `node:stream`, so pi-voice needs no runtime dependencies.
+ *
+ * Scope is deliberately small: text + binary frames, ping/pong, close, and
+ * fragmentation of small messages. It is not a general-purpose WS server.
+ */
+
+import { createHash } from "node:crypto";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+
+const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+export interface WebSocketPeer {
+    send(data: string | Uint8Array): void;
+    close(code?: number, reason?: string): void;
+    readonly open: boolean;
+    readonly remote: string;
+}
+
+export interface PeerHandlers {
+    onMessage(data: string | Uint8Array, isBinary: boolean): void;
+    onClose?(code: number): void;
+}
+
+function acceptKey(key: string): string {
+    return createHash("sha1").update(key + GUID).digest("base64");
+}
+
+function frame(opcode: number, payload: Uint8Array): Buffer {
+    const length = payload.length;
+    let header: Buffer;
+    let offset = 0;
+
+    if (length < 126) {
+        header = Buffer.alloc(2);
+        header[1] = length;
+    } else if (length < 65_536) {
+        header = Buffer.alloc(4);
+        header[1] = 126;
+        header.writeUInt16BE(length, 2);
+    } else {
+        header = Buffer.alloc(10);
+        header[1] = 127;
+        header.writeBigUInt64BE(BigInt(length), 2);
+    }
+
+    header[0] = 0x80 | opcode; // FIN + opcode
+    offset = header.length;
+
+    return Buffer.concat([header.subarray(0, offset), Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)]);
+}
+
+/** Handle the HTTP upgrade and return a peer, or write a 400 and return undefined. */
+export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buffer, handlers: PeerHandlers): WebSocketPeer | undefined {
+    const key = req.headers["sec-websocket-key"];
+    const version = req.headers["sec-websocket-version"];
+
+    if (typeof key !== "string" || version !== "13") {
+        socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+        socket.destroy();
+
+        return undefined;
+    }
+
+    socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        + "Upgrade: websocket\r\n"
+        + "Connection: Upgrade\r\n"
+        + `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+    );
+
+    let open = true;
+    let buffer = head && head.length > 0 ? Buffer.from(head) : Buffer.alloc(0);
+    let fragmentOpcode = 0;
+    let fragments: Buffer[] = [];
+
+    const remote = `${req.socket.remoteAddress ?? "?"}:${req.socket.remotePort ?? 0}`;
+
+    const peer: WebSocketPeer = {
+        get open() {
+            return open;
+        },
+        remote,
+        send(data) {
+            if (!open) {
+                return;
+            }
+
+            const payload = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+            const opcode = typeof data === "string" ? 0x1 : 0x2;
+
+            try {
+                socket.write(frame(opcode, payload));
+            } catch {
+                open = false;
+            }
+        },
+        close(code = 1000, reason = "") {
+            if (!open) {
+                return;
+            }
+
+            open = false;
+
+            try {
+                const payload = Buffer.alloc(2 + Buffer.byteLength(reason));
+                payload.writeUInt16BE(code, 0);
+                payload.write(reason, 2);
+                socket.write(frame(0x8, payload));
+            } catch {
+                // ignore
+            }
+
+            socket.end();
+        },
+    };
+
+    const fail = (code: number): void => {
+        open = false;
+        handlers.onClose?.(code);
+        try {
+            socket.destroy();
+        } catch {
+            // ignore
+        }
+    };
+
+    const handleFrame = (opcode: number, payload: Buffer, fin: boolean): void => {
+        switch (opcode) {
+            case 0x0: // continuation
+                fragments.push(payload);
+                if (fin) {
+                    const merged = Buffer.concat(fragments);
+                    fragments = [];
+                    const op = fragmentOpcode;
+                    fragmentOpcode = 0;
+                    handleFrame(op, merged, true);
+                }
+                return;
+
+            case 0x1:
+            case 0x2:
+                if (!fin) {
+                    fragmentOpcode = opcode;
+                    fragments = [payload];
+                    return;
+                }
+                try {
+                    handlers.onMessage(opcode === 0x1 ? payload.toString("utf8") : payload, opcode === 0x2);
+                } catch {
+                    // a bad client message must not kill the socket loop
+                }
+                return;
+
+            case 0x8: {
+                const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005;
+                open = false;
+                handlers.onClose?.(code);
+                try {
+                    socket.end();
+                } catch {
+                    // ignore
+                }
+                return;
+            }
+
+            case 0x9: // ping -> pong
+                try {
+                    socket.write(frame(0xA, payload));
+                } catch {
+                    // ignore
+                }
+                return;
+
+            case 0xA: // pong
+                return;
+
+            default:
+                return;
+        }
+    };
+
+    const parse = (): void => {
+        while (buffer.length >= 2) {
+            const first = buffer[0] as number;
+            const second = buffer[1] as number;
+            const fin = (first & 0x80) !== 0;
+            const opcode = first & 0x0f;
+            const masked = (second & 0x80) !== 0;
+            let length = second & 0x7f;
+            let offset = 2;
+
+            if (length === 126) {
+                if (buffer.length < 4) {
+                    return;
+                }
+                length = buffer.readUInt16BE(2);
+                offset = 4;
+            } else if (length === 127) {
+                if (buffer.length < 10) {
+                    return;
+                }
+                const big = buffer.readBigUInt64BE(2);
+
+                if (big > BigInt(16 * 1024 * 1024)) {
+                    fail(1009);
+                    return;
+                }
+
+                length = Number(big);
+                offset = 10;
+            }
+
+            const maskOffset = masked ? 4 : 0;
+
+            if (buffer.length < offset + maskOffset + length) {
+                return;
+            }
+
+            let payload: Buffer;
+
+            if (masked) {
+                const mask = buffer.subarray(offset, offset + 4);
+                const raw = buffer.subarray(offset + 4, offset + 4 + length);
+                payload = Buffer.allocUnsafe(length);
+
+                for (let i = 0; i < length; i++) {
+                    payload[i] = (raw[i] as number) ^ (mask[i & 3] as number);
+                }
+            } else {
+                payload = Buffer.from(buffer.subarray(offset, offset + length));
+            }
+
+            buffer = buffer.subarray(offset + maskOffset + length);
+            handleFrame(opcode, payload, fin);
+        }
+    };
+
+    socket.on("data", (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        parse();
+    });
+
+    socket.on("close", () => {
+        if (open) {
+            open = false;
+            handlers.onClose?.(1006);
+        }
+    });
+
+    socket.on("error", () => {
+        if (open) {
+            open = false;
+            handlers.onClose?.(1006);
+        }
+    });
+
+    if (buffer.length > 0) {
+        parse();
+    }
+
+    return peer;
+}
