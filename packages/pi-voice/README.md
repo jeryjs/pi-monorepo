@@ -328,7 +328,8 @@ Setup details, like the resumption handle and the workspace lock, live in
   audio-session cap.
 - **Reconnect**: `GoAway` triggers a proactive resume ~1.5 s before the server
   rotates the connection; unexpected closes back off with jitter.
-- **Idle gate**: after `idleSleepMs` of silence the mic upstream is gated. No
+- **Idle gate**: after `idleSleepMs` (45 s) without *voice* — not merely quiet
+  frames — the mic upstream is gated, capture process included. No
   `audioStreamEnd`/`activityStart` is sent — those are only valid with manual VAD
   and are rejected under automatic VAD. The session (and its context) stays alive.
 - **No transcript seeding**: the model pulls context via `pi_status` /
@@ -400,7 +401,7 @@ test/                     protocol/config smoke tests + endpoint + lifecycle
 ## Tests
 
 ```bash
-npm test   # smoke (56) + endpoint (19) + lifecycle (15)
+npm test   # smoke (56) + endpoint (19) + lifecycle (19)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
@@ -415,5 +416,6 @@ crash probes (malformed escape, invalid `Host`, bad upgrade), an oversized-frame
 
 `test/lifecycle.ts` drives the real `VoiceController` against a fake Gemini Live
 endpoint: five start/stop cycles, double start, stop during start, restart
-resumption, `/reload` rebind, honest `pi_ask`/`pi_stop` results, cross-process
-locking and stale-lock takeover.
+resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
+awake), honest `pi_ask`/`pi_stop` results, cross-process locking and stale-lock
+takeover.

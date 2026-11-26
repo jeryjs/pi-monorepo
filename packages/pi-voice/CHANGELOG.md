@@ -7,11 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.4.2] - 2026-12-01
 
-Restart, stop/start and hostile-input hardening. Two of these were silent
+Restart, stop/start and sleep/wake hardening. Three of these were silent
 breakage inside the features they lived in.
 
 ### Fixed
 
+- **The idle gate never fired with native audio, and gated only half the
+  pipeline.** The tick gated the Live session but not the ffmpeg capture process,
+  so the next 20 ms frame reopened it. Worse, it keyed on `session.idleMs`, which
+  mic frames refresh continuously while awake — so it could not fire at all.
+  It now sleeps on *voice* silence (mic level is reported by both transports) and
+  gates the capture process too. Talking keeps the session awake.
 - **`pi_stop` never actually stopped anything.** `interruptAgent()` was defined
   twice on the controller; the second definition silently won and only queued a
   steering message, discarding the `ctx.abort()` wiring. There is now exactly one
@@ -56,8 +62,9 @@ breakage inside the features they lived in.
 
 - `test/lifecycle.ts`: drives the real controller against a fake Live endpoint —
   five start/stop cycles, concurrent start, stop during start, restart
-  resumption, `/reload` rebind, honest `pi_ask`/`pi_stop` tool calls, cross-process
-  locking and stale-lock takeover (15 checks).
+  resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
+  awake), honest `pi_ask`/`pi_stop` tool calls, cross-process locking and
+  stale-lock takeover (19 checks).
 - Endpoint suite grows crash probes (malformed escape, invalid `Host`, bad
   upgrade), an oversized-frame close and repeated start/stop cycles (19 checks).
 - Smoke suite covers lock ownership/release/staleness and handle sequencing (56).

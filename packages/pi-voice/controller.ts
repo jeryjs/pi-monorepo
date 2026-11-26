@@ -68,6 +68,9 @@ export class VoiceController implements VoiceControl {
     #lastAnnounce = 0;
     #lastAnnounceText = "";
     #lastPersist = 0;
+    /** Last moment the mic heard voice, from pushLevel(); drives the idle gate. */
+    #lastVoiceAt = 0;
+    #voiceFloor = 0.006;
     /** Monotonic counter for resumption-handle writes (see persist.savePersistedHandle). */
     #persistSeq = 0;
     #tokens = 0;
@@ -171,10 +174,23 @@ export class VoiceController implements VoiceControl {
 
     /** Push a mic RMS sample and refresh the status-bar waveform. */
     pushLevel(rms: number): void {
-        this.#levels.push(Number.isFinite(rms) ? rms : 0);
+        const level = Number.isFinite(rms) ? rms : 0;
+
+        this.#levels.push(level);
 
         if (this.#levels.length > 24) {
             this.#levels.shift();
+        }
+
+        // Both transports report the mic level here (native frames, the page's
+        // `level` message), which makes this the one place that knows whether
+        // anybody is actually talking. The idle gate keys on that.
+        const threshold = Math.max(0.006, this.#voiceFloor * 2.2);
+
+        if (level > threshold) {
+            this.#lastVoiceAt = Date.now();
+        } else {
+            this.#voiceFloor = Math.max(0.002, this.#voiceFloor * 0.95 + level * 0.05);
         }
 
         this.#renderStatus();
@@ -395,6 +411,7 @@ export class VoiceController implements VoiceControl {
         this.#assertCurrent(generation);
         this.#running = true;
         this.#startedAt = Date.now();
+        this.#lastVoiceAt = Date.now();
         this.#renderStatus(true);
 
         this.#idleTimer = setInterval(() => this.#tickIdle(), 2000);
@@ -622,6 +639,7 @@ export class VoiceController implements VoiceControl {
     }
 
     wake(): void {
+        this.#lastVoiceAt = Date.now();
         this.#session?.setStreaming(true);
         this.#native?.setStreaming(true);
         this.#broadcast({ t: "wake" });
@@ -981,16 +999,21 @@ export class VoiceController implements VoiceControl {
             return;
         }
 
-        if (session.idleMs > this.#config.idleSleepMs) {
-            log("controller", "idle: gating the mic upstream, session kept");
-            // Gate the capture process too, not just the session. The native
-            // transport only stops sending frames when *it* is told to, so gating
-            // the session alone made the next mic frame reopen it and idle sleep
-            // became a no-op that flickered live/sleeping every tick.
-            this.#native?.setStreaming(false);
-            session.setStreaming(false);
-            this.#broadcast({ t: "sleep" });
+        // session.idleMs is useless here: mic frames (and therefore activity) stream
+        // continuously while awake, so it never grew and the gate never fired in
+        // native mode. Sleep on *voice* silence instead, which is what the setting
+        // actually promises.
+        if (Date.now() - this.#lastVoiceAt < this.#config.idleSleepMs) {
+            return;
         }
+
+        log("controller", "idle: gating the mic upstream, session kept");
+        // Gate the capture process too, not just the session: the native transport
+        // only stops sending frames when *it* is told to, so gating the session
+        // alone let the next frame reopen it.
+        this.#native?.setStreaming(false);
+        session.setStreaming(false);
+        this.#broadcast({ t: "sleep" });
     }
 
     // -----------------------------------------------------------------------

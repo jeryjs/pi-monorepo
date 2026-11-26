@@ -371,6 +371,23 @@ assert.equal(idleController.liveState, "live", "wake restores the live state");
 await idleController.stop();
 ok("wake after an idle gate resumes listening on the same session");
 
+// Voice activity has to keep it awake: the gate keys on the mic level, not on the
+// constant frame flow that made it never fire in native mode.
+const talker = new VoiceController(makePi().api, makeCtx(), makeConfig({ idleSleepMs: 300 }));
+
+await talker.start();
+await until(() => talker.liveState === "live", "talker live");
+
+const talking = setInterval(() => talker.pushLevel(0.2), 100);
+await new Promise((resolve) => setTimeout(resolve, 2600));
+assert.equal(talker.liveState, "live", "voiced audio keeps the session awake");
+ok("speech keeps the session awake past the idle window");
+
+clearInterval(talking);
+await until(() => talker.liveState === "sleeping", "gate after the talking stops");
+ok("silence after speech still reaches the idle gate");
+await talker.stop();
+
 // ---------------------------------------------------------------------------
 // 6. tool calls: honest results, real abort
 // ---------------------------------------------------------------------------
