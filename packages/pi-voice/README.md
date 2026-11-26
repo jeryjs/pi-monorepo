@@ -312,9 +312,12 @@ half-duplex while it speaks and playback prebuffers ~90 ms.
 | `approvals` (default) | + answer risky-action prompts by voice |
 
 With `voiceApprovals`, `bash`/`powershell` calls matching dangerous patterns
-(recursive delete, `git push`, `sudo`, `| sh`, …) block while the voice model
-asks you out loud. Denial returns `{ block: true }`. On timeout the call proceeds
-normally rather than hanging.
+(recursive delete, `git push`, `sudo`, `| sh`, ...) block while the voice model
+asks you out loud. Denial returns `{ block: true }`. If nobody answers — page
+closed, mic asleep, no connected listener — the call proceeds after a warning
+instead of hanging: voice approval is a convenience here, never a hard gate.
+Setup details, like the resumption handle and the workspace lock, live in
+`~/.pi/agent`: `pi-voice-state.json` and `pi-voice-<workspace>.lock`.
 
 ## Context and latency
 
@@ -325,8 +328,9 @@ normally rather than hanging.
   audio-session cap.
 - **Reconnect**: `GoAway` triggers a proactive resume ~1.5 s before the server
   rotates the connection; unexpected closes back off with jitter.
-- **Idle gate**: after `idleSleepMs` of silence the mic upstream is gated and an
-  `audioStreamEnd` is sent. The session (and its context) stays alive.
+- **Idle gate**: after `idleSleepMs` of silence the mic upstream is gated. No
+  `audioStreamEnd`/`activityStart` is sent — those are only valid with manual VAD
+  and are rejected under automatic VAD. The session (and its context) stays alive.
 - **No transcript seeding**: the model pulls context via `pi_status` /
   `pi_recent`, which is cheaper than streaming Pi's history.
 - **Low latency**: raw PCM passthrough (no re-encode), 20 ms frames, VAD tuned
@@ -369,13 +373,16 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
   `--no-session` and process restarts. Handles are valid for two hours after a
   session ends; if the server rejects one anyway, the extension clears it and
   starts fresh once.
-- **One instance per workspace.** A lock file records the owning PID (and the
-  page URL in browser mode). A second Pi process in the same project refuses to
-  start a duplicate and points at the running instance instead.
+- **One instance per workspace.** A lock file records the owning PID plus a
+  random ownership token, and is created exclusively so two processes starting at
+  the same instant cannot both win. A second Pi process in the same project
+  refuses to start a duplicate and points at the running instance instead. Locks
+  are advisory: a lock held by a dead PID (or older than 12 hours, in case the PID
+  was reused) is taken over rather than blocking voice forever.
 
 ## Version
 
-Current: **0.4.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.4.2** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -387,16 +394,26 @@ live/                     protocol, setup shaping, socket supervisor
 bridge/                   Pi digest, function declarations, dispatch, persona
 audio/                    local HTTP+WS server, minimal RFC6455, ffmpeg transport
 web/                      companion page, audio worklets, wake engines
-test/                     protocol/config smoke tests + endpoint integration
+test/                     protocol/config smoke tests + endpoint + lifecycle
 ```
 
 ## Tests
 
 ```bash
-npm test   # node test/smoke.ts && node test/server.ts
+npm test   # smoke (56) + endpoint (19) + lifecycle (15)
 ```
 
-Covers capability filtering, setup shaping, wire protocol, config normalization,
-argument completions, key resolution order (auth.json → env → registry), the
-hand-rolled WebSocket server (handshake, masked frames, binary, token gate, path
-traversal) and static serving.
+`test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
+normalization, argument completions, key resolution order (auth.json → env →
+registry), lock ownership/release/staleness, resumption-handle sequencing and the
+NLMS echo canceller.
+
+`test/server.ts` drives the local endpoint: static serving, the token gate, path
+traversal, the hand-rolled WebSocket server (handshake, masked frames, binary),
+crash probes (malformed escape, invalid `Host`, bad upgrade), an oversized-frame
+`1009` close and repeated start/stop cycles.
+
+`test/lifecycle.ts` drives the real `VoiceController` against a fake Gemini Live
+endpoint: five start/stop cycles, double start, stop during start, restart
+resumption, `/reload` rebind, honest `pi_ask`/`pi_stop` results, cross-process
+locking and stale-lock takeover.

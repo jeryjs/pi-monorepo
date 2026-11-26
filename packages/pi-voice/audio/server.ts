@@ -47,7 +47,17 @@ const CONTENT_TYPES: Record<string, string> = {
 const WEB_ROOT = fileURLToPath(new URL("../web/", import.meta.url));
 
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
-    const relative = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
+    let relative: string;
+
+    try {
+        relative = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
+    } catch {
+        // decodeURIComponent throws on a lone `%` or malformed escape sequences.
+        reply(response, 400, "bad request");
+
+        return;
+    }
+
     const full = join(WEB_ROOT, relative === "" ? "index.html" : relative);
 
     if (!full.startsWith(WEB_ROOT.endsWith(sep) ? WEB_ROOT : WEB_ROOT + sep)) {
@@ -63,6 +73,27 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
         response.end(body);
     } catch {
         response.writeHead(404, { "content-type": "text/plain" }).end("not found");
+    }
+}
+
+/**
+ * Parse without throwing. A malformed request target (`/%`, `//`) or Host header
+ * used to escape the handler as an uncaught exception and kill the Pi process,
+ * which any web page could trigger with a single image request.
+ */
+function safeUrl(target: string | undefined): URL | undefined {
+    try {
+        return new URL(target ?? "/", "http://localhost");
+    } catch {
+        return undefined;
+    }
+}
+
+function reply(res: ServerResponse, status: number, body: string, type = "text/plain; charset=utf-8"): void {
+    try {
+        res.writeHead(status, { "content-type": type, "cache-control": "no-store" }).end(body);
+    } catch {
+        // the socket may already be gone; nothing to do
     }
 }
 
@@ -97,41 +128,57 @@ export async function startAudioServer(options: AudioServerOptions): Promise<Aud
     const peers = new Set<WebSocketPeer>();
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-        const token = url.searchParams.get("t");
+        // Nothing in this handler may throw: an uncaught exception here takes the
+        // whole Pi process down.
+        try {
+            const url = safeUrl(req.url);
 
-        if (url.pathname === "/health") {
-            res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+            if (!url) {
+                reply(res, 400, "bad request");
 
-            return;
+                return;
+            }
+
+            const token = url.searchParams.get("t");
+
+            if (url.pathname === "/health") {
+                reply(res, 200, "ok");
+
+                return;
+            }
+
+            // Only the page and its config need the token. Static assets are requested
+            // by relative URL from the page (no query string), so gating them breaks
+            // the page: HTML loads, CSS/JS/worklets 403, and nothing works.
+            const guarded = url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/client-config";
+
+            if (guarded && token !== options.token) {
+                reply(res, 403, "forbidden: open the URL Pi printed");
+
+                return;
+            }
+
+            if (url.pathname === "/client-config") {
+                reply(res, 200, JSON.stringify(options.clientConfig()), "application/json; charset=utf-8");
+
+                return;
+            }
+
+            void serveStatic(res, url.pathname).catch((error: unknown) => {
+                log("audio", "static serve failed", error);
+            });
+        } catch (error) {
+            log("audio", "request handler error", error);
+            reply(res, 400, "bad request");
         }
-
-        // Only the page and its config need the token. Static assets are requested
-        // by relative URL from the page (no query string), so gating them breaks
-        // the page: HTML loads, CSS/JS/worklets 403, and nothing works.
-        const guarded = url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/client-config";
-
-        if (guarded && token !== options.token) {
-            res.writeHead(403, { "content-type": "text/plain" }).end("forbidden: open the URL Pi printed");
-
-            return;
-        }
-
-        if (url.pathname === "/client-config") {
-            res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-            res.end(JSON.stringify(options.clientConfig()));
-
-            return;
-        }
-
-        void serveStatic(res, url.pathname);
     });
 
     server.on("upgrade", (req, socket, head) => {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+        // Same containment for the upgrade path: the URL parse can throw too.
+        const url = safeUrl(req.url);
 
-        if (url.pathname !== "/ws") {
-            note(`ws upgrade rejected: unexpected path ${url.pathname}`);
+        if (!url || url.pathname !== "/ws") {
+            note(`ws upgrade rejected: unexpected path ${url?.pathname ?? req.url ?? ""}`);
             socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
             socket.destroy();
 

@@ -156,11 +156,18 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     say(ctx, "voice off", "info");
                     return;
 
-                case "restart":
-                    await runtime.stop();
-                    await runtime.start();
-                    say(ctx, "voice restarted", "info");
+                case "restart": {
+                    // A restart must always report what happened: stop() is now
+                    // idempotent and start() may legitimately fail (lock, key, device).
+                    try {
+                        await runtime.stop();
+                        await runtime.start();
+                        say(ctx, "voice restarted", "info");
+                    } catch (error) {
+                        say(ctx, `voice failed to restart: ${String(error)}`, "error");
+                    }
                     return;
+                }
 
                 case "url": {
                     const controller = runtime.controller();

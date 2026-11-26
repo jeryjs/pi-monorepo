@@ -26,7 +26,7 @@ import { createSetupBuilder } from "./live/setup.ts";
 import { persistVoiceState, readVoiceState } from "./state.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
 import { acquireLock, releaseLock, updateLockUrl } from "./lock.ts";
-import { clearPersistedHandle, loadPersistedHandle, savePersistedHandle } from "./persist.ts";
+import { clearPersistedHandle, loadPersistedHandle, persistedSeq, savePersistedHandle } from "./persist.ts";
 import { setVoiceStatus, voiceStatusText } from "./ui.ts";
 import { log, warn } from "./util.ts";
 
@@ -57,9 +57,19 @@ export class VoiceController implements VoiceControl {
     #idleTimer: ReturnType<typeof setInterval> | undefined;
     #statsTimer: ReturnType<typeof setInterval> | undefined;
     #running = false;
+    /** In-flight start, so `autoStart` + `/voice on` cannot open two sessions. */
+    #startPromise: Promise<StartResult> | undefined;
+    /** Bumped by stop(); an in-flight start notices and cleans up after itself. */
+    #generation = 0;
+    #abortAgent: (() => void) | undefined;
+    #maxSessionTimer: ReturnType<typeof setTimeout> | undefined;
+    /** The bridge instance whose listeners are wired, to avoid double-wiring. */
+    #wiredBridge: AgentBridge | undefined;
     #lastAnnounce = 0;
     #lastAnnounceText = "";
     #lastPersist = 0;
+    /** Monotonic counter for resumption-handle writes (see persist.savePersistedHandle). */
+    #persistSeq = 0;
     #tokens = 0;
     #keySource: string | undefined;
     #levels: number[] = [];
@@ -92,9 +102,24 @@ export class VoiceController implements VoiceControl {
      * the socket, audio transport and resumption handle stay intact.
      */
     rebind(pi: ExtensionAPI, ctx: ExtensionContext): void {
+        const previous = this.#bridge;
+
         this.#pi = pi;
         this.#ctx = ctx;
         this.#bridge = new AgentBridge(pi, ctx.cwd);
+        // Keep the digest across the reload so the voice model does not lose its
+        // view of the conversation just because the extension was re-created.
+        this.#bridge.adoptFrom(previous);
+        this.#wiredBridge = undefined;
+
+        // Drop the old subscriptions immediately: after a reload the discarded
+        // bridge would otherwise keep consuming every Pi event.
+        try {
+            previous.dispose();
+        } catch (error) {
+            log("controller", "bridge dispose failed", error);
+        }
+
         this.#wireBridge();
         this.#renderStatus(true);
     }
@@ -165,15 +190,61 @@ export class VoiceController implements VoiceControl {
 
     async start(): Promise<StartResult> {
         if (this.#running) {
-            return {
-                url: this.#server?.url ?? "",
-                model: this.#config.model,
-                voice: this.#config.voice,
-                resumed: Boolean(this.#session?.resumptionHandle),
-            };
+            return this.#statusResult();
         }
 
+        if (this.#startPromise) {
+            return this.#startPromise;
+        }
+
+        const generation = this.#generation;
+        const promise = this.#start(generation).finally(() => {
+            if (this.#startPromise === promise) {
+                this.#startPromise = undefined;
+            }
+        });
+
+        this.#startPromise = promise;
+
+        return promise;
+    }
+
+    get starting(): boolean {
+        return this.#startPromise !== undefined && !this.#running;
+    }
+
+    #statusResult(resumed = false): StartResult {
+        return {
+            url: this.#server?.url ?? "",
+            model: this.#config.model,
+            voice: this.#config.voice,
+            resumed: resumed || Boolean(this.#session?.resumptionHandle),
+        };
+    }
+
+    /** Throw if stop() ran while we were awaiting something. */
+    #assertCurrent(generation: number): void {
+        if (generation !== this.#generation) {
+            throw new Error("voice start cancelled");
+        }
+    }
+
+    async #start(generation: number): Promise<StartResult> {
+        try {
+            return await this.#startInner(generation);
+        } catch (error) {
+            // A failed or cancelled start must not leak a socket, HTTP server,
+            // microphone or the workspace lock.
+            await this.#teardown(false);
+
+            throw error;
+        }
+    }
+
+    async #startInner(generation: number): Promise<StartResult> {
+
         const apiKey = await this.#resolveApiKey();
+        this.#assertCurrent(generation);
 
         if (!apiKey) {
             throw new Error(
@@ -218,12 +289,24 @@ export class VoiceController implements VoiceControl {
                 token,
                 clientConfig: () => this.#clientConfig(),
                 onPeer: (peer, attach) => {
+                    // A peer from a previous run must never be routed into the new one.
+                    if (generation !== this.#generation) {
+                        try {
+                            peer.close(1001, "stale session");
+                        } catch {
+                            // ignore
+                        }
+
+                        return;
+                    }
+
                     this.#peers.add(peer);
                     attach((data, isBinary) => this.#onPeerData(peer, data, isBinary));
                     this.#sendHello(peer);
                 },
                 onLog: (message) => log("audio", message),
             });
+            this.#assertCurrent(generation);
         }
 
         const buildSetup = createSetupBuilder({
@@ -241,6 +324,9 @@ export class VoiceController implements VoiceControl {
 
         const previous = readVoiceState(this.ctx);
         const persisted = loadPersistedHandle(this.ctx.cwd);
+        // Continue the write sequence above whatever is on disk, so this run's
+        // handle updates are never mistaken for stale writes.
+        this.#persistSeq = Math.max(this.#persistSeq, persistedSeq(this.ctx.cwd));
         // Session entries vanish with --no-session, so fall back to the file.
         const seed = previous.handle ? previous : persisted;
         const ageMs = seed?.updatedAt ? Date.now() - Date.parse(seed.updatedAt) : Number.POSITIVE_INFINITY;
@@ -282,9 +368,16 @@ export class VoiceController implements VoiceControl {
 
             try {
                 await native.start();
+                this.#assertCurrent(generation);
                 this.#native = native;
                 this.#native.setStreaming(!this.#config.alwaysOn);
             } catch (error) {
+                native.stop();
+
+                if (generation !== this.#generation) {
+                    throw new Error("voice start cancelled");
+                }
+
                 if (!wantsBrowser) {
                     session.close();
                     await this.#server?.close();
@@ -299,6 +392,7 @@ export class VoiceController implements VoiceControl {
                 warn("controller", `native audio unavailable: ${String(error)} (continuing with browser)`);
             }
         }
+        this.#assertCurrent(generation);
         this.#running = true;
         this.#startedAt = Date.now();
         this.#renderStatus(true);
@@ -307,6 +401,7 @@ export class VoiceController implements VoiceControl {
         this.#statsTimer = setInterval(() => this.#broadcastStats(), 10_000);
         (this.#idleTimer as { unref?: () => void }).unref?.();
         (this.#statsTimer as { unref?: () => void }).unref?.();
+        this.#scheduleMaxSession();
 
         persistVoiceState(this.pi, {
             handle: session.resumptionHandle,
@@ -320,22 +415,14 @@ export class VoiceController implements VoiceControl {
 
         updateLockUrl(this.ctx.cwd, this.#server?.url);
 
-        return {
-            url: this.#server?.url ?? "",
-            model: this.#config.model,
-            voice: this.#config.voice,
-            resumed: Boolean(previous.handle),
-        };
+        return this.#statusResult(Boolean(previous.handle));
     }
 
-    async stop(): Promise<void> {
-        if (!this.#running) {
-            return;
-        }
-
-        this.#running = false;
-        setVoiceStatus(this.ctx, undefined);
-
+    /**
+     * Close everything this controller owns. Split out of stop() because a failed
+     * or cancelled start needs the same cleanup without persisting a handle.
+     */
+    async #teardown(persist: boolean): Promise<void> {
         if (this.#idleTimer) {
             clearInterval(this.#idleTimer);
             this.#idleTimer = undefined;
@@ -346,22 +433,44 @@ export class VoiceController implements VoiceControl {
             this.#statsTimer = undefined;
         }
 
-        const handle = this.#session?.resumptionHandle;
-
-        if (handle) {
-            persistVoiceState(this.pi, { handle, model: this.#config.model, voice: this.#config.voice });
-            savePersistedHandle(this.ctx.cwd, { handle, model: this.#config.model, voice: this.#config.voice });
+        if (this.#maxSessionTimer) {
+            clearTimeout(this.#maxSessionTimer);
+            this.#maxSessionTimer = undefined;
         }
 
-        releaseLock(this.ctx.cwd);
-
-        this.#session?.close();
+        const session = this.#session;
         this.#session = undefined;
 
-        this.#native?.stop();
+        if (persist && session?.resumptionHandle) {
+            persistVoiceState(this.pi, {
+                handle: session.resumptionHandle,
+                model: this.#config.model,
+                voice: this.#config.voice,
+            });
+            this.#saveHandle(session.resumptionHandle);
+        }
+
+        // Resolves any pending approval instead of leaving a tool call hanging.
+        this.#bridge.dispose();
+        this.#wiredBridge = undefined;
+        setVoiceStatus(this.ctx, undefined);
+
+        try {
+            session?.close();
+        } catch (error) {
+            log("controller", "session close failed", error);
+        }
+
+        const native = this.#native;
         this.#native = undefined;
 
-        for (const peer of this.#peers) {
+        try {
+            native?.stop();
+        } catch (error) {
+            log("controller", "native stop failed", error);
+        }
+
+        for (const peer of [...this.#peers]) {
             try {
                 peer.close(1001, "voice stopped");
             } catch {
@@ -371,11 +480,39 @@ export class VoiceController implements VoiceControl {
 
         this.#peers.clear();
 
-        await this.#server?.close();
+        const server = this.#server;
         this.#server = undefined;
+
+        try {
+            await server?.close();
+        } catch (error) {
+            log("controller", "audio server close failed", error);
+        }
+
+        this.#levels = [];
+        releaseLock(this.ctx.cwd);
     }
 
-    updateConfig(config: VoiceConfig): void {
+    async stop(): Promise<void> {
+        // Bump first: an in-flight start will see this and clean up after itself
+        // instead of racing us for the same fields.
+        this.#generation++;
+        this.#running = false;
+        const inFlight = this.#startPromise;
+
+        await this.#teardown(true);
+
+        if (inFlight) {
+            // Let the cancelled start finish its own teardown before returning, so
+            // `/voice on` immediately after `/voice off` never overlaps a socket.
+            await inFlight.catch(() => undefined);
+            await this.#teardown(true);
+        }
+    }
+
+    updateConfig(config: VoiceConfig): { restart: boolean; reconnected: boolean } {
+        const previous = this.#config;
+
         this.#config = config;
         this.#capabilities = capabilitiesFor(config.model);
 
@@ -385,6 +522,93 @@ export class VoiceController implements VoiceControl {
 
         this.#broadcast({ t: "config", ...this.#clientConfig() });
         this.#renderStatus(true);
+
+        // Transport-level settings can only be applied by rebuilding the process
+        // side (server, mic, player).
+        const restartKeys: (keyof VoiceConfig)[] = [
+            "audio", "host", "port", "nativeInput", "nativeOutput", "ffmpegPath", "ffplayPath",
+            "nativeAec", "kwsModelDir", "kwsKeywords", "sherpaProvider", "wakeEngine", "compute",
+        ];
+        const restart = restartKeys.some((key) => previous[key] !== config[key]);
+
+        // Everything else is a `setup` field: the running socket keeps the old one
+        // until it reconnects, so do that now instead of silently disagreeing with
+        // the capability table used to filter tool results.
+        const setupKeys: (keyof VoiceConfig)[] = [
+            "model", "voice", "language", "persona", "temperature", "searchGrounding",
+            "inputTranscription", "outputTranscription", "customVocabulary", "proactiveAudio",
+            "proactiveVideo", "affectiveDialog", "thinkingLevel", "thinkingBudget", "vadSilenceMs",
+            "vadPrefixMs", "bargeIn", "autonomy", "voiceApprovals",
+        ];
+        const changed = setupKeys.filter((key) => JSON.stringify(previous[key]) !== JSON.stringify(config[key]));
+        let reconnected = false;
+
+        if (this.#running && changed.length > 0) {
+            log("controller", `setup changed (${changed.join(", ")}); reconnecting the live session`);
+            this.#groundingDegraded = false;
+            this.#session?.reconnectNow();
+            reconnected = true;
+        }
+
+        if (this.#running) {
+            this.#scheduleMaxSession();
+        }
+
+        return { restart, reconnected };
+    }
+
+    /** Renew the Live socket before the server's own session limits bite. */
+    #scheduleMaxSession(): void {
+        if (this.#maxSessionTimer) {
+            clearTimeout(this.#maxSessionTimer);
+            this.#maxSessionTimer = undefined;
+        }
+
+        const limit = Math.round(this.#config.maxSessionMs);
+
+        if (!(limit > 0) || !this.#running) {
+            return;
+        }
+
+        this.#maxSessionTimer = setTimeout(() => {
+            this.#maxSessionTimer = undefined;
+
+            if (!this.#running) {
+                return;
+            }
+
+            log("controller", `session age limit ${limit} ms reached; renewing the live session`);
+            this.#session?.reconnectNow();
+            this.#scheduleMaxSession();
+        }, limit);
+        (this.#maxSessionTimer as { unref?: () => void }).unref?.();
+    }
+
+    /** Wire the Pi agent's interrupt (ctx.abort) so `pi_stop` really stops work. */
+    setAgentAbort(handler: () => void): void {
+        this.#abortAgent = handler;
+    }
+
+    /**
+     * Stop Pi's current work: `ctx.abort()` ends the running turn, and a steering
+     * message tells the model the stop was intentional.
+     *
+     * This used to be defined twice in this class; the second definition silently
+     * won and only sent the steer, so `pi_stop` never aborted anything. Keep
+     * exactly one implementation.
+     */
+    interruptAgent(): void {
+        if (this.#abortAgent) {
+            try {
+                this.#abortAgent();
+            } catch (error) {
+                warn("controller", `agent abort failed: ${String(error)}`);
+            }
+        } else {
+            warn("controller", "no agent abort handler registered");
+        }
+
+        this.#bridge.interrupt();
     }
 
     // -----------------------------------------------------------------------
@@ -406,10 +630,6 @@ export class VoiceController implements VoiceControl {
     setAlwaysOn(value: boolean): void {
         this.#config = { ...this.#config, alwaysOn: value };
         this.#broadcast({ t: "config", ...this.#clientConfig() });
-    }
-
-    interruptAgent(): void {
-        this.#bridge.interrupt();
     }
 
     /** Make the voice model say something (used by Pi's `voice` tool). */
@@ -500,7 +720,7 @@ export class VoiceController implements VoiceControl {
             if (now - this.#lastPersist > 20_000) {
                 this.#lastPersist = now;
                 persistVoiceState(this.pi, { handle, model: this.#config.model, voice: this.#config.voice });
-                savePersistedHandle(this.ctx.cwd, { handle, model: this.#config.model, voice: this.#config.voice });
+                this.#saveHandle(handle);
             }
         });
 
@@ -536,6 +756,16 @@ export class VoiceController implements VoiceControl {
     }
 
     #wireBridge(): void {
+        // A start after a stop must re-attach the same bridge instance; teardown
+        // detached it and nothing else would subscribe again.
+        this.#bridge.attach();
+
+        // Idempotent: start() and rebind() can both reach here for the same bridge.
+        if (this.#wiredBridge === this.#bridge) {
+            return;
+        }
+
+        this.#wiredBridge = this.#bridge;
         this.#bridge.on((payload) => {
             const kind = (payload as { kind?: string }).kind;
 
@@ -778,6 +1008,21 @@ export class VoiceController implements VoiceControl {
         } catch {
             return undefined;
         }
+    }
+
+    /**
+     * Persist the newest resumption handle to the file store. The sequence number
+     * makes a newer handle win even inside a fast restart loop, while still
+     * ignoring a late write from a connection that has already been replaced.
+     */
+    #saveHandle(handle: string | undefined): void {
+        this.#persistSeq++;
+        savePersistedHandle(this.ctx.cwd, {
+            handle,
+            model: this.#config.model,
+            voice: this.#config.voice,
+            seq: this.#persistSeq,
+        });
     }
 
     #open(url: string): void {

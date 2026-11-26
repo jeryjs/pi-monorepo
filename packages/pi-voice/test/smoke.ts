@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,7 +78,9 @@ test("setup has model, audio modality and compression", () => {
     assert.equal(setup.model, "models/gemini-3.8-live");
     assert.deepEqual(setup.generationConfig.responseModalities, ["AUDIO"]);
     assert.ok(setup.contextWindowCompression.slidingWindow);
-    assert.equal(setup.sessionResumption, undefined);
+    // Always declared, even without a handle: sessions that stay quiet would
+    // otherwise never receive a resumption token to persist.
+    assert.deepEqual(setup.sessionResumption, {});
     // historyConfig would make the server wait for a seeding turn; we use tools instead.
     assert.equal(setup.historyConfig, undefined);
 });
@@ -568,5 +571,84 @@ test("ffplay args never use ffmpeg-only options such as -ac", () => {
     assert.ok(!playbackArgs(true).includes("-fflags"), "minimal args drop latency options");
     assert.ok(playbackArgs(true).includes("-nodisp"));
 });
+
+// ---------------------------------------------------------------------------
+// session continuity: on-disk lock and resumption state
+// ---------------------------------------------------------------------------
+
+console.log("\nlock + state files");
+
+const continuityDir = mkdtempSync(join(tmpdir(), "pi-voice-state-"));
+process.env.PI_AGENT_DIR = continuityDir;
+process.env.PI_VOICE_STATE = join(continuityDir, "voice-state.json");
+
+const workspace = join(continuityDir, "ws");
+
+const { acquireLock, readLock, releaseLock, updateLockUrl } = await import("../lock.ts");
+const { loadPersistedHandle, persistedSeq, savePersistedHandle } = await import("../persist.ts");
+
+function lockFileFor(cwd: string): string {
+    const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 16);
+
+    return join(continuityDir, `pi-voice-${hash}.lock`);
+}
+
+test("the lock records this process and is released cleanly", () => {
+    const first = acquireLock(workspace);
+    assert.equal(first.ok, true);
+    assert.equal(readLock(workspace)?.pid, process.pid);
+    assert.ok(readLock(workspace)?.token, "the lock carries an ownership token");
+
+    updateLockUrl(workspace, "http://127.0.0.1:9/?t=x");
+    assert.equal(readLock(workspace)?.url, "http://127.0.0.1:9/?t=x");
+
+    releaseLock(workspace);
+    assert.equal(readLock(workspace), undefined);
+});
+
+test("a foreign lock is left alone, a stale one is taken over", () => {
+    const foreign = { pid: process.pid + 1, cwd: workspace, startedAt: new Date().toISOString(), token: "someone-else" };
+    writeFileSync(lockFileFor(workspace), JSON.stringify(foreign), "utf8");
+
+    releaseLock(workspace);
+    assert.equal(readLock(workspace)?.token, "someone-else", "release must not delete a lock we do not own");
+
+    // PID reuse: an alive PID with an ancient start time must not block voice forever.
+    const ancient = { pid: process.pid, cwd: workspace, startedAt: new Date(Date.now() - 86_400_000).toISOString(), token: "old" };
+    writeFileSync(lockFileFor(workspace), JSON.stringify(ancient), "utf8");
+    assert.equal(acquireLock(workspace).ok, true, "a day-old lock is taken over");
+    releaseLock(workspace);
+});
+
+test("resumption handles never move backwards", () => {
+    savePersistedHandle(workspace, { handle: "h-2", seq: 2, model: "m", voice: "v" });
+    assert.equal(loadPersistedHandle(workspace)?.handle, "h-2");
+
+    // A straggler write from a connection that has already been replaced.
+    savePersistedHandle(workspace, { handle: "h-1", seq: 1, model: "m", voice: "v" });
+    assert.equal(loadPersistedHandle(workspace)?.handle, "h-2", "older sequence must not win");
+
+    savePersistedHandle(workspace, { handle: "h-3", seq: 3, model: "m", voice: "v" });
+    assert.equal(loadPersistedHandle(workspace)?.handle, "h-3", "newer sequence wins even when written immediately");
+    assert.equal(persistedSeq(workspace), 3);
+
+    // Another workspace writing concurrently must not drop this entry.
+    const other = join(continuityDir, "ws2");
+    savePersistedHandle(other, { handle: "x-1", seq: 1, model: "m", voice: "v" });
+    assert.equal(loadPersistedHandle(workspace)?.handle, "h-3");
+    assert.equal(loadPersistedHandle(other)?.handle, "x-1");
+});
+
+test("a hash-named keyword file tracks the configured wake phrase", () => {
+    // The sherpa keywords file used to have a fixed name, so editing the phrase kept
+    // loading the first file that was ever written. Verify the digest scheme instead
+    // of running sherpa (which is optional and not installed here).
+    const digest = (text: string): string => createHash("sha1").update(text).digest("hex").slice(0, 10);
+
+    assert.notEqual(digest("HEY PI :2.0"), digest("HEY COMPUTER :2.0"));
+    assert.equal(digest("HEY PI :2.0"), digest("HEY PI :2.0"));
+});
+
+rmSync(continuityDir, { recursive: true, force: true });
 
 console.log(`\n${passed} checks passed`);

@@ -273,40 +273,71 @@ async function ensureAudio() {
     }
 
     const ctx = new AudioContext({ latencyHint: "interactive" });
-    state.ctx = ctx;
 
-    await ctx.audioWorklet.addModule("worklet-capture.js");
-    await ctx.audioWorklet.addModule("worklet-playback.js");
+    // The context is published only once worklets + microphone are live. Assigning
+    // it up front (as this used to) meant that a failed getUserMedia left
+    // `state.ctx` set, every retry early-returned, and the page stayed deaf until
+    // a manual reload.
+    try {
+        await ctx.audioWorklet.addModule("worklet-capture.js");
+        await ctx.audioWorklet.addModule("worklet-playback.js");
 
-    const playback = new AudioWorkletNode(ctx, "pi-playback", {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [1],
-    });
-    playback.connect(ctx.destination);
-    playback.port.onmessage = (event) => {
-        if (event.data?.type === "buffer") {
-            state.playbackMs = event.data.ms;
-            renderStats();
+        const playback = new AudioWorkletNode(ctx, "pi-playback", {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+        });
+        playback.connect(ctx.destination);
+        playback.port.onmessage = (event) => {
+            if (event.data?.type === "buffer") {
+                state.playbackMs = event.data.ms;
+                renderStats();
+            }
+        };
+
+        const capture = new AudioWorkletNode(ctx, "pi-capture", {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            channelCount: 1,
+            channelCountMode: "explicit",
+        });
+
+        // Keep the capture node pulled by the graph without making sound.
+        const silent = ctx.createGain();
+        silent.gain.value = 0;
+        capture.connect(silent).connect(ctx.destination);
+        capture.port.onmessage = (event) => onMicFrame(event.data);
+
+        state.ctx = ctx;
+        state.playbackNode = playback;
+        state.captureNode = capture;
+        await ensureMic();
+    } catch (error) {
+        state.ctx = undefined;
+        state.playbackNode = undefined;
+        state.captureNode = undefined;
+
+        // Release a half-open microphone too, otherwise the browser keeps the
+        // recording indicator on and the next attempt sees a dead track.
+        try {
+            state.micStream?.getTracks().forEach((track) => track.stop());
+        } catch {
+            // ignore
         }
-    };
-    state.playbackNode = playback;
 
-    const capture = new AudioWorkletNode(ctx, "pi-capture", {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        channelCount: 1,
-        channelCountMode: "explicit",
-    });
+        state.micStream = undefined;
+        state.sourceNode = undefined;
 
-    // Keep the capture node pulled by the graph without making sound.
-    const silent = ctx.createGain();
-    silent.gain.value = 0;
-    capture.connect(silent).connect(ctx.destination);
-    capture.port.onmessage = (event) => onMicFrame(event.data);
-    state.captureNode = capture;
+        try {
+            await ctx.close();
+        } catch {
+            // ignore
+        }
 
-    await ensureMic();
+        setDot("error", "audio failed");
+        notice(`audio unavailable: ${error?.message ?? error}`);
+        throw error;
+    }
 }
 
 async function ensureMic() {

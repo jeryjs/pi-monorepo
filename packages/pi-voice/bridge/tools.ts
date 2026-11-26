@@ -133,12 +133,14 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
     switch (call.name) {
         case "pi_status": {
             const status = bridge.status;
+            const digest = bridge.digest({ turns: config.digestTurns, chars: config.digestChars });
 
             return respond({
                 state: status.busy ? "working" : "idle",
                 active_tool: status.activeTool ?? null,
                 turn: status.turnIndex,
                 last_assistant: status.lastAssistant ? status.lastAssistant.slice(0, 600) : null,
+                digest,
             });
         }
 
@@ -157,7 +159,10 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
             }
 
             const mode = stringArg(call.args, "mode") === "steer" ? "steer" : "queue";
-            bridge.ask(message, mode);
+
+            if (!bridge.ask(message, mode)) {
+                return respond({ error: "could not deliver the message to Pi; tell the user it did not go through" });
+            }
 
             return respond({ status: mode === "steer" ? "steering" : "sent" });
         }
@@ -167,6 +172,8 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
                 return respond({ error: "stopping Pi is disabled at the current autonomy level" });
             }
 
+            // Really aborts the running turn (ctx.abort) plus a steering message;
+            // `control.interruptAgent()` owns both, so it is not repeated here.
             control.interruptAgent();
 
             return respond({ status: "stopping" });

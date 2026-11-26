@@ -133,9 +133,10 @@ function build(input: SetupInput, handle: string | undefined): Json {
         };
     }
 
-    if (handle) {
-        setup.sessionResumption = { handle };
-    }
+    // Always declare resumption: the server only starts emitting handles once the
+    // session has activity, so a session that connects and stays quiet used to
+    // persist nothing at all.
+    setup.sessionResumption = handle ? { handle } : {};
 
     return setup;
 }

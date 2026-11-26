@@ -7,8 +7,9 @@
  * in order and the first that initialises wins.
  */
 
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface NativeKwsOptions {
@@ -93,18 +94,34 @@ export class NativeKeywordSpotter {
             return undefined;
         }
 
-        // sherpa reads keywords from a file; reuse one if present.
-        let keywordsFile = join(modelDir, "keywords.txt");
+        // sherpa reads keywords from a file. Name it after the keyword set so
+        // editing kwsKeywords actually changes the wake phrase: reusing a fixed
+        // filename meant the first run's file won every later run.
+        const keywords = options.keywords.trim() || "HEY PI :2.0";
+        const legacy = join(modelDir, "keywords.txt");
+        const digest = createHash("sha1").update(keywords).digest("hex").slice(0, 10);
+        const generated = join(modelDir, `pi-voice-keywords-${digest}.txt`);
+        let keywordsFile = generated;
 
-        if (!existsSync(keywordsFile)) {
-            keywordsFile = join(modelDir, "pi-voice-keywords.txt");
+        if (!existsSync(generated)) {
+            let legacyMatches = false;
 
             try {
-                writeFileSync(keywordsFile, `${options.keywords.trim()}\n`, "utf8");
+                legacyMatches = existsSync(legacy) && readFileSync(legacy, "utf8").trim() === keywords;
             } catch {
-                options.onLog?.("sherpa: cannot write keywords file");
+                legacyMatches = false;
+            }
 
-                return undefined;
+            if (legacyMatches) {
+                keywordsFile = legacy;
+            } else {
+                try {
+                    writeFileSync(generated, `${keywords}\n`, "utf8");
+                } catch {
+                    options.onLog?.("sherpa: cannot write keywords file");
+
+                    return undefined;
+                }
             }
         }
 

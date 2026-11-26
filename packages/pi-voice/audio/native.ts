@@ -13,6 +13,9 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { VoiceConfig } from "../config.ts";
 import { log, warn, RingBuffer, float32ToPcm16 } from "../util.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "./aec.ts";
@@ -66,10 +69,27 @@ function captureArgs(config: VoiceConfig, input: string): string[] {
 /**
  * Pick a capture device automatically so native works without configuration.
  * On Windows, ffmpeg's dshow backend needs an exact device name, so ask it.
+ *
+ * The answer is cached on disk because the probe spawns ffmpeg and can take
+ * seconds; doing that on every start made `/voice restart` feel hung.
  */
 export function detectDefaultInput(ffmpegPath: string): string {
     if (process.platform !== "win32") {
         return process.platform === "darwin" ? ":0" : "default";
+    }
+
+    const cachePath = join(tmpdir(), "pi-voice-input-cache.txt");
+
+    try {
+        if (existsSync(cachePath)) {
+            const cached = readFileSync(cachePath, "utf8").trim();
+
+            if (cached) {
+                return cached;
+            }
+        }
+    } catch {
+        // ignore a stale or unreadable cache
     }
 
     try {
@@ -84,7 +104,15 @@ export function detectDefaultInput(ffmpegPath: string): string {
             const match = /"([^"]+)"\s+\(audio\)/.exec(line);
 
             if (match?.[1]) {
-                return `audio=${match[1]}`;
+                const device = `audio=${match[1]}`;
+
+                try {
+                    writeFileSync(cachePath, device, "utf8");
+                } catch {
+                    // caching is best-effort
+                }
+
+                return device;
             }
         }
     } catch {
@@ -124,6 +152,25 @@ export function playbackArgs(minimal = false): string[] {
 
 const PLAYER_OPTION_ERROR = /option not found|failed to set|unknown option|unrecognized option/i;
 
+/** Multiply raw int16 PCM by a gain, clamping at the 16-bit range. */
+function scalePcm16(bytes: Uint8Array, gain: number): Uint8Array {
+    if (!Number.isFinite(gain) || Math.abs(gain - 1) < 0.001) {
+        return bytes;
+    }
+
+    const source = Buffer.isBuffer(bytes)
+        ? bytes
+        : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const out = Buffer.alloc(source.length);
+
+    for (let i = 0; i + 1 < source.length; i += 2) {
+        const value = Math.max(-32768, Math.min(32767, Math.round(source.readInt16LE(i) * gain)));
+        out.writeInt16LE(value, i);
+    }
+
+    return out;
+}
+
 export class NativeTransport {
     #capture: ChildProcessWithoutNullStreams | undefined;
     #player: ChildProcessWithoutNullStreams | undefined;
@@ -143,6 +190,14 @@ export class NativeTransport {
     #playerMinimal = false;
     #playerSpawnedAt = 0;
     #carry = Buffer.alloc(0);
+    #captureAttempts = 0;
+    #captureTimer: ReturnType<typeof setTimeout> | undefined;
+    #halfDuplexVoicedMs = 0;
+
+    /** Restart the capture process at most this many times before reporting failure. */
+    static readonly CAPTURE_ATTEMPTS = 5;
+    /** Drop queued playback beyond this many bytes (~2 s of 24 kHz mono). */
+    static readonly MAX_PLAYBACK_BYTES = 24_000 * 2 * 2;
 
     readonly #options: NativeTransportOptions;
 
@@ -233,11 +288,18 @@ export class NativeTransport {
         this.#spawnCapture();
         this.#started = true;
         this.#starting = false;
+        this.#captureAttempts = 0;
+        this.#halfDuplexVoicedMs = 0;
         this.#log("native audio started");
     }
 
     stop(): void {
         this.#started = false;
+
+        if (this.#captureTimer) {
+            clearTimeout(this.#captureTimer);
+            this.#captureTimer = undefined;
+        }
 
         for (const child of [this.#capture, this.#player]) {
             if (!child) {
@@ -253,6 +315,9 @@ export class NativeTransport {
 
         this.#capture = undefined;
         this.#player = undefined;
+        this.#carry = Buffer.alloc(0);
+        this.#captureAttempts = 0;
+        this.#playingUntil = 0;
     }
 
     setStreaming(streaming: boolean): void {
@@ -271,18 +336,34 @@ export class NativeTransport {
             return;
         }
 
+        // Output gain is applied once, here, so the AEC reference stays exact.
+        const source = scalePcm16(bytes, this.options.config.outputGain);
+
         // Track the acoustic tail so half-duplex gating covers speaker ringing.
-        this.#playingUntil = Date.now() + Math.round((bytes.length / 2 / 24_000) * 1000) + 250;
+        this.#playingUntil = Date.now() + Math.round((source.length / 2 / 24_000) * 1000) + 250;
+
+        // A stalled player must not build an unbounded buffer: better to drop audio
+        // than to fall seconds behind the conversation.
+        if (player.stdin.writableLength > NativeTransport.MAX_PLAYBACK_BYTES) {
+            log("native", "playback backlog; dropping queued audio");
+            this.flush();
+        }
+
+        const target = this.#player;
+
+        if (!target || !target.stdin.writable) {
+            return;
+        }
 
         try {
-            player.stdin.write(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+            target.stdin.write(Buffer.from(source.buffer, source.byteOffset, source.byteLength));
         } catch (error) {
             log("native", "playback write failed", error);
         }
 
         if (this.#aec) {
             // Feed the known playback signal as the echo reference.
-            const copy = Buffer.from(bytes);
+            const copy = Buffer.from(source);
             const int16 = new Int16Array(copy.buffer, copy.byteOffset, Math.floor(copy.byteLength / 2));
             this.#aec.pushReference(resample24kTo16k(int16));
         }
@@ -392,18 +473,68 @@ export class NativeTransport {
         child.stderr.on("data", (chunk: Buffer) => {
             const text = chunk.toString().trim();
 
-            if (text) {
-                log("native", "ffmpeg", text);
+            // ffmpeg chats on stderr (device probing, stream info). Only forward
+            // lines that look like actual failures: routing every line through
+            // warn() turned a healthy run into a wall of red.
+            if (!text) {
+                return;
+            }
+
+            if (/error|failed|invalid|no such|cannot|denied|busy|not found/i.test(text)) {
                 this.#error(text);
+            } else {
+                log("native", "ffmpeg", text);
             }
         });
         child.on("error", (error) => this.#error(`ffmpeg: ${error.message}`));
-        child.on("exit", (code) => log("native", "ffmpeg exited", code));
+        child.on("exit", (code) => this.#onCaptureExit(code));
 
         this.#capture = child;
     }
 
+    /**
+     * The microphone dying used to be a silent, permanent failure: the status bar
+     * kept saying "live" while nothing was captured. Now it is surfaced and the
+     * capture process is restarted a few times before giving up.
+     */
+    #onCaptureExit(code: number | null): void {
+        this.#capture = undefined;
+        this.#carry = Buffer.alloc(0);
+
+        if (!this.#started) {
+            return;
+        }
+
+        this.#captureAttempts++;
+
+        if (this.#captureAttempts > NativeTransport.CAPTURE_ATTEMPTS) {
+            this.#error(
+                `ffmpeg capture stopped (exit ${code}) and could not be restarted after `
+                + `${NativeTransport.CAPTURE_ATTEMPTS} attempts. Check the input device in /voice → Audio.`,
+            );
+
+            return;
+        }
+
+        const delay = Math.min(500 * 2 ** (this.#captureAttempts - 1), 8000);
+        this.#log(`ffmpeg capture exited (${code}); restarting in ${delay} ms`);
+
+        this.#captureTimer = setTimeout(() => {
+            this.#captureTimer = undefined;
+
+            if (this.#started && !this.#capture) {
+                this.#spawnCapture();
+            }
+        }, delay);
+        (this.#captureTimer as { unref?: () => void }).unref?.();
+    }
+
     #onCapture(chunk: Buffer): void {
+        // Capture is producing audio again: clear the restart counter.
+        if (this.#captureAttempts > 0) {
+            this.#captureAttempts = 0;
+        }
+
         // Work in whole 20 ms frames (320 samples = 640 bytes at 16 kHz); a chunk
         // can split a frame, so carry the remainder into the next one instead of
         // dropping audio.
@@ -425,15 +556,16 @@ export class NativeTransport {
             samples[i] = frame.readInt16LE(i * 2);
         }
 
+        // Input gain is applied here, so the level meter shows what the model gets.
+        const rawFloat = this.#toFloat(samples);
         let sum = 0;
 
-        for (let i = 0; i < samples.length; i++) {
-            const value = (samples[i] as number) / 32768;
+        for (let i = 0; i < rawFloat.length; i++) {
+            const value = rawFloat[i] as number;
             sum += value * value;
         }
 
-        const rms = Math.sqrt(sum / samples.length);
-        const rawFloat = this.#toFloat(samples);
+        const rms = Math.sqrt(sum / Math.max(1, rawFloat.length));
         this.options.onLevel?.(rms);
 
         const bargeThreshold = 0.05;
@@ -478,12 +610,23 @@ export class NativeTransport {
         }
 
         // Half-duplex only when AEC is disabled; NLMS keeps full duplex so the
-        // user can barge in without the model hearing itself.
+        // user can barge in without the model hearing itself. Any single loud
+        // frame used to cut the model off — a cough or a door slam — so require
+        // ~60 ms of speech first.
         if (this.options.config.nativeAec === "half-duplex" && this.playing) {
             if (rms < bargeThreshold) {
+                this.#halfDuplexVoicedMs = 0;
+
                 return;
             }
 
+            this.#halfDuplexVoicedMs += 20;
+
+            if (this.#halfDuplexVoicedMs < 60) {
+                return;
+            }
+
+            this.#halfDuplexVoicedMs = 0;
             this.flush();
         }
 
@@ -501,11 +644,19 @@ export class NativeTransport {
     #cancel(raw: Float32Array, frame: Buffer): Uint8Array {
         const aec = this.#aec;
 
-        if (!aec || !this.playing) {
-            return new Uint8Array(frame);
+        if (aec && this.playing) {
+            return new Uint8Array(floatToInt16(aec.process(raw)).buffer);
         }
 
-        return new Uint8Array(floatToInt16(aec.process(raw)).buffer);
+        // No AEC: send the gained signal. With gain 1 the original bytes are
+        // forwarded untouched (no copy, no clipping).
+        const gain = this.options.config.inputGain;
+
+        if (Number.isFinite(gain) && Math.abs(gain - 1) >= 0.001) {
+            return float32ToPcm16(raw);
+        }
+
+        return new Uint8Array(frame);
     }
 
     #onKeyword(keyword: string): void {
@@ -537,10 +688,13 @@ export class NativeTransport {
     }
 
     #toFloat(samples: Int16Array): Float32Array {
+        const gain = this.options.config.inputGain;
+        const scale = Number.isFinite(gain) && gain > 0 ? gain : 1;
         const out = new Float32Array(samples.length);
 
         for (let i = 0; i < samples.length; i++) {
-            out[i] = (samples[i] as number) / 32768;
+            const value = ((samples[i] as number) / 32768) * scale;
+            out[i] = value > 1 ? 1 : value < -1 ? -1 : value;
         }
 
         return out;

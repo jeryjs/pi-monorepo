@@ -166,6 +166,10 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     #streaming: boolean;
     #setupComplete = false;
+    #outbox: string[] = [];
+
+    /** Cap on held text so a long outage cannot grow unbounded. */
+    static readonly OUTBOX_LIMIT = 64;
     #lastActivity = Date.now();
     #fatal = false;
 
@@ -312,17 +316,17 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     /** Inject text into the live conversation (triggers a model turn). */
     sendText(text: string): void {
         this.#lastActivity = Date.now();
-        this.#send(clientContentMessage([{ role: "user", text }], true));
+        this.#send(clientContentMessage([{ role: "user", text }], true), true);
     }
 
     /** Seed conversation history without triggering a model call (cheap context). */
     injectContext(turns: { role: "user" | "model"; text: string }[], turnComplete = true): void {
-        this.#send(clientContentMessage(turns, turnComplete));
+        this.#send(clientContentMessage(turns, turnComplete), true);
     }
 
     /** Resolve a function call. */
     sendToolResult(responses: FunctionResponse[]): void {
-        this.#send(toolResponseMessage(responses));
+        this.#send(toolResponseMessage(responses), true);
     }
 
     /** Cut the model off locally. Server-side barge-in is driven by mic audio. */
@@ -390,10 +394,17 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
 
     // -----------------------------------------------------------------------
 
-    #send(payload: string): void {
+    #send(payload: string, queueable = false): void {
         const socket = this.#ws;
 
-        if (!socket || socket.readyState !== OPEN) {
+        // Audio is worthless once late, so it is dropped while reconnecting. Text
+        // (approval prompts, notices, tool results) is held instead: losing it was
+        // how a spoken approval question never reached the model.
+        if (!socket || socket.readyState !== OPEN || !this.#setupComplete) {
+            if (queueable && this.#outbox.length < LiveSession.OUTBOX_LIMIT) {
+                this.#outbox.push(payload);
+            }
+
             return;
         }
 
@@ -417,7 +428,23 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         warn("live", error.message);
         this.#setState("error");
         this.emit("error", error);
-        this.#scheduleReconnect(undefined, error.message);
+        // -1, not undefined: `undefined` is treated as a clean 1000 rotation, which
+        // meant a failing connect retried every 300 ms forever without backoff.
+        this.#scheduleReconnect(-1, error.message);
+    }
+
+    /** Deliver anything held while the socket was coming up. */
+    #flushOutbox(): void {
+        if (this.#outbox.length === 0) {
+            return;
+        }
+
+        const pending = this.#outbox.splice(0, this.#outbox.length);
+        log("live", `flushing ${pending.length} queued message(s)`);
+
+        for (const payload of pending) {
+            this.#send(payload);
+        }
     }
 
     #scheduleReconnect(code: number | undefined, reason: string | undefined): void {
@@ -515,6 +542,8 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             this.#handleFromStore = false;
             this.#setState(this.#streaming ? "live" : "sleeping");
             log("live", "setup complete");
+            this.#flushOutbox();
+
             return;
         }
 
@@ -601,6 +630,9 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         }
 
         if (content.turnComplete) {
+            // Finalise both sides: the server never marks user transcription final,
+            // which left a "you" line stuck as interim in the page forever.
+            this.emit("transcript", { side: "user", text: "", final: true });
             this.emit("transcript", { side: "model", text: "", final: true });
             this.emit("turnComplete", undefined);
         }

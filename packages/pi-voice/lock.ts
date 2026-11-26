@@ -6,8 +6,8 @@
  * of opening a second microphone/socket. Stale locks (dead PID) are taken over.
  */
 
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { agentDir } from "./keychain.ts";
 
@@ -16,7 +16,15 @@ export interface VoiceLock {
     cwd: string;
     startedAt: string;
     url?: string;
+    /** Random per-run id: PID alone is not proof of ownership (PIDs get reused). */
+    token?: string;
 }
+
+/** Stable for the life of this process, so update/release always match. */
+const PROCESS_LOCK_TOKEN = randomBytes(8).toString("hex");
+
+/** A lock older than this is taken over even if the PID still exists (reuse). */
+const STALE_AFTER_MS = 12 * 60 * 60_000;
 
 function lockPath(cwd: string): string {
     const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 16);
@@ -55,14 +63,52 @@ export function readLock(cwd: string): VoiceLock | undefined {
     }
 }
 
+function isOurs(lock: VoiceLock | undefined): boolean {
+    return Boolean(lock && lock.pid === process.pid && lock.token === PROCESS_LOCK_TOKEN);
+}
+
+function isStale(lock: VoiceLock): boolean {
+    const started = Date.parse(lock.startedAt ?? "");
+
+    return !Number.isFinite(started) || Date.now() - started > STALE_AFTER_MS;
+}
+
 export type AcquireResult =
     | { ok: true }
     | { ok: false; lock: VoiceLock };
 
 export function acquireLock(cwd: string): AcquireResult {
+    const path = lockPath(cwd);
+
+    try {
+        mkdirSync(dirname(path), { recursive: true });
+    } catch {
+        // a read-only directory must not block voice; the lock is advisory
+    }
+
+    // Exclusive create first: two processes starting at the same moment cannot
+    // both observe "no lock" and then both write one.
+    try {
+        const fd = openSync(path, "wx");
+        closeSync(fd);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+            // Cannot inspect or create (permissions); treat as available.
+            writeLock(cwd, undefined);
+
+            return { ok: true };
+        }
+    }
+
     const existing = readLock(cwd);
 
-    if (existing && existing.pid !== process.pid && isAlive(existing.pid)) {
+    if (
+        existing
+        && !isOurs(existing)
+        && existing.pid !== process.pid
+        && isAlive(existing.pid)
+        && !isStale(existing)
+    ) {
         return { ok: false, lock: existing };
     }
 
@@ -77,7 +123,8 @@ function writeLock(cwd: string, previous?: VoiceLock): void {
         pid: process.pid,
         cwd,
         startedAt: new Date().toISOString(),
-        ...(previous?.pid === process.pid && previous.url ? { url: previous.url } : {}),
+        token: PROCESS_LOCK_TOKEN,
+        ...(isOurs(previous) && previous?.url ? { url: previous.url } : {}),
     };
 
     try {
@@ -94,7 +141,7 @@ function writeLock(cwd: string, previous?: VoiceLock): void {
 export function updateLockUrl(cwd: string, url: string | undefined): void {
     const existing = readLock(cwd);
 
-    if (!existing || existing.pid !== process.pid) {
+    if (!isOurs(existing)) {
         return;
     }
 
@@ -111,7 +158,7 @@ export function updateLockUrl(cwd: string, url: string | undefined): void {
 export function releaseLock(cwd: string): void {
     const existing = readLock(cwd);
 
-    if (!existing || existing.pid !== process.pid) {
+    if (!isOurs(existing)) {
         return;
     }
 

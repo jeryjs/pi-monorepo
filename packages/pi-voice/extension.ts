@@ -97,6 +97,15 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
         if (!controller) {
             controller = new VoiceController(pi, context, config);
+            // `pi_stop` must really abort the running turn; the context is replaced on
+            // reload, so read it through the closure instead of capturing a value.
+            controller.setAgentAbort(() => {
+                try {
+                    context?.abort();
+                } catch (error) {
+                    warn("extension", `abort failed: ${String(error)}`);
+                }
+            });
             setController(context.cwd, controller);
         } else {
             controller.updateConfig(config);
@@ -130,24 +139,47 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         refreshStatus();
     };
 
+    /** Coalesces the automatic transport rebuild that some settings require. */
+    let rebuilding: Promise<void> | undefined;
+
+    const applyConfig = (patch: Partial<VoiceConfig>): VoiceConfig => {
+        config = patchVoiceConfig(config, patch);
+
+        // A read-only or locked settings file must not break the command.
+        try {
+            saveVoiceConfig(config);
+        } catch (error) {
+            warn("config", `could not save pi-voice.json: ${String(error)}`);
+        }
+
+        setDebug(config.debug);
+
+        const result = controller?.updateConfig(config);
+        refreshStatus();
+
+        // Transport-level settings (input device, port, AEC mode, wake engine) only
+        // exist inside the rebuilt process side: server, ffmpeg capture, player. That
+        // result used to be discarded, so those settings silently did nothing until
+        // the next manual restart.
+        if (result?.restart && controller?.running && !rebuilding) {
+            rebuilding = (async () => {
+                try {
+                    await stop();
+                    await start();
+                } catch (error) {
+                    warn("extension", `restart after a settings change failed: ${String(error)}`);
+                } finally {
+                    rebuilding = undefined;
+                }
+            })();
+        }
+
+        return config;
+    };
+
     const runtime: VoiceRuntime = {
         getConfig: () => config,
-        patch: (patch: Partial<VoiceConfig>) => {
-            config = patchVoiceConfig(config, patch);
-
-            // A read-only or locked settings file must not break the command.
-            try {
-                saveVoiceConfig(config);
-            } catch (error) {
-                warn("config", `could not save pi-voice.json: ${String(error)}`);
-            }
-
-            setDebug(config.debug);
-            controller?.updateConfig(config);
-            refreshStatus();
-
-            return config;
-        },
+        patch: applyConfig,
         controller: () => controller,
         start,
         stop,
@@ -217,7 +249,20 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         if (existing?.running && event.reason === "reload") {
             controller = existing;
             controller.rebind(pi, ctx);
-            controller.updateConfig(config);
+
+            // `/reload` deliberately keeps the running session, so transport-level
+            // settings that changed on disk are reported rather than applied here.
+            if (controller.updateConfig(config).restart) {
+                warn("extension", "transport settings changed; run /voice restart to apply them");
+            }
+
+            controller.setAgentAbort(() => {
+                try {
+                    context?.abort();
+                } catch (error) {
+                    warn("extension", `abort failed: ${String(error)}`);
+                }
+            });
 
             if (forced) {
                 controller.setAlwaysOn(true);
@@ -292,6 +337,19 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             }
 
             return { block: true, reason: "Denied by voice approval" };
+        }
+
+        if (allow === undefined) {
+            // No answer (nobody listening, page closed, prompt could not be
+            // delivered). Proceed, but say so: voice approval is a convenience
+            // here, never a hard gate.
+            warn("extension", `no voice answer for ${toolName}; proceeding`);
+
+            try {
+                ctx.ui.notify("Voice: no answer, proceeding", "info");
+            } catch {
+                // ignore
+            }
         }
 
         return;

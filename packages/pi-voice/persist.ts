@@ -17,6 +17,13 @@ export interface PersistedVoiceState {
     voice?: string;
     cwd?: string;
     updatedAt?: string;
+    /**
+     * Monotonic write counter per controller. Used to ignore a late write from a
+     * connection that has already been replaced, without having to guess from
+     * timestamps (a fast restart-loop used to have every new handle rejected as
+     * "too recent", so the stored handle never advanced past the first one).
+     */
+    seq?: number;
 }
 
 const FILE = "pi-voice-state.json";
@@ -53,6 +60,13 @@ function writeAll(data: Record<string, PersistedVoiceState>): void {
     }
 }
 
+/** Highest sequence ever written for this workspace, even if the entry has expired. */
+export function persistedSeq(cwd: string): number {
+    const entry = readAll()[keyFor(cwd)];
+
+    return typeof entry?.seq === "number" ? entry.seq : 0;
+}
+
 export function loadPersistedHandle(cwd: string): PersistedVoiceState | undefined {
     const entry = readAll()[keyFor(cwd)];
 
@@ -78,17 +92,20 @@ export function savePersistedHandle(cwd: string, state: Omit<PersistedVoiceState
     const key = keyFor(cwd);
     const previous = data[key];
 
-    // Do not let a late write from an older connection overwrite a newer handle.
-    if (previous?.handle && previous.handle !== state.handle && previous.updatedAt) {
-        const age = Date.now() - Date.parse(previous.updatedAt);
-
-        if (Number.isFinite(age) && age < 1500) {
-            return;
-        }
+    // Never let an older connection's handle overwrite a newer one.
+    if (
+        typeof state.seq === "number"
+        && typeof previous?.seq === "number"
+        && state.seq < previous.seq
+    ) {
+        return;
     }
 
     data[key] = { ...state, cwd, updatedAt: new Date().toISOString() };
-    writeAll(data);
+
+    // Re-read just before writing so a concurrent writer for another workspace is
+    // not clobbered by our read-modify-write.
+    writeAll({ ...readAll(), [key]: data[key] });
 }
 
 export function clearPersistedHandle(cwd: string): void {

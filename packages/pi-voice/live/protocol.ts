@@ -17,6 +17,14 @@ export const OUTPUT_SAMPLE_RATE = 24_000;
 export const INPUT_SAMPLE_RATE = 16_000;
 
 export function liveSocketUrl(apiKey: string): string {
+    // Override for tests, proxies and mock servers. Everything else (path, setup
+    // message, audio framing) stays identical, so the mock exercises the real code.
+    const override = process.env.PI_VOICE_LIVE_URL?.trim();
+
+    if (override) {
+        return `${override}${override.includes("?") ? "&" : "?"}key=${encodeURIComponent(apiKey)}`;
+    }
+
     return `${LIVE_WS_BASE}?key=${encodeURIComponent(apiKey)}`;
 }
 

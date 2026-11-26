@@ -1,6 +1,6 @@
 {
   "name": "@jeryjs/pi-voice",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Always-on Gemini Live voice for Pi: a hands-free in-between assistant that talks with you and drives your Pi session",
   "type": "module",
   "pi": {
@@ -9,7 +9,7 @@
     ]
   },
   "scripts": {
-    "test": "node test/smoke.ts && node test/server.ts"
+    "test": "node test/smoke.ts && node test/server.ts && node test/lifecycle.ts"
   },
   "keywords": [
     "pi-package",

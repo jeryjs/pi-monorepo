@@ -86,6 +86,7 @@ export class AgentBridge {
     #status: AgentStatus = { busy: false, turnIndex: 0, messagesSeen: 0 };
     #listeners = new Set<Listener>();
     #pending = new Map<string, (allow: boolean | undefined) => void>();
+    #unsubscribes: (() => void)[] = [];
     #approvalSeq = 0;
 
     readonly #pi: ExtensionAPI;
@@ -132,37 +133,48 @@ export class AgentBridge {
     }
 
     #subscribe(): void {
-        const pi = this.pi;
+        // Idempotent: start() after a stop re-attaches the same bridge instance.
+        if (this.#unsubscribes.length > 0) {
+            return;
+        }
 
-        pi.on("agent_start", () => {
+        const pi = this.pi;
+        // Every subscription is tracked: a restart builds a new bridge, and without
+        // this the old handlers stayed attached and kept firing (status flicker,
+        // duplicate replies, stale approvals) for the life of the process.
+        const track = (off: () => void): void => {
+            this.#unsubscribes.push(off);
+        };
+
+        track(pi.on("agent_start", () => {
             this.#status = { ...this.#status, busy: true, activeTool: undefined };
             this.#emit({ kind: "activity", activity: { kind: "start", text: "" } });
-        });
+        }));
 
-        pi.on("agent_settled", () => {
+        track(pi.on("agent_settled", () => {
             this.#status = { ...this.#status, busy: false, activeTool: undefined };
             const last = this.#status.lastAssistant;
             this.#emit({ kind: "activity", activity: { kind: "settled", text: last ?? "" } });
-        });
+        }));
 
-        pi.on("turn_start", (event) => {
+        track(pi.on("turn_start", (event) => {
             this.#status = { ...this.#status, turnIndex: event.turnIndex };
-        });
+        }));
 
-        pi.on("turn_end", (event) => {
+        track(pi.on("turn_end", (event) => {
             this.#emit({ kind: "turnEnd", turnEnd: { turnIndex: event.turnIndex } });
-        });
+        }));
 
-        pi.on("tool_execution_start", (event) => {
+        track(pi.on("tool_execution_start", (event) => {
             const name = (event as { toolName?: unknown }).toolName;
             this.#status = { ...this.#status, activeTool: typeof name === "string" ? name : undefined };
-        });
+        }));
 
-        pi.on("tool_execution_end", () => {
+        track(pi.on("tool_execution_end", () => {
             this.#status = { ...this.#status, activeTool: undefined };
-        });
+        }));
 
-        pi.on("message_end", (event) => {
+        track(pi.on("message_end", (event) => {
             const text = textOf((event as { message?: unknown }).message);
 
             if (!text) {
@@ -186,7 +198,55 @@ export class AgentBridge {
             if (role === "assistant") {
                 this.#emit({ kind: "reply", reply: { text } });
             }
-        });
+        }));
+    }
+
+    /**
+     * Detach from Pi. Called on restart and on `/reload`, so the discarded bridge
+     * never keeps receiving events or leaves an approval promise hanging. The
+     * digest history is kept: the same bridge is re-attached by the next start().
+     */
+    dispose(): void {
+        this.detach();
+        this.#listeners.clear();
+    }
+
+    /** Drop every Pi subscription and resolve pending approvals with `undefined`. */
+    detach(): void {
+        for (const off of this.#unsubscribes.splice(0, this.#unsubscribes.length)) {
+            try {
+                off();
+            } catch (error) {
+                log("bridge", "unsubscribe failed", error);
+            }
+        }
+
+        this.cancelPending();
+    }
+
+    /**
+     * Re-attach after a stop. Without this, `/voice off` followed by `/voice on`
+     * left the voice agent blind: teardown detached the bridge and nothing
+     * subscribed again, so status, replies and approvals never reached it.
+     */
+    attach(): void {
+        this.#subscribe();
+    }
+
+    /** Carry digest + status across a `/reload` rebuild of the bridge. */
+    adoptFrom(other: AgentBridge): void {
+        this.#recent.splice(0, this.#recent.length, ...other.#recent);
+        this.#status = { ...other.#status };
+    }
+
+    /** Resolve every pending approval with `undefined` (caller decides how to treat it). */
+    cancelPending(): void {
+        const pending = [...this.#pending.values()];
+        this.#pending.clear();
+
+        for (const resolve of pending) {
+            resolve(undefined);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -221,14 +281,18 @@ export class AgentBridge {
     }
 
     /** Send a spoken request into Pi. `steer` injects mid-run; otherwise it queues. */
-    ask(message: string, mode: "queue" | "steer" = "queue"): void {
+    ask(message: string, mode: "queue" | "steer" = "queue"): boolean {
         const options = mode === "steer" ? { deliverAs: "steer" as const } : undefined;
 
         try {
             // The options shape is intentionally loose across Pi versions.
             (this.pi.sendUserMessage as (content: string, options?: unknown) => void)(message, options);
+
+            return true;
         } catch (error) {
             log("bridge", "sendUserMessage failed", error);
+
+            return false;
         }
     }
 

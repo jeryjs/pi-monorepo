@@ -145,5 +145,95 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 assert.ok(server.peerCount === 0);
 ok("peer is cleaned up on close");
 
+// --- hostile input ----------------------------------------------------------
+
+process.on("uncaughtException", (error) => {
+    console.error("uncaught exception escaped the server handler:", error);
+
+    process.exit(3);
+});
+
+async function raw(request: string): Promise<string> {
+    const net = await import("node:net");
+
+    return new Promise<string>((resolve) => {
+        const client = net.connect(server.port, "127.0.0.1", () => client.write(request));
+        let buffer = "";
+
+        client.on("data", (chunk) => {
+            buffer += chunk.toString();
+        });
+        client.on("close", () => resolve(buffer.split("\r\n")[0] ?? ""));
+        client.on("error", (error) => resolve(`ERR ${error.message}`));
+        setTimeout(() => client.destroy(), 1500);
+    });
+}
+
+const badPercent = await raw("GET /% HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+assert.ok(badPercent.startsWith("HTTP/1.1 400"), `malformed escape should be a 400, got ${badPercent}`);
+ok("a malformed URL escape is rejected instead of crashing the process");
+
+const badHost = await raw("GET /health HTTP/1.1\r\nHost: [\r\nConnection: close\r\n\r\n");
+assert.equal(badHost.includes("HTTP/1.1"), true, `invalid Host should still answer, got ${badHost}`);
+ok("an invalid Host header does not kill the process");
+
+const badUpgrade = await raw("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: nope\r\nSec-WebSocket-Version: [\r\n\r\n");
+assert.equal(badUpgrade.includes("HTTP/1.1"), true, "bad upgrade should get an HTTP error");
+ok("a malformed websocket upgrade is rejected, not fatal");
+
+// The endpoint must still work after all of that.
+const stillAlive = await fetch(`${base}/health`);
+assert.equal(stillAlive.status, 200);
+ok("the endpoint survives malformed requests");
+
+// --- oversized frames -------------------------------------------------------
+
+const oversized = new WebSocket(`ws://127.0.0.1:${server.port}/ws?t=${TOKEN}`);
+const closedWith = new Promise<number>((resolve) => {
+    oversized.onclose = (event) => resolve(event.code);
+});
+
+await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ws open timeout")), 5000);
+
+    oversized.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+    };
+});
+
+oversized.send(new Uint8Array(5 * 1024 * 1024));
+const code = await Promise.race([
+    closedWith,
+    new Promise<number>((resolve) => setTimeout(() => resolve(-1), 5000)),
+]);
+
+assert.equal(code, 1009, `an oversized frame must close with 1009, got ${code}`);
+ok("an oversized client frame closes the socket with 1009");
+
+// --- restart cycles ---------------------------------------------------------
+
 await server.close();
+
+for (let cycle = 1; cycle <= 3; cycle++) {
+    const restarted = await startAudioServer({
+        host: "127.0.0.1",
+        port: 0,
+        token: `cycle-${cycle}`,
+        clientConfig: () => ({ cycle }),
+        onPeer: () => {},
+    });
+
+    const health = await fetch(`http://127.0.0.1:${restarted.port}/health`);
+    assert.equal(health.status, 200, `cycle ${cycle}: restarted endpoint responds`);
+
+    const page = await fetch(`http://127.0.0.1:${restarted.port}/?t=cycle-${cycle}`);
+    assert.equal(page.status, 200, `cycle ${cycle}: page served after restart`);
+
+    await restarted.close();
+    await assert.rejects(() => fetch(`http://127.0.0.1:${restarted.port}/health`), `cycle ${cycle}: endpoint closed`);
+}
+
+ok("the audio endpoint can be started and stopped repeatedly");
+
 console.log(`\n${passed} endpoint checks passed`);

@@ -12,6 +12,9 @@ import type { Duplex } from "node:stream";
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+/** Refuse single messages (and unreassembled buffers) larger than this. */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
 export interface WebSocketPeer {
     send(data: string | Uint8Array): void;
     close(code?: number, reason?: string): void;
@@ -117,13 +120,24 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
         },
     };
 
-    const fail = (code: number): void => {
+    const fail = (code: number, reason = ""): void => {
         open = false;
         handlers.onClose?.(code);
+
+        // Send a real close frame (RFC 6455) so the peer learns the reason instead
+        // of seeing a bare 1006 from a destroyed socket.
         try {
-            socket.destroy();
+            const payload = Buffer.alloc(2 + Buffer.byteLength(reason));
+            payload.writeUInt16BE(code, 0);
+            payload.write(reason, 2, "utf8");
+            socket.write(frame(0x8, payload));
+            socket.end();
         } catch {
-            // ignore
+            try {
+                socket.destroy();
+            } catch {
+                // ignore
+            }
         }
     };
 
@@ -131,6 +145,15 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
         switch (opcode) {
             case 0x0: // continuation
                 fragments.push(payload);
+
+                // A peer that never sends FIN could otherwise grow this without
+                // bound; fail the connection instead of leaking memory.
+                if (fragments.reduce((total, part) => total + part.length, 0) > MAX_FRAME_BYTES) {
+                    fail(1009, "message too big");
+
+                    return;
+                }
+
                 if (fin) {
                     const merged = Buffer.concat(fragments);
                     fragments = [];
@@ -147,6 +170,13 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
                     fragments = [payload];
                     return;
                 }
+
+                if (payload.length > MAX_FRAME_BYTES) {
+                    fail(1009, "message too big");
+
+                    return;
+                }
+
                 try {
                     handlers.onMessage(opcode === 0x1 ? payload.toString("utf8") : payload, opcode === 0x2);
                 } catch {
@@ -205,7 +235,7 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
                 const big = buffer.readBigUInt64BE(2);
 
                 if (big > BigInt(16 * 1024 * 1024)) {
-                    fail(1009);
+                    fail(1009, "message too big");
                     return;
                 }
 
@@ -239,6 +269,13 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
     };
 
     socket.on("data", (chunk: Buffer) => {
+        // Refuse to buffer without bound while waiting for a frame to complete.
+        if (buffer.length + chunk.length > MAX_FRAME_BYTES * 2) {
+            fail(1009, "message too big");
+
+            return;
+        }
+
         buffer = Buffer.concat([buffer, chunk]);
         parse();
     });

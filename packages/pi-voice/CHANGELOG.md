@@ -5,6 +5,63 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-12-01
+
+Restart, stop/start and hostile-input hardening. Two of these were silent
+breakage inside the features they lived in.
+
+### Fixed
+
+- **`pi_stop` never actually stopped anything.** `interruptAgent()` was defined
+  twice on the controller; the second definition silently won and only queued a
+  steering message, discarding the `ctx.abort()` wiring. There is now exactly one
+  implementation, so a spoken stop aborts the running turn.
+- **Voice went blind after `/voice off` then `/voice on`.** Teardown detached the
+  bridge from Pi's events and nothing re-subscribed, so status, replies and
+  approvals never reached the agent again. The bridge is now re-attached on every
+  start, and `/reload` carries the digest history across.
+- **The stored resumption handle never advanced.** A timestamp guard meant to
+  reject late writes from a replaced connection also rejected every new handle in
+  a fast restart loop, so restarts kept resuming the first checkpoint. Writes now
+  carry a monotonic sequence number.
+- **A single malformed HTTP request could kill the whole Pi process.** `GET /%`
+  (bad escape) and `Host: [` reached `new URL` outside any `try`, so any web page
+  could crash Pi with one request. The handler is wrapped, answers `400`, and
+  static serving no longer throws on bad escapes.
+- **Unbounded WebSocket frames.** Frames and the reassembly buffer are capped; an
+  oversized message closes the socket with a proper `1009` close frame instead of
+  growing memory or dropping the connection silently.
+- **Lock files are no longer trusted by PID alone.** They carry an ownership
+  token, are created exclusively (so two processes starting at the same instant
+  cannot both win), a foreign lock is never released by another process, and a
+  lock older than 12 hours is taken over even if the PID was reused.
+- **Settings that need a rebuilt process side were silently ignored.** Changing
+  transport, port, input/output device, AEC mode, wake engine or compute backend
+  now restarts the audio side instead of doing nothing until the next manual
+  restart. Setup-only changes already reconnected the Live socket.
+- **The companion page could stay permanently deaf.** A failed `getUserMedia`
+  left a half-built `AudioContext` behind and every retry early-returned on it;
+  the microphone is also released now, so the recording indicator does not stay
+  on.
+- **The sherpa keywords file had a fixed name**, so editing the wake phrase kept
+  loading the first file that was ever written. It is named after a digest of the
+  phrase.
+- **A dying microphone is no longer silent.** Capture exit is surfaced, respawns
+  up to five times with backoff, and reports a device hint when it gives up.
+- **Playback can no longer build an unbounded backlog** if the player stalls
+  (queued audio is dropped instead of drifting seconds behind), and the output
+  gain is applied once, in the player, so the AEC reference stays exact.
+
+### Added
+
+- `test/lifecycle.ts`: drives the real controller against a fake Live endpoint —
+  five start/stop cycles, concurrent start, stop during start, restart
+  resumption, `/reload` rebind, honest `pi_ask`/`pi_stop` tool calls, cross-process
+  locking and stale-lock takeover (15 checks).
+- Endpoint suite grows crash probes (malformed escape, invalid `Host`, bad
+  upgrade), an oversized-frame close and repeated start/stop cycles (19 checks).
+- Smoke suite covers lock ownership/release/staleness and handle sequencing (56).
+
 ## [0.4.1] - 2026-11-26
 
 Native mode could be silent: Pi heard you but never spoke.
