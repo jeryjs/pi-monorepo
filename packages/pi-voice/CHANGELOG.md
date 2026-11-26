@@ -5,6 +5,34 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-12-01
+
+Three things that only show up while actually talking to it.
+
+### Fixed
+
+- **`pi_ask` silently dropped every request made while Pi was busy.** The session
+  validates `streamingBehavior` and throws `Agent is already processing. Specify
+  streamingBehavior ('steer' or 'followUp')` when it is missing; the extension API
+  starts that call in the background and only surfaces the rejection as an extension
+  error, so `pi_ask` returned `{status:"sent"}` and the user was told "on it" for a
+  message that never arrived. `queue` now sends `followUp` (deliver when the current
+  turn ends) and `steer` sends `steer`, under **both** option names so the behaviour
+  does not depend on which one this Pi build reads. A lifecycle test asserts the
+  options on the wire.
+- **Two voices at once.** When Pi finished while the model was mid-sentence, the
+  answer was pushed into the same conversation, so the old sentence and the new
+  answer played together. The notice now cuts the local playback, discards the tail
+  of the sentence that is still streaming down (until the server ends that turn,
+  capped at 4 s), and asks the model for a human reaction — a short "oh", then the
+  answer, explicitly *not* finishing the interrupted sentence.
+- **A reply after the idle gate went nowhere.** When the session had been gated for
+  silence and Pi's result arrived, the model spoke but the mic stayed closed: the
+  answer to it was routed to the wake detector, so the user had to say "hey pi"
+  again. Any notice now re-opens the mic before it is delivered, and model audio
+  counts as conversation activity, so the idle window starts from the end of its
+  sentence rather than from the last thing the user said.
+
 ## [0.5.1] - 2026-12-01
 
 Diagnosing "the wake word never fires" without reading logs, and the last way a

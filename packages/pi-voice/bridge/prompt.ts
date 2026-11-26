@@ -104,9 +104,22 @@ export function buildSystemInstruction(input: PromptInput): string {
     return lines.join("\n");
 }
 
-/** One-line note pushed into the live conversation when Pi finishes something. */
-export function agentReplyNotice(text: string): string {
-    return `[Pi replied] ${text.slice(0, 1200)}\n\nSay this back to the user in one or two short spoken sentences.`;
+/**
+ * Note pushed into the live conversation when Pi finishes something.
+ *
+ * `interrupted` is set when the model was mid-sentence: the local playback has
+ * already been cut, so the note must both explain the cut and make the model's own
+ * reaction natural instead of answering on top of the sentence it never finished.
+ */
+export function agentReplyNotice(text: string, interrupted = false): string {
+    const head = interrupted
+        ? `[Pi's answer arrived while you were still speaking, so you were cut off mid-sentence] ${text.slice(0, 1200)}\n\n`
+        : `[Pi replied] ${text.slice(0, 1200)}\n\n`;
+
+    return head + (interrupted
+        ? "Start with a short natural reaction to being interrupted — \"oh\", \"ah, hang on\" — then say it in "
+            + "one or two spoken sentences. Do not repeat or finish what you were saying before."
+        : "Say this back to the user in one or two short spoken sentences.");
 }
 
 /** Note pushed into the live conversation when Pi asks for approval. */

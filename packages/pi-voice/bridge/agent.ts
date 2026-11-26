@@ -280,9 +280,17 @@ export class AgentBridge {
             .map((message) => message.text);
     }
 
-    /** Send a spoken request into Pi. `steer` injects mid-run; otherwise it queues. */
+    /** Send a spoken request into Pi. `steer` injects mid-run; `queue` waits for the turn to end. */
     ask(message: string, mode: "queue" | "steer" = "queue"): boolean {
-        const options = mode === "steer" ? { deliverAs: "steer" as const } : undefined;
+        // Both names on purpose. The extension API documents `deliverAs`, but the
+        // session validates `streamingBehavior` and throws when neither is present:
+        // "Agent is already processing. Specify streamingBehavior...". Because the
+        // extension API runs this in the background and only reports the rejection as
+        // an extension error, `pi_ask` used to answer "sent" for a message that never
+        // reached Pi — every voice request made while Pi was busy was silently lost.
+        // `queue` is `followUp` (deliver when the current turn ends), `steer` is steer.
+        const behavior = mode === "steer" ? "steer" : "followUp";
+        const options = { deliverAs: behavior, streamingBehavior: behavior };
 
         try {
             // The options shape is intentionally loose across Pi versions.

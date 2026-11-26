@@ -100,6 +100,15 @@ export class VoiceController implements VoiceControl {
     #lastWakeAt = 0;
     #lastWakeSource = "";
     #lastLevelAt = 0;
+    /** Last moment the model produced audio; used to decide "was it mid-sentence?". */
+    #lastAudioOutAt = 0;
+    /**
+     * Set after cutting playback for an interruption: the rest of the sentence we cut
+     * is still streaming down and would play on top of the new one. Dropped until the
+     * server ends that turn, with a cap so it cannot stick.
+     */
+    #dropAudio = false;
+    #dropAudioTimer: ReturnType<typeof setTimeout> | undefined;
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
@@ -579,6 +588,8 @@ export class VoiceController implements VoiceControl {
         this.#pendingBytes = 0;
         this.#awaitingReplyUntil = 0;
         this.#lastLevelAt = 0;
+        this.#lastAudioOutAt = 0;
+        this.#endDroppedAudio();
         releaseLock(this.ctx.cwd);
     }
 
@@ -831,8 +842,15 @@ export class VoiceController implements VoiceControl {
             return false;
         }
 
+        // Same treatment as Pi's replies: cut the current sentence instead of
+        // talking over it.
+        const cut = this.#prepareForNotice(true);
+        const lead = cut
+            ? "[You were cut off mid-sentence; start with a brief \"oh\" and do not finish the old sentence]\n\n"
+            : "";
+
         this.#session?.sendText(
-            `Say this to the user now, close to verbatim, in your normal spoken voice: "${text.slice(0, 800)}"`,
+            `${lead}Say this to the user now, close to verbatim, in your normal spoken voice: "${text.slice(0, 800)}"`,
         );
 
         return true;
@@ -860,9 +878,22 @@ export class VoiceController implements VoiceControl {
 
     #wireSession(session: LiveSession): void {
         session.on("audio", (bytes) => {
+            // The tail of a sentence we deliberately cut: playing it would put two
+            // voices on top of each other, which is exactly what the user heard.
+            if (this.#dropAudio) {
+                return;
+            }
+
+            this.#lastAudioOutAt = Date.now();
+            // The model speaking counts as conversation activity, so the idle gate
+            // counts from the end of its sentence rather than from the last thing we
+            // said.
+            this.#lastVoiceAt = Date.now();
             this.#native?.play(bytes);
             this.#broadcastBinary(bytes);
         });
+
+        session.on("turnComplete", () => this.#endDroppedAudio());
 
         session.on("transcript", (entry) => {
             this.#broadcast({ t: "transcript", side: entry.side, text: entry.text, final: entry.final });
@@ -894,6 +925,7 @@ export class VoiceController implements VoiceControl {
         });
 
         session.on("interrupted", () => {
+            this.#endDroppedAudio();
             this.#broadcast({ t: "interrupt" });
         });
 
@@ -960,6 +992,64 @@ export class VoiceController implements VoiceControl {
         });
     }
 
+    // -----------------------------------------------------------------------
+    // Talking over the model
+    // -----------------------------------------------------------------------
+
+    /**
+     * Prepare the live conversation for a notice the user must hear.
+     *
+     * Returns true when the model was mid-sentence and was cut off. Two failures this
+     * fixes:
+     *  - two voices at once: Pi's answer was pushed while the model was still speaking,
+     *    so the old sentence and the new answer played together;
+     *  - a reply into the void: if the session was idle-gated, the model spoke and the
+     *    user's answer went to the wake detector instead of the conversation.
+     */
+    #prepareForNotice(interrupt: boolean): boolean {
+        const session = this.#session;
+        const state = session?.state;
+
+        if (!session || (state !== "live" && state !== "sleeping")) {
+            return false;
+        }
+
+        if (state === "sleeping") {
+            log("controller", "notice while asleep: re-opening the mic so the answer is heard");
+            this.wake();
+        }
+
+        const midSentence = Date.now() - this.#lastAudioOutAt < 2000;
+
+        if (!interrupt || !midSentence) {
+            return false;
+        }
+
+        log("controller", "cutting playback: the notice arrived mid-sentence");
+        this.#native?.flush();
+        this.#broadcast({ t: "interrupt" });
+        this.#dropAudio = true;
+
+        if (this.#dropAudioTimer) {
+            clearTimeout(this.#dropAudioTimer);
+        }
+
+        // Cap: if the server never reports the turn ending, resume instead of staying mute.
+        this.#dropAudioTimer = setTimeout(() => this.#endDroppedAudio(), 4000);
+        (this.#dropAudioTimer as { unref?: () => void }).unref?.();
+
+        return true;
+    }
+
+    #endDroppedAudio(): void {
+        this.#dropAudio = false;
+
+        if (this.#dropAudioTimer) {
+            clearTimeout(this.#dropAudioTimer);
+            this.#dropAudioTimer = undefined;
+        }
+    }
+
     #wireBridge(): void {
         // A start after a stop must re-attach the same bridge instance; teardown
         // detached it and nothing else would subscribe again.
@@ -977,6 +1067,9 @@ export class VoiceController implements VoiceControl {
             if (kind === "approval") {
                 const approval = (payload as { approval: { toolCallId: string; toolName: string; summary: string } }).approval;
 
+                // Not an interruption: an approval prompt can wait for the sentence to
+                // finish. But if the session was asleep it has to wake up first.
+                this.#prepareForNotice(false);
                 this.#session?.sendText(approvalNotice(approval.toolCallId, approval.toolName, approval.summary));
                 this.#broadcast({ t: "approval", id: approval.toolCallId, tool: approval.toolName, summary: approval.summary });
 
@@ -1012,7 +1105,8 @@ export class VoiceController implements VoiceControl {
                 this.#lastAnnounce = now;
                 this.#lastAnnounceText = activity.text;
                 this.#awaitingReplyUntil = 0;
-                this.#session.sendText(agentReplyNotice(activity.text));
+                const cut = this.#prepareForNotice(true);
+                this.#session?.sendText(agentReplyNotice(activity.text, cut));
             }
         });
     }

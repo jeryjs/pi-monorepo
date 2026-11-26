@@ -378,6 +378,33 @@ The promised follow-up is wired too: a delivered `pi_ask` marks the turn as
 `announce` off**. Without that, the model would say "I'll tell you when Pi's
 back" and then never speak again.
 
+### Delivery modes
+
+`pi_ask` has two modes and both always state one, because a busy Pi rejects a
+message that does not carry it:
+
+| Mode | Wire options | Behaviour |
+|---|---|---|
+| `queue` (default) | `deliverAs` + `streamingBehavior` = `followUp` | delivered when Pi's current turn ends |
+| `steer` | `deliverAs` + `streamingBehavior` = `steer` | injected into the running turn |
+
+The name is set twice on purpose: the extension API documents `deliverAs`, the
+session validates `streamingBehavior`, and the extension API reports a rejection
+only as a background extension error — which is how `pi_ask` used to answer
+"sent" for messages that never reached Pi while it was busy.
+
+### Talking over the model
+
+When Pi's answer lands while the voice is mid-sentence, the old behaviour played
+both at once. Now the playback is cut, the rest of the interrupted sentence (still
+streaming down) is discarded until the server ends that turn, and the model is
+told it was cut off: it says a short "oh" and then the answer, instead of
+finishing the sentence it was told to abandon.
+
+A notice delivered while the session was idle-gated re-opens the mic first, so the
+reply to it is heard. Model audio also counts as conversation activity now, so the
+idle window starts when it stops talking rather than when the user last spoke.
+
 The Pi side also gets a `voice` tool:
 
 ```ts
@@ -481,7 +508,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.5.1** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.5.2** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -500,7 +527,7 @@ test/                     smoke + endpoint + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (64) + endpoint (19) + lifecycle (24) + sherpa (13)
+npm test   # smoke (66) + endpoint (19) + lifecycle (25) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

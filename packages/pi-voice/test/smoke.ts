@@ -28,7 +28,7 @@ import {
 } from "../live/protocol.ts";
 import { createSetupBuilder } from "../live/setup.ts";
 import { functionDeclarations } from "../bridge/tools.ts";
-import { buildSystemInstruction } from "../bridge/prompt.ts";
+import { agentReplyNotice, buildSystemInstruction } from "../bridge/prompt.ts";
 import { RingBuffer, backoffDelay, clip, float32ToPcm16 } from "../util.ts";
 
 let passed = 0;
@@ -724,6 +724,24 @@ test("the status bar admits when the mic is delivering nothing", () => {
     const text = voiceStatusText({ state: "asleep", levels: [], alwaysOn: true, silent: true });
 
     assert.equal(text, "voice asleep ·wake ·no mic signal");
+});
+
+console.log("interruption");
+
+test("a reply that cuts the model off asks for a human reaction, not a repeat", () => {
+    const cut = agentReplyNotice("the build failed", true);
+
+    assert.match(cut, /cut off mid-sentence/i);
+    assert.match(cut, /\"oh\"/);
+    assert.match(cut, /Do not repeat or finish/i);
+    assert.match(cut, /the build failed/);
+});
+
+test("an ordinary reply is not framed as an interruption", () => {
+    const plain = agentReplyNotice("the build failed");
+
+    assert.doesNotMatch(plain, /cut off/i);
+    assert.match(plain, /Say this back to the user/);
 });
 
 rmSync(continuityDir, { recursive: true, force: true });

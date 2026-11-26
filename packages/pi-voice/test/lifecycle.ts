@@ -169,6 +169,7 @@ interface StubPi {
     api: ExtensionAPI;
     activeHandlers(): number;
     sent: string[];
+    sentOptions: unknown[];
     entries: { type: string; data: unknown }[];
     failSend: boolean;
 }
@@ -178,6 +179,7 @@ function makePi(): StubPi {
     const stub: StubPi = {
         activeHandlers: () => active.size,
         sent: [],
+        sentOptions: [],
         entries: [],
         failSend: false,
         api: undefined as unknown as ExtensionAPI,
@@ -197,12 +199,13 @@ function makePi(): StubPi {
 
             return off;
         },
-        sendUserMessage: (message: string) => {
+        sendUserMessage: (message: string, options?: unknown) => {
             if (stub.failSend) {
                 throw new Error("no active session");
             }
 
             stub.sent.push(message);
+            stub.sentOptions.push(options ?? null);
         },
         appendEntry: (type: string, data: unknown) => {
             stub.entries.push({ type, data });
@@ -508,6 +511,25 @@ send({ toolCall: { functionCalls: [{ id: "t3", name: "pi_ask", args: { message: 
 await until(() => reloadedPi.sent.length > 0, "pi_ask delivery");
 assert.equal(reloadedPi.sent[0], "summarise the repo", "message reached Pi verbatim");
 ok("pi_ask delivers the spoken request to Pi");
+
+// The delivery mode has to be on the message: the session throws "Agent is already
+// processing. Specify streamingBehavior..." when neither name is present, and the
+// extension API swallows that rejection into an extension error — so pi_ask said
+// "sent" for messages that never arrived while Pi was busy.
+assert.deepEqual(
+    reloadedPi.sentOptions[0],
+    { deliverAs: "followUp", streamingBehavior: "followUp" },
+    "queue mode must carry followUp for a busy Pi",
+);
+
+send({ toolCall: { functionCalls: [{ id: "t3b", name: "pi_ask", args: { message: "interrupt the build", mode: "steer" } }] } });
+await until(() => reloadedPi.sent.length > 1, "steer delivery");
+assert.deepEqual(
+    reloadedPi.sentOptions[1],
+    { deliverAs: "steer", streamingBehavior: "steer" },
+    "steer mode must carry steer",
+);
+ok("pi_ask always states a streaming behaviour (busy Pi no longer rejects it)");
 
 // pi_stop must abort the running turn, not just queue text
 let aborts = 0;
