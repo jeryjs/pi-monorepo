@@ -106,11 +106,12 @@ wakes on any loud-enough speech rather than a phrase. The browser transport uses
 the sherpa WASM module or Web Speech. The status bar carries a live waveform:
 
 ```
-voice live ▁▂▄▆▄▂ ·wake     # hearing you, always-on
-voice live ▁▁▁▁              # live, wake word off
-voice asleep ·wake           # no Gemini session yet; only the local spotter runs
-voice sleeping ▁▂▁          # gated after idle, still hearing for the wake phrase
-voice error: quota...         # stopped; /voice diagnose
+voice live ▁▂▄▆▄▂ ·wake         # hearing you, always-on
+voice live ▁▁▁▁                  # live, wake word off
+voice asleep ·wake               # no Gemini session yet; only the local spotter runs
+voice asleep ·wake ·no mic signal # the device is delivering silence — /voice mic
+voice sleeping ▁▂▁              # gated after idle, still hearing for the wake phrase
+voice error: quota...             # stopped; /voice diagnose
 ```
 
 ### Starting asleep (`connectOnWake`)
@@ -179,6 +180,27 @@ The value `auto` prefers WebNN (Intel AI Boost NPU) then WebGPU. It does not
 select the audio transport — that is `audio`. The page shows the chosen backend.
 
 ## Troubleshooting
+
+**The wake word never fires** — do not start with the phrase or the model. Run:
+
+```
+/voice mic
+```
+
+It records 3 seconds from the configured input and prints one of four verdicts:
+
+| Verdict | Meaning | Fix |
+|---|---|---|
+| `DIGITAL SILENCE` | the device returns zeros (peak 0) | Windows → Sound → Input: mute/volume, and Privacy → Microphone → allow desktop apps. Check `nativeInput` is the mic, not Stereo Mix |
+| `signal present but very quiet` | speech never reaches the threshold | raise mic gain, or `wakeSensitivity` |
+| `signal present (…%)` | the mic is fine, so the detector is the problem | check `/voice status` for `wake engine running` and `wake hits` |
+| `could not capture: …` | ffmpeg could not open the device | fix `nativeInput`; a second reader can fail while voice is running |
+
+`/voice status` also reports `wake engine running: sherpa (cpu)` (the engine that
+actually got constructed, not what the config asks for), `wake hits` with the last
+source, and `mic: NO SIGNAL` when nothing but silence arrived in the last 8
+seconds. A silent mic also shows up in the status bar as `·no mic signal`, so
+"asleep forever" is never left unexplained.
 
 **The status bar says `voice asleep` and nothing is connected** — that is
 `connectOnWake` working: the wake spotter is running, no Gemini session exists
@@ -316,6 +338,7 @@ Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Ctrl-O open page · Esc clos
 /voice voice-name <name>   prebuilt Gemini voice (default Zephyr)
 /voice autonomy <concierge|steer|approvals>
 /voice wake-engine <auto|sherpa|webspeech|energy>
+/voice mic [seconds]       record the input and report peak/rms; says plainly when the mic is silent
 /voice compute <auto|cpu|webgpu|webnn>
 /voice key <key>
 /voice announce [on|off]
@@ -458,7 +481,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.5.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.5.1** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -477,7 +500,7 @@ test/                     smoke + endpoint + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (59) + endpoint (19) + lifecycle (22) + sherpa (13)
+npm test   # smoke (64) + endpoint (19) + lifecycle (24) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
@@ -493,8 +516,10 @@ crash probes (malformed escape, invalid `Host`, bad upgrade), an oversized-frame
 `test/lifecycle.ts` drives the real `VoiceController` against a fake Gemini Live
 endpoint: five start/stop cycles, double start, stop during start, restart
 resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
-awake), **start-asleep (`connectOnWake`: no socket until wake, then live)**, honest
-`pi_ask`/`pi_stop` results, cross-process locking and stale-lock takeover.
+awake), **start-asleep (`connectOnWake`: no socket until wake, then live, and no
+connection from a config change either)**, honest `pi_ask`/`pi_stop` results,
+cross-process locking and stale-lock takeover; plus the microphone-probe verdicts
+(silent / quiet / signal / capture failure) in the smoke suite.
 
 `test/sherpa.ts` covers the wake-word installer offline: BPE keyword
 spotting/tokenisation (including the uncoverable-phrase error and the digest-named

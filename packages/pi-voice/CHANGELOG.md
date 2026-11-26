@@ -5,6 +5,39 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-12-01
+
+Diagnosing "the wake word never fires" without reading logs, and the last way a
+`sleep`-start could connect by itself.
+
+### Added
+
+- **`/voice mic [seconds]`** records the configured input for a few seconds and
+  prints peak/rms plus a verdict: `DIGITAL SILENCE` (the device returns zeros —
+  mute, volume, privacy, wrong device), `signal present but very quiet` (raise the
+  gain or `wakeSensitivity`), `signal present (N%)` (the mic is fine, the detector
+  is the suspect), or `could not capture: …`. A muted microphone used to look
+  exactly like a broken wake phrase; one command now separates them.
+- `/voice status` reports the engine that was *actually* constructed
+  (`wake engine running: sherpa (cpu)` vs `energy VAD`), `wake hits` with the last
+  source and time, and `mic: NO SIGNAL` when only silence arrived in the last 8 s.
+  It also no longer prints `page: undefined` for the native transport.
+
+### Fixed
+
+- **A config change while asleep connected the session.** `updateConfig` called
+  `#scheduleMaxSession()` (and `reconnectNow()` when a setup key changed) without
+  checking dormancy, so toggling sherpa in the settings screen made a
+  `start asleep` session go `live` with nobody having said the wake phrase — the
+  status bar said `live` while the config said "connects on the wake phrase".
+  Both paths are now guarded, and a lifecycle test asserts that a config change
+  while asleep opens no socket.
+- **Disabling always-on while asleep left dead air**: no wake engine and no live
+  session. Turning the wake word off now connects instead.
+- **Native wake logged nothing for the sherpa engine.** The level/floor/threshold
+  line lived inside the energy branch, so with a spotter installed a silent mic was
+  invisible. It is logged for both engines now, every 5 s.
+
 ## [0.5.0] - 2026-12-01
 
 Starts asleep, and stops refusing on Pi's behalf.

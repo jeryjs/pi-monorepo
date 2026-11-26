@@ -13,7 +13,7 @@ import { completeVoiceArguments } from "../completions.ts";
 import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "../config.ts";
 import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
-import { playbackArgs } from "../audio/native.ts";
+import { micVerdict, playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
@@ -677,6 +677,53 @@ test("a hash-named keyword file tracks the configured wake phrase", () => {
 
     assert.notEqual(digest("HEY PI :2.0"), digest("HEY COMPUTER :2.0"));
     assert.equal(digest("HEY PI :2.0"), digest("HEY PI :2.0"));
+});
+
+
+console.log("microphone probe");
+
+const probe = (over: Record<string, unknown>) => ({
+    device: "audio=Microphone Array",
+    seconds: 3,
+    samples: 48_000,
+    peak: 0.3,
+    rms: 0.05,
+    voicedRatio: 0.5,
+    ...over,
+});
+
+test("a silent device is named as such, not blamed on the wake phrase", () => {
+    // The failure this guards: a muted mic left the status bar on "asleep" forever
+    // and looked like a broken wake word.
+    const verdict = micVerdict(probe({ peak: 0, rms: 0, voicedRatio: 0 }));
+
+    assert.match(verdict, /DIGITAL SILENCE/i);
+    assert.match(verdict, /Privacy/i);
+});
+
+test("a working mic reports signal instead of a warning", () => {
+    const verdict = micVerdict(probe({}));
+
+    assert.match(verdict, /signal present/i);
+    assert.match(verdict, /50% of the window/);
+});
+
+test("quiet-but-present audio points at gain or sensitivity", () => {
+    const verdict = micVerdict(probe({ peak: 0.004, rms: 0.001, voicedRatio: 0 }));
+
+    assert.match(verdict, /very quiet/i);
+    assert.match(verdict, /wakeSensitivity/);
+});
+
+test("a capture failure and an empty capture are different messages", () => {
+    assert.match(micVerdict(probe({ error: "Device or resource busy" })), /could not capture: Device or resource busy/);
+    assert.match(micVerdict(probe({ samples: 0, peak: 0, rms: 0 })), /no audio arrived/i);
+});
+
+test("the status bar admits when the mic is delivering nothing", () => {
+    const text = voiceStatusText({ state: "asleep", levels: [], alwaysOn: true, silent: true });
+
+    assert.equal(text, "voice asleep ·wake ·no mic signal");
 });
 
 rmSync(continuityDir, { recursive: true, force: true });

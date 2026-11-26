@@ -153,6 +153,180 @@ export function playbackArgs(minimal = false): string[] {
 
 const PLAYER_OPTION_ERROR = /option not found|failed to set|unknown option|unrecognized option/i;
 
+// ---------------------------------------------------------------------------
+// Microphone probe: answers "is the mic giving us anything at all?" in one shot
+// ---------------------------------------------------------------------------
+
+export interface MicProbe {
+    device: string;
+    seconds: number;
+    samples: number;
+    /** Absolute peak amplitude, 0..1. */
+    peak: number;
+    /** RMS over the whole window, 0..1. */
+    rms: number;
+    /** Fraction of 100 ms windows whose RMS is above the wake threshold. */
+    voicedRatio: number;
+    error?: string;
+}
+
+/** One-line diagnosis of a probe; pure so it can be tested without a microphone. */
+export function micVerdict(probe: MicProbe): string {
+    if (probe.error) {
+        return `could not capture: ${probe.error}`;
+    }
+
+    if (probe.samples === 0) {
+        return "no audio arrived at all — ffmpeg opened the device but produced nothing";
+    }
+
+    const db = (value: number): string => (value <= 0 ? "-inf" : (20 * Math.log10(value)).toFixed(1));
+
+    if (probe.peak < 0.0005) {
+        return "DIGITAL SILENCE: the device is delivering zeros. Windows: Settings → Sound → Input → "
+            + "check mute, volume, and Privacy → Microphone → allow desktop apps. Also check that "
+            + "nativeInput is the mic and not Stereo Mix / a disconnected endpoint.";
+    }
+
+    if (probe.voicedRatio === 0) {
+        return `signal present but very quiet (peak ${db(probe.peak)} dBFS): speech never reached the wake `
+            + "threshold — raise the mic gain or wakeSensitivity";
+    }
+
+    return `signal present (peak ${db(probe.peak)} dBFS, rms ${db(probe.rms)} dBFS, `
+        + `${Math.round(probe.voicedRatio * 100)}% of the window above the wake threshold)`;
+}
+
+/**
+ * Record a few seconds from the configured input and measure it. Used by
+ * `/voice mic` so "the wake word never fires" can be split into "the mic is silent"
+ * (device/privacy problem) versus "the mic works, the detector does not fire"
+ * (model/keyword/threshold problem) without reading logs.
+ */
+export async function probeMic(config: VoiceConfig, seconds = 3): Promise<MicProbe> {
+    const device = config.nativeInput.trim() || detectDefaultInput(config.ffmpegPath);
+    const result: MicProbe = { device, seconds, samples: 0, peak: 0, rms: 0, voicedRatio: 0 };
+    const args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        ...captureArgs(config, device),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "-",
+    ];
+
+    return new Promise<MicProbe>((resolve) => {
+        let child: ChildProcessWithoutNullStreams;
+
+        try {
+            child = spawn(config.ffmpegPath, args, {
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsHide: true,
+            }) as ChildProcessWithoutNullStreams;
+        } catch (error) {
+            resolve({ ...result, error: String(error) });
+
+            return;
+        }
+
+        const window = 1600; // 100 ms at 16 kHz
+        let windowSum = 0;
+        let windowCount = 0;
+        let voicedWindows = 0;
+        let windows = 0;
+        let sumSquares = 0;
+        let settled = false;
+        let carry = Buffer.alloc(0);
+        let stderr = "";
+
+        const finish = (error?: string): void => {
+            if (settled) {
+                return;
+            }
+
+            settled = true;
+            clearTimeout(timer);
+
+            try {
+                child.kill();
+            } catch {
+                // ignore
+            }
+
+            if (windows > 0) {
+                result.voicedRatio = voicedWindows / windows;
+            }
+
+            if (result.samples > 0) {
+                result.rms = Math.sqrt(sumSquares / result.samples);
+            }
+
+            resolve({
+                ...result,
+                error: error ?? (result.samples === 0 ? cleanStderr(stderr) : undefined),
+            });
+        };
+
+        const timer = setTimeout(() => finish(), seconds * 1000 + 1500);
+        (timer as { unref?: () => void }).unref?.();
+
+        child.stderr.on("data", (chunk: Buffer) => {
+            stderr += chunk.toString();
+        });
+
+        child.stdout.on("data", (chunk: Buffer) => {
+            carry = Buffer.concat([carry, chunk]);
+            const usable = carry.length - (carry.length % 2);
+
+            for (let offset = 0; offset + 1 < usable; offset += 2) {
+                const sample = carry.readInt16LE(offset) / 32768;
+                const magnitude = Math.abs(sample);
+
+                if (magnitude > result.peak) {
+                    result.peak = magnitude;
+                }
+
+                sumSquares += sample * sample;
+                result.samples++;
+                windowSum += sample * sample;
+                windowCount++;
+
+                if (windowCount >= window) {
+                    const rms = Math.sqrt(windowSum / windowCount);
+
+                    if (rms > 0.006) {
+                        voicedWindows++;
+                    }
+
+                    windows++;
+                    windowSum = 0;
+                    windowCount = 0;
+                }
+            }
+
+            carry = Buffer.from(carry.subarray(usable));
+
+            if (result.samples >= 16_000 * seconds) {
+                finish();
+            }
+        });
+
+        child.on("error", (error: Error) => finish(error.message));
+        child.on("close", () => finish());
+    });
+}
+
+function cleanStderr(text: string): string {
+    const line = text.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).pop();
+
+    return line ? line.slice(0, 200) : "no audio captured";
+}
+
 /** Multiply raw int16 PCM by a gain, clamping at the 16-bit range. */
 function scalePcm16(bytes: Uint8Array, gain: number): Uint8Array {
     if (!Number.isFinite(gain) || Math.abs(gain - 1) < 0.001) {
@@ -199,6 +373,11 @@ export class NativeTransport {
 
     /** Restart the capture process at most this many times before reporting failure. */
     static readonly CAPTURE_ATTEMPTS = 5;
+
+    /** Which engine actually got constructed ("sherpa cpu" or nothing = energy VAD). */
+    get spotterProvider(): string | undefined {
+        return this.#kws?.provider;
+    }
     /** Drop queued playback beyond this many bytes (~2 s of 24 kHz mono). */
     static readonly MAX_PLAYBACK_BYTES = 24_000 * 2 * 2;
 
@@ -591,6 +770,18 @@ export class NativeTransport {
             // Sleep: keep a pre-roll and look for the wake phrase.
             this.#preRoll.push(rawFloat);
 
+            const threshold = Math.max(0.006, this.#noiseFloor * this.#wakeMultiplier);
+
+            // Logged for both engines: "level 0.0000" is the difference between
+            // "the phrase is not recognized" and "the mic delivers silence".
+            if (Date.now() - this.#wakeNoteAt > 5000) {
+                this.#wakeNoteAt = Date.now();
+                this.#log(
+                    `native wake (${this.#kws ? `sherpa ${this.#kws.provider}` : "energy"}): `
+                    + `level ${rms.toFixed(4)} floor ${this.#noiseFloor.toFixed(4)} threshold ${threshold.toFixed(4)}`,
+                );
+            }
+
             if (this.#kws) {
                 this.#kws.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
 
@@ -600,21 +791,11 @@ export class NativeTransport {
             // Energy wake with an adaptive noise floor, so a quiet mic still
             // wakes: a fixed threshold either misses soft speech or fires at
             // room tone.
-            const threshold = Math.max(0.006, this.#noiseFloor * this.#wakeMultiplier);
-
             if (rms < threshold) {
                 this.#noiseFloor = Math.max(0.002, this.#noiseFloor * 0.95 + rms * 0.05);
                 this.#voicedMs = 0;
             } else {
                 this.#voicedMs += 20;
-            }
-
-            if (Date.now() - this.#wakeNoteAt > 5000) {
-                this.#wakeNoteAt = Date.now();
-                this.#log(
-                    `native wake: energy floor ${this.#noiseFloor.toFixed(4)} `
-                    + `threshold ${threshold.toFixed(4)} level ${rms.toFixed(4)}`,
-                );
             }
 
             if (this.#voicedMs >= 120 && Date.now() > this.#wakeCooldownUntil) {

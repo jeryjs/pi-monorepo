@@ -179,6 +179,16 @@ const SUBCOMMANDS: SubcommandSpec[] = [
         ],
     },
     {
+        name: "mic",
+        aliases: ["mic-test"],
+        description: "record the input for 3s and report whether the mic delivers signal",
+        weight: 63,
+        values: () => [
+            { token: "2", label: "2s", description: "shorter window" },
+            { token: "5", label: "5s", description: "longer window" },
+        ],
+    },
+    {
         name: "compute",
         description: "auto | cpu | webgpu | webnn",
         weight: 50,

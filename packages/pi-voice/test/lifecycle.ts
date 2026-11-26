@@ -430,6 +430,39 @@ assert.equal(eager.liveState, "sleeping", "eager start holds an open session wit
 await eager.stop();
 ok("connectOnWake=false keeps the eager behaviour (socket open at startup)");
 
+// A config change while asleep must not open the socket: `updateConfig` used to
+// call #scheduleMaxSession()/reconnectNow() unconditionally, which is exactly how a
+// "start asleep" session turned up `live` without anyone saying the wake phrase.
+const staysAsleep = new VoiceController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: true, connectOnWake: true }),
+);
+const beforeConfig = live.connections.length;
+
+await staysAsleep.start();
+staysAsleep.updateConfig(makeConfig({ alwaysOn: true, connectOnWake: true, model: "gemini-3.8-live", idleSleepMs: 60_000 }));
+await new Promise((resolve) => setTimeout(resolve, 600));
+
+assert.equal(live.connections.length, beforeConfig, "config change while asleep opened no socket");
+assert.equal(staysAsleep.liveState, "asleep", "still asleep after a config change");
+await staysAsleep.stop();
+ok("a config change while asleep does not connect the session");
+
+// ...while turning the wake word off has to leave something usable.
+const wakeDisabled = new VoiceController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: true, connectOnWake: true }),
+);
+const beforeDisable = live.connections.length;
+
+await wakeDisabled.start();
+wakeDisabled.updateConfig(makeConfig({ alwaysOn: false, connectOnWake: true }));
+await until(() => Boolean(live.connections[beforeDisable]?.setup), "connect after always-on off");
+await wakeDisabled.stop();
+ok("disabling always-on while asleep connects instead of leaving dead air");
+
 // ---------------------------------------------------------------------------
 // 6. tool calls: honest results, real abort
 // ---------------------------------------------------------------------------

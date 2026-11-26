@@ -95,6 +95,11 @@ export class VoiceController implements VoiceControl {
     #wakePending = false;
     #pendingAudio: Uint8Array[] = [];
     #pendingBytes = 0;
+    /** Wake diagnostics for /voice status: how often, from what, and whether it is heard at all. */
+    #wakeCount = 0;
+    #lastWakeAt = 0;
+    #lastWakeSource = "";
+    #lastLevelAt = 0;
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
@@ -213,7 +218,40 @@ export class VoiceController implements VoiceControl {
             this.#voiceFloor = Math.max(0.002, this.#voiceFloor * 0.95 + level * 0.05);
         }
 
+        if (level > 0.0005) {
+            this.#lastLevelAt = Date.now();
+        }
+
         this.#renderStatus();
+    }
+
+    /**
+     * True when the mic has produced nothing but digital silence for a while. The
+     * status bar says so instead of leaving "asleep" looking like a mystery; see
+     * also `/voice mic`.
+     */
+    get micSilent(): boolean {
+        if (this.#levels.length < 5 || !this.#running) {
+            return false;
+        }
+
+        return Date.now() - this.#lastLevelAt > 8000;
+    }
+
+    /** Wake-word counters for /voice status (never fired = the useful fact). */
+    get wakeStats(): { count: number; lastAt: number; source: string } {
+        return { count: this.#wakeCount, lastAt: this.#lastWakeAt, source: this.#lastWakeSource };
+    }
+
+    /** Which wake engine is really running, not just what the config asks for. */
+    get wakeEngineActive(): string {
+        if (!this.#native) {
+            return this.#config.audio === "browser" ? "browser page" : "not running";
+        }
+
+        const provider = this.#native.spotterProvider;
+
+        return provider ? `sherpa (${provider})` : "energy VAD";
     }
 
     refreshStatus(force = true): void {
@@ -540,6 +578,7 @@ export class VoiceController implements VoiceControl {
         this.#pendingAudio = [];
         this.#pendingBytes = 0;
         this.#awaitingReplyUntil = 0;
+        this.#lastLevelAt = 0;
         releaseLock(this.ctx.cwd);
     }
 
@@ -594,14 +633,25 @@ export class VoiceController implements VoiceControl {
         const changed = setupKeys.filter((key) => JSON.stringify(previous[key]) !== JSON.stringify(config[key]));
         let reconnected = false;
 
-        if (this.#running && changed.length > 0) {
+        // Asleep means no socket at all, so nothing to reconnect and nothing to
+        // schedule: connecting here is exactly how a "start asleep" session used to
+        // end up live without anyone saying the wake phrase. The mutated
+        // #setupConfig is picked up by the setup the next connect builds.
+        if (this.#running && !this.#dormant && changed.length > 0) {
             log("controller", `setup changed (${changed.join(", ")}); reconnecting the live session`);
             this.#groundingDegraded = false;
             this.#session?.reconnectNow();
             reconnected = true;
         }
 
-        if (this.#running) {
+        // Turning the wake word off while asleep would leave a session nobody can
+        // wake and no way to talk; be live instead.
+        if (this.#running && this.#dormant && !config.alwaysOn) {
+            log("controller", "always-on disabled while asleep; connecting now");
+            this.wake();
+        }
+
+        if (this.#running && !this.#dormant) {
             this.#scheduleMaxSession();
         }
 
@@ -674,6 +724,8 @@ export class VoiceController implements VoiceControl {
 
     wake(): void {
         this.#lastVoiceAt = Date.now();
+        this.#wakeCount++;
+        this.#lastWakeAt = Date.now();
         const session = this.#session;
 
         if (this.#dormant && session) {
@@ -1126,6 +1178,7 @@ export class VoiceController implements VoiceControl {
             levels: this.#levels,
             alwaysOn: this.#config.alwaysOn,
             error: this.#lastError,
+            silent: this.micSilent,
         }));
     }
 

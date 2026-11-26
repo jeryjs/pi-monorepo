@@ -4,6 +4,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { micVerdict, probeMic } from "./audio/native.ts";
 import { capabilitiesFor, describeModels, liveModelIds } from "./capabilities.ts";
 import { completeVoiceArguments } from "./completions.ts";
 import type { VoiceConfig } from "./config.ts";
@@ -44,11 +45,26 @@ function statusText(runtime: VoiceRuntime): string {
     ];
 
     if (controller?.running) {
-        lines.push(`page: ${controller.url}`);
+        lines.push(controller.url ? `page: ${controller.url}` : "page: none (native transport)");
         lines.push(`pages connected: ${controller.peerCount}`);
     }
 
     lines.push(`wake: ${config.alwaysOn ? "on" : "off (enable with /voice always-on on or the page toggle)"}`);
+
+    if (controller?.running) {
+        const stats = controller.wakeStats;
+
+        lines.push(`wake engine running: ${controller.wakeEngineActive}`);
+        lines.push(
+            stats.count === 0
+                ? "wake hits: 0 — never fired. Run /voice mic to check the input before blaming the phrase."
+                : `wake hits: ${stats.count} · last ${new Date(stats.lastAt).toLocaleTimeString()} from ${stats.source}`,
+        );
+
+        if (controller.micSilent) {
+            lines.push("mic: NO SIGNAL in the last 8s (the device is delivering silence) — /voice mic");
+        }
+    }
 
     if (controller?.lastError) {
         lines.push(`last error: ${controller.lastError}`);
@@ -59,7 +75,7 @@ function statusText(runtime: VoiceRuntime): string {
 
 export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): void {
     pi.registerCommand("voice", {
-        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, compute, key, debug)",
+        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, mic, compute, key, debug)",
         getArgumentCompletions: (prefix: string) => {
             try {
                 return completeVoiceArguments(prefix, {
@@ -142,6 +158,35 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                 case "status":
                     say(ctx, statusText(runtime), "info");
                     return;
+
+                case "mic":
+                case "mic-test": {
+                    // Splits "the wake word never fires" into "the mic is silent"
+                    // versus "the mic is fine, the detector is not firing".
+                    const config = runtime.getConfig();
+                    const running = runtime.controller()?.running ?? false;
+
+                    say(ctx, `recording ${value ? `${value}s` : "3s"} from the input... speak now`, "info");
+
+                    const seconds = Math.min(10, Math.max(1, Number.parseFloat(value) || 3));
+                    const probe = await probeMic(config, seconds);
+                    const verdict = micVerdict(probe);
+
+                    const lines = [
+                        `device: ${probe.device || "(default)"}`,
+                        `captured: ${(probe.samples / 16_000).toFixed(1)}s · peak ${probe.peak.toFixed(4)} · rms ${probe.rms.toFixed(4)}`,
+                        verdict,
+                    ];
+
+                    if (running) {
+                        lines.push("(voice is running and holding the device; a second reader can fail on Windows)");
+                    }
+
+                    const silent = !probe.error && probe.peak < 0.0005;
+
+                    say(ctx, lines.join("\n"), silent || probe.error ? "error" : "info");
+                    return;
+                }
 
                 case "on":
                 case "start": {
@@ -383,8 +428,8 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                         + "  status · diagnose · on · off · restart · url · listen · sleep\n"
                         + "  always-on [on|off] · announce [on|off] · debug [on|off]\n"
                         + "  model <id> · voice-name <name> · autonomy <level>\n"
-                        + "  wake-engine <engine> · sherpa · compute <backend> · key [<key>|clear]\n"
-                        + "  set <json>",
+                        + "  wake-engine <engine> · sherpa · mic [seconds] · compute <backend>\n"
+                        + "  key [<key>|clear] · set <json>",
                         "info",
                     );
                     return;
