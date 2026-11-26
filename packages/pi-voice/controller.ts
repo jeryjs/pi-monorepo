@@ -67,6 +67,12 @@ export class VoiceController implements VoiceControl {
     #wiredBridge: AgentBridge | undefined;
     #lastAnnounce = 0;
     #lastAnnounceText = "";
+    /**
+     * Deadline for a spoken request Pi has not answered yet. When a `pi_ask` lands,
+     * Pi's eventual reply must reach the speaker even with `announce` off — the voice
+     * agent promised "I'll tell you when Pi's back", and silence there looks broken.
+     */
+    #awaitingReplyUntil = 0;
     #lastPersist = 0;
     /** Last moment the mic heard voice, from pushLevel(); drives the idle gate. */
     #lastVoiceAt = 0;
@@ -79,6 +85,16 @@ export class VoiceController implements VoiceControl {
     #lastStatusAt = 0;
     #lastError: string | undefined;
     #startedAt = 0;
+    /**
+     * Started asleep: the mic and the wake spotter run, no Gemini socket exists
+     * yet. `wake()` opens it. This is what keeps `--voice` from holding a Live
+     * session (and its context) open all day.
+     */
+    #dormant = false;
+    /** Wake fired, socket not live yet: hold the first syllables instead of losing them. */
+    #wakePending = false;
+    #pendingAudio: Uint8Array[] = [];
+    #pendingBytes = 0;
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
@@ -159,6 +175,10 @@ export class VoiceController implements VoiceControl {
     }
 
     get liveState(): string {
+        if (this.#dormant) {
+            return "asleep";
+        }
+
         return this.#session?.state ?? "idle";
     }
 
@@ -356,23 +376,24 @@ export class VoiceController implements VoiceControl {
         this.#wireSession(session);
         this.#wireBridge();
 
-        session.connect();
+        // Lazy start: with an always-on wake word, opening the Live socket at boot
+        // means a session that usually nobody talks to — it costs context and
+        // quota for nothing. Keep the local spotter running and connect on wake.
+        const lazy = this.#config.connectOnWake && this.#config.alwaysOn;
+
+        if (lazy) {
+            this.#dormant = true;
+            this.#wakePending = false;
+            log("controller", "starting asleep: no Live session until the wake phrase");
+        } else {
+            session.connect();
+        }
 
         if (wantsNative) {
             const native = new NativeTransport({
                 config: this.#config,
                 cwd: this.ctx.cwd,
-                onMic: (bytes) => {
-                    if (!this.#session) {
-                        return;
-                    }
-
-                    if (!this.#session.streaming) {
-                        this.#session.setStreaming(true);
-                    }
-
-                    this.#session.sendMic(bytes);
-                },
+                onMic: (bytes) => this.#feedMic(bytes),
                 onWake: (source) => {
                     this.wake();
                     this.#broadcast({ t: "wake", source });
@@ -418,13 +439,20 @@ export class VoiceController implements VoiceControl {
         this.#statsTimer = setInterval(() => this.#broadcastStats(), 10_000);
         (this.#idleTimer as { unref?: () => void }).unref?.();
         (this.#statsTimer as { unref?: () => void }).unref?.();
-        this.#scheduleMaxSession();
 
-        persistVoiceState(this.pi, {
-            handle: session.resumptionHandle,
-            model: this.#config.model,
-            voice: this.#config.voice,
-        });
+        if (!this.#dormant) {
+            this.#scheduleMaxSession();
+        }
+
+        // Dormant: there is no handle yet, and writing `undefined` here would look
+        // like a deliberate clear. Leave the persisted handle alone until we connect.
+        if (!this.#dormant) {
+            persistVoiceState(this.pi, {
+                handle: session.resumptionHandle,
+                model: this.#config.model,
+                voice: this.#config.voice,
+            });
+        }
 
         if (this.#server && this.#config.openBrowser) {
             this.#open(this.#server.url);
@@ -507,6 +535,11 @@ export class VoiceController implements VoiceControl {
         }
 
         this.#levels = [];
+        this.#dormant = false;
+        this.#wakePending = false;
+        this.#pendingAudio = [];
+        this.#pendingBytes = 0;
+        this.#awaitingReplyUntil = 0;
         releaseLock(this.ctx.cwd);
     }
 
@@ -545,6 +578,7 @@ export class VoiceController implements VoiceControl {
         const restartKeys: (keyof VoiceConfig)[] = [
             "audio", "host", "port", "nativeInput", "nativeOutput", "ffmpegPath", "ffplayPath",
             "nativeAec", "kwsModelDir", "kwsKeywords", "sherpaProvider", "wakeEngine", "compute",
+            "connectOnWake",
         ];
         const restart = restartKeys.some((key) => previous[key] !== config[key]);
 
@@ -640,9 +674,96 @@ export class VoiceController implements VoiceControl {
 
     wake(): void {
         this.#lastVoiceAt = Date.now();
-        this.#session?.setStreaming(true);
+        const session = this.#session;
+
+        if (this.#dormant && session) {
+            // First thing heard since start: open the socket now, and keep the
+            // user's opening words buffered until setup completes.
+            this.#wakePending = true;
+            log("controller", "wake: opening the Live session");
+            // Streaming first, so `setupComplete` lands on `live` rather than
+            // `sleeping` (the session was created with startSleeping).
+            session.setStreaming(true);
+            session.connect();
+            this.#renderStatus(true);
+            this.#native?.setStreaming(true);
+            this.#broadcast({ t: "wake" });
+
+            return;
+        }
+
+        session?.setStreaming(true);
         this.#native?.setStreaming(true);
         this.#broadcast({ t: "wake" });
+    }
+
+    /**
+     * Mic audio from either transport. While dormant it is dropped unless the wake
+     * phrase has just fired, in which case it is held until the socket is live so
+     * "hey pi, check my messages" is not cut down to its last syllable.
+     */
+    #feedMic(bytes: Uint8Array): void {
+        const session = this.#session;
+
+        if (!session) {
+            return;
+        }
+
+        if (this.#dormant) {
+            if (this.#wakePending) {
+                this.#bufferWakeAudio(bytes);
+            }
+
+            return;
+        }
+
+        if (!session.streaming) {
+            session.setStreaming(true);
+        }
+
+        session.sendMic(bytes);
+    }
+
+    #bufferWakeAudio(bytes: Uint8Array): void {
+        // ~4 s at 16 kHz mono int16 is plenty for a spoken opening sentence and
+        // bounds what a stuck handshake can hold on to.
+        const limit = 16_000 * 2 * 4;
+
+        this.#pendingAudio.push(bytes);
+        this.#pendingBytes += bytes.length;
+
+        while (this.#pendingBytes > limit && this.#pendingAudio.length > 0) {
+            const dropped = this.#pendingAudio.shift();
+            this.#pendingBytes -= dropped?.length ?? 0;
+        }
+    }
+
+    /** Socket is live: stop being dormant and replay what the user already said. */
+    #flushWakeAudio(): void {
+        const session = this.#session;
+        const pending = this.#pendingAudio;
+
+        this.#pendingAudio = [];
+        this.#pendingBytes = 0;
+        this.#dormant = false;
+        this.#wakePending = false;
+
+        if (!session) {
+            return;
+        }
+
+        session.setStreaming(true);
+
+        if (pending.length > 0) {
+            log("controller", `flushing ${pending.length} buffered frame(s) from before setup`);
+        }
+
+        for (const chunk of pending) {
+            session.sendMic(chunk);
+        }
+
+        this.#scheduleMaxSession();
+        this.#renderStatus(true);
     }
 
     setAlwaysOn(value: boolean): void {
@@ -704,6 +825,14 @@ export class VoiceController implements VoiceControl {
                         bridge: this.#bridge,
                         control: this,
                     });
+
+                    const status = (response.response as { status?: unknown }).status;
+
+                    if (call.name === "pi_ask" && (status === "sent" || status === "steering")) {
+                        this.#awaitingReplyUntil = Date.now() + 10 * 60_000;
+                        log("controller", "pi_ask delivered; waiting for Pi's reply to speak");
+                    }
+
                     session.sendToolResult([response]);
                 } catch (error) {
                     warn("tool", `dispatch failed: ${String(error)}`);
@@ -717,7 +846,13 @@ export class VoiceController implements VoiceControl {
         });
 
         session.on("state", (state) => {
-            this.#broadcast({ t: "state", state, detail: `${this.#config.model} · ${state}` });
+            // `sleeping` counts too: the session was built with startSleeping, so a
+            // socket opened while gated reports setup-complete as sleeping.
+            if (this.#dormant && (state === "live" || state === "sleeping")) {
+                this.#flushWakeAudio();
+            }
+
+            this.#broadcast({ t: "state", state: this.liveState, detail: `${this.#config.model} · ${this.liveState}` });
             this.#renderStatus(true);
         });
 
@@ -799,7 +934,16 @@ export class VoiceController implements VoiceControl {
             if (kind === "activity") {
                 const activity = (payload as { activity: { kind: string; text: string } }).activity;
 
-                if (activity.kind !== "settled" || !this.#config.announce || !activity.text) {
+                if (activity.kind !== "settled" || !activity.text) {
+                    return;
+                }
+
+                // A spoken request is owed an answer even with `announce` off: the voice
+                // agent told the user it would report back. `agent_settled` (not the raw
+                // reply event) is used so a mid-turn message is never read out on its own.
+                const owed = Date.now() <= this.#awaitingReplyUntil;
+
+                if (!this.#config.announce && !owed) {
                     return;
                 }
 
@@ -815,6 +959,7 @@ export class VoiceController implements VoiceControl {
 
                 this.#lastAnnounce = now;
                 this.#lastAnnounceText = activity.text;
+                this.#awaitingReplyUntil = 0;
                 this.#session.sendText(agentReplyNotice(activity.text));
             }
         });
@@ -851,7 +996,7 @@ export class VoiceController implements VoiceControl {
     #sendHello(peer: WebSocketPeer): void {
         peer.send(JSON.stringify({ t: "hello", ...this.#clientConfig() }));
         peer.send(JSON.stringify({ t: "config", ...this.#clientConfig() }));
-        peer.send(JSON.stringify({ t: "state", state: this.#session?.state ?? "connecting", detail: this.#config.model }));
+        peer.send(JSON.stringify({ t: "state", state: this.liveState, detail: this.#config.model }));
     }
 
     #onPeerData(peer: WebSocketPeer, data: string | Uint8Array, isBinary: boolean): void {
@@ -862,15 +1007,7 @@ export class VoiceController implements VoiceControl {
                 return;
             }
 
-            if (!this.#session) {
-                return;
-            }
-
-            if (!this.#session.streaming) {
-                this.#session.setStreaming(true);
-            }
-
-            this.#session.sendMic(bytes);
+            this.#feedMic(bytes);
 
             return;
         }
@@ -985,7 +1122,7 @@ export class VoiceController implements VoiceControl {
 
         this.#lastStatusAt = now;
         setVoiceStatus(this.ctx, voiceStatusText({
-            state: this.#session?.state ?? "starting",
+            state: this.liveState,
             levels: this.#levels,
             alwaysOn: this.#config.alwaysOn,
             error: this.#lastError,

@@ -3,9 +3,12 @@
  *
  * Optional and lazy: if the module or model files are missing we fall back to
  * energy VAD, and `sherpa.ts` knows how to install both (from `/voice` → Wake
- * engine, or `/voice sherpa`). `provider` selects the inference backend
- * ("directml" can reach the GPU/NPU through DirectML on Windows); each is tried
- * in order and the first that initialises wins.
+ * engine, or `/voice sherpa`). `provider` selects the inference backend; it is
+ * CPU by default because the published `sherpa-onnx-node` prebuilt has no
+ * DirectML/CUDA provider DLL in it — asking for one only produces
+ * "DirectML is for Windows only. Fallback to cpu!" from inside sherpa and a spotter
+ * that claims a provider it is not using. Set `sherpaProvider` explicitly to
+ * override (for a self-built sherpa runtime), which is then tried before CPU.
  *
  * The wake phrase must be given to sherpa as BPE tokens, not raw text, so it is
  * tokenised against the model's own `tokens.txt` (see `sherpa.tokenizeKeyword`).
@@ -109,9 +112,13 @@ export class NativeKeywordSpotter {
         const joiner = pickModelFile(modelDir, "joiner");
         const tokens = join(modelDir, "tokens.txt");
 
+        // "auto" means CPU: the prebuilt sherpa-onnx-node carries onnxruntime.dll
+        // and onnxruntime_providers_shared.dll but no DirectML.dll / CUDA provider,
+        // so every accelerator name just makes sherpa print a fallback warning per
+        // onnx session (three of them: encoder, decoder, joiner) and then use CPU.
         const providers = options.provider && options.provider !== "auto"
             ? [options.provider, "cpu"]
-            : ["directml", "cpu"];
+            : ["cpu"];
         const threshold = keywordThreshold(options.sensitivity);
 
         for (const provider of providers) {

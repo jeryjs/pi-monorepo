@@ -44,7 +44,7 @@ const VERSION: string = (() => {
 })();
 
 const BOOLEAN_IDS = new Set<string>([
-    "enabled", "autoStart", "alwaysOn", "aec", "noiseSuppression", "autoGain",
+    "enabled", "autoStart", "alwaysOn", "connectOnWake", "aec", "noiseSuppression", "autoGain",
     "searchGrounding", "inputTranscription", "outputTranscription", "proactiveAudio",
     "proactiveVideo", "affectiveDialog", "bargeIn", "openBrowser", "voiceApprovals",
     "announce", "debug",
@@ -450,6 +450,7 @@ function buildItems(
         boolItem("enabled", "Voice enabled", "Load and allow the voice session", config.enabled),
         boolItem("autoStart", "Start automatically", "Start voice when a Pi session begins", config.autoStart),
         boolItem("alwaysOn", "Always-on wake word", "Listen for the wake phrase without pressing to talk", config.alwaysOn),
+        boolItem("connectOnWake", "Start asleep", "Open the Gemini session on the wake phrase instead of at startup", config.connectOnWake),
 
         enumItem("audio", "Audio transport", "native = headless ffmpeg (no tab); browser = companion page with AEC", config.audio, ["native", "browser", "both"]),
         enumItem("model", "Live model", "Gemini Live model (restart to apply)", config.model, liveModelIds()),
@@ -465,7 +466,7 @@ function buildItems(
         textItem("wakeModelUrl", "Wake model URL", "Browser: module exporting createKeywordSpotter", config.wakeModelUrl, theme, tui),
         textItem("kwsModelDir", "Sherpa model dir", "Empty = managed install; set to use your own KWS model directory", config.kwsModelDir, theme, tui),
         textItem("kwsKeywords", "Sherpa keywords", "Phrase(s) to spot, e.g. 'HEY PI :2.0'; ';' separates several", config.kwsKeywords, theme, tui),
-        enumItem("sherpaProvider", "Sherpa provider", "Inference backend; directml can use the GPU/NPU", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
+        enumItem("sherpaProvider", "Sherpa provider", "Inference backend; the prebuilt runtime is CPU-only (auto = cpu)", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
 
         textItem("language", "Language", "BCP-47 code, empty = automatic", config.language, theme, tui),
         textItem("temperature", "Temperature", "0-2", String(config.temperature), theme, tui),

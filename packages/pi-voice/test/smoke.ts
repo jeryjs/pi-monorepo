@@ -216,6 +216,13 @@ test("patch applies and re-normalizes", () => {
     assert.equal(config.autonomy, "steer");
 });
 
+test("voice starts asleep by default (no Live session until the wake phrase)", () => {
+    assert.equal(DEFAULT_VOICE_CONFIG.connectOnWake, true);
+    // A garbage value falls back to the default instead of disabling the guard.
+    assert.equal(normalizeVoiceConfig({ connectOnWake: "yes" }).connectOnWake, true);
+    assert.equal(normalizeVoiceConfig({ connectOnWake: false }).connectOnWake, false);
+});
+
 console.log("prompt");
 test("native is the default transport; browser is opt-in", () => {
     assert.equal(DEFAULT_VOICE_CONFIG.audio, "native");
@@ -233,6 +240,29 @@ test("persona encodes bridge role and autonomy", () => {
     assert.ok(text.includes("C:/proj"));
     assert.ok(text.includes("voice_approve"));
     assert.ok(text.includes("voice_sleep"));
+});
+
+test("the voice model is told never to refuse on Pi's behalf", () => {
+    const text = buildSystemInstruction({
+        config: DEFAULT_VOICE_CONFIG,
+        capabilities: caps,
+        cwd: "C:/proj",
+        alwaysOn: true,
+    });
+    // The failure this guards: "hey pi, check my whatsapp" -> "I can't do that".
+    assert.ok(/never refuse on Pi's behalf/i.test(text), "explicit no-refusal rule");
+    assert.ok(/whatsapp/i.test(text), "names the user's real CLI tools as Pi's job");
+    assert.ok(/is a pi_ask/i.test(text), "routes everything outside the conversation to pi_ask");
+    assert.ok(/must not say[\s\S]{0,80}I can't/i.test(text), "lists the forbidden refusal sentences");
+});
+
+test("pi_ask is described as a general agent hand-off, not a coding tool", () => {
+    const declaration = functionDeclarations(caps).find((entry) => entry.name === "pi_ask");
+    const description = String(declaration?.description ?? "");
+
+    assert.ok(description.length > 0);
+    assert.ok(/not only a coding tool|general agent/i.test(description), "no longer limited to code");
+    assert.ok(/whatsapp|mail/i.test(description), "gives the model real examples out of the box");
 });
 
 console.log("util");

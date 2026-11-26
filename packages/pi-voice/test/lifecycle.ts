@@ -389,6 +389,48 @@ ok("silence after speech still reaches the idle gate");
 await talker.stop();
 
 // ---------------------------------------------------------------------------
+// 5c. start asleep: no Live socket until the wake phrase
+// ---------------------------------------------------------------------------
+
+const sleeper = new VoiceController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: true, connectOnWake: true }),
+);
+const socketsBefore = live.connections.length;
+
+await sleeper.start();
+assert.equal(sleeper.running, true, "asleep controller is running");
+assert.equal(sleeper.liveState, "asleep", "starts in the asleep state");
+
+// Long enough for a socket to appear if it were going to.
+await new Promise((resolve) => setTimeout(resolve, 400));
+assert.equal(live.connections.length, socketsBefore, "no Live socket is opened while asleep");
+assert.equal(sleeper.liveState, "asleep", "still asleep after the window");
+ok("connectOnWake starts asleep: no Gemini session exists until the wake phrase");
+
+sleeper.wake();
+await until(() => Boolean(live.connections[socketsBefore]?.setup), "socket after wake");
+await until(() => sleeper.liveState === "live", "live after wake");
+ok("the wake phrase opens the Live session and it goes live");
+
+await sleeper.stop();
+
+const eager = new VoiceController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: true, connectOnWake: false }),
+);
+const eagerBefore = live.connections.length;
+
+await eager.start();
+await until(() => Boolean(live.connections[eagerBefore]?.setup), "eager setup");
+// Connected but gated (startSleeping): a socket exists, the mic does not feed it.
+assert.equal(eager.liveState, "sleeping", "eager start holds an open session without a wake");
+await eager.stop();
+ok("connectOnWake=false keeps the eager behaviour (socket open at startup)");
+
+// ---------------------------------------------------------------------------
 // 6. tool calls: honest results, real abort
 // ---------------------------------------------------------------------------
 

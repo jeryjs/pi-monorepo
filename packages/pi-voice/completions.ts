@@ -47,6 +47,8 @@ const ON_OFF = (): Candidate[] => [
 
 const SET_SNIPPETS: { json: string; description: string }[] = [
     { json: '{"alwaysOn":true}', description: "always-on wake word" },
+    { json: '{"connectOnWake":true}', description: "start asleep; connect when the wake phrase fires" },
+    { json: '{"connectOnWake":false}', description: "connect at startup (keeps the session warm)" },
     { json: '{"alwaysOn":false}', description: "push-to-talk only" },
     { json: '{"announce":false}', description: "stop speaking Pi's completion notices" },
     { json: '{"proactiveAudio":true}', description: "let the model ignore speech not aimed at it" },

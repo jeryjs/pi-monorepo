@@ -386,6 +386,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     `model: ${config.model}`,
                     `pages: ${controller?.peerCount ?? 0}`,
                     `always-on: ${config.alwaysOn}`,
+                    `start: ${config.alwaysOn && config.connectOnWake ? "asleep until the wake phrase" : "connected"}`,
                 ];
 
                 return { content: [{ type: "text", text: lines.join("\n") }] };

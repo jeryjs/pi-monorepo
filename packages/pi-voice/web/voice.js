@@ -187,7 +187,7 @@ function onControl(message) {
         case "state": {
             const kind = message.state === "live"
                 ? "live"
-                : message.state === "sleeping"
+                : message.state === "sleeping" || message.state === "asleep"
                     ? "sleeping"
                     : message.state === "error" || message.state === "closed"
                         ? "error"
@@ -195,7 +195,7 @@ function onControl(message) {
 
             setDot(kind, message.detail ?? message.state);
 
-            if (message.state === "sleeping") {
+            if (message.state === "sleeping" || message.state === "asleep") {
                 state.awake = false;
                 setChip("wake: asleep");
             }

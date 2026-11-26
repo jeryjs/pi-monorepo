@@ -32,13 +32,23 @@ export interface VoiceConfig {
     // ---- wake word ----
     /** Always-on listener. Default OFF. */
     alwaysOn: boolean;
+    /**
+     * Start asleep: run the local wake spotter but open no Gemini socket until the
+     * wake phrase fires. Keeps an idle Pi from holding a Live session (and its
+     * context) open for hours. Only meaningful together with `alwaysOn`.
+     */
+    connectOnWake: boolean;
     wakePhrases: string[];
     wakeEngine: WakeEngine;
     /** sherpa-onnx-node KWS model directory for native wake. Empty = managed install. */
     kwsModelDir: string;
     /** Keywords for the KWS model, e.g. "HEY PI :2.0" (';' separates keywords). */
     kwsKeywords: string;
-    /** sherpa provider: auto (DirectML then CPU), cpu, directml, cuda, nnapi, xnnpack, trt. */
+    /**
+     * sherpa provider: cpu (default), or an accelerator to try before falling back to
+     * cpu — directml, cuda, nnapi, xnnpack, trt. The published prebuilt runtime ships
+     * no accelerator provider, so anything but cpu only works with a self-built sherpa.
+     */
     sherpaProvider: string;
     /** sherpa-onnx keyword-spotter asset base URL (lazy-loaded, cached). */
     wakeModelUrl: string;
@@ -121,6 +131,9 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     temperature: 1,
 
     alwaysOn: false,
+    // Start asleep by default: a voice session that was never spoken to costs
+    // nothing and touches no context.
+    connectOnWake: true,
     wakePhrases: ["hey pi", "hi pi", "ok pi"],
     wakeEngine: "auto",
     kwsModelDir: "",
@@ -234,6 +247,7 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     persona: str("persona"),
     temperature: num("temperature", 0, 2),
     alwaysOn: bool("alwaysOn"),
+    connectOnWake: bool("connectOnWake"),
     wakePhrases: stringList("wakePhrases"),
     wakeEngine: oneOf("wakeEngine", ["auto", "sherpa", "webspeech", "energy"] as const),
     kwsModelDir: str("kwsModelDir"),

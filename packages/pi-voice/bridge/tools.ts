@@ -39,9 +39,10 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
     const ask: FunctionDeclaration = {
         name: "pi_ask",
         description:
-            "Send a request, question or instruction to the main Pi coding agent. Use this for anything "
-            + "that needs Pi's own tools, files, terminal or models. You keep talking while Pi works; you "
-            + "will be told when Pi replies.",
+            "Hand a request to the main Pi agent — it is a general agent, not only a coding tool: files, "
+            + "shell, the web, and the user's own CLI tools (mail, WhatsApp, GitHub, calendars). Use it for "
+            + "anything you cannot do yourself, which is everything except talking. Pass the user's request "
+            + "whole, in their words. You keep talking while Pi works; you will be told when Pi replies.",
         parameters: obj(
             {
                 message: { type: "string", description: "What Pi should do, phrased as the user would phrase it." },

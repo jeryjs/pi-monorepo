@@ -53,9 +53,11 @@ Pi is hearing you.
 pi --voice
 ```
 
-Registers `--voice`: starts enabled and turns on always-on wake listening. With
-the default native transport there is no page; with `audio: "browser"` it opens
-the page and one click is required before audio starts.
+Registers `--voice`: starts enabled, turns on always-on wake listening, and
+**starts asleep** — the wake spotter runs locally and no Gemini session exists
+until you say the phrase (see `connectOnWake` below). With the default native
+transport there is no page; with `audio: "browser"` it opens the page and one
+click is required before audio starts.
 
 ### Key
 
@@ -106,9 +108,21 @@ the sherpa WASM module or Web Speech. The status bar carries a live waveform:
 ```
 voice live ▁▂▄▆▄▂ ·wake     # hearing you, always-on
 voice live ▁▁▁▁              # live, wake word off
-voice sleeping ▁▂▁          # gated, still hearing for the wake phrase
-voice error: quota…         # stopped; /voice diagnose
+voice asleep ·wake           # no Gemini session yet; only the local spotter runs
+voice sleeping ▁▂▁          # gated after idle, still hearing for the wake phrase
+voice error: quota...         # stopped; /voice diagnose
 ```
+
+### Starting asleep (`connectOnWake`)
+
+`connectOnWake` is **on by default**. With an always-on wake word, `/voice on`
+and `pi --voice` start in `asleep`: the mic and the wake spotter run, but no
+Gemini socket is opened, no context is created and no quota is spent until the
+wake phrase fires. The first thing you say after the phrase is buffered across
+the handshake (~4 s), so "hey pi, check my messages" arrives whole instead of
+being cut to the last syllable. Set `connectOnWake: false` to keep an eagerly
+connected session instead — that warms the connection at the cost of a session
+nobody is talking to.
 
 Engines (`wakeEngine`):
 
@@ -165,6 +179,22 @@ The value `auto` prefers WebNN (Intel AI Boost NPU) then WebGPU. It does not
 select the audio transport — that is `audio`. The page shows the chosen backend.
 
 ## Troubleshooting
+
+**The status bar says `voice asleep` and nothing is connected** — that is
+`connectOnWake` working: the wake spotter is running, no Gemini session exists
+yet. Say the phrase. If you want a warm connection anyway, set
+`connectOnWake: false`.
+
+**`DirectML is for Windows only. Fallback to cpu!` (three times) in the log** —
+harmless, and now not requested by default. The published `sherpa-onnx-node`
+package ships `onnxruntime.dll` and `onnxruntime_providers_shared.dll` but no
+`DirectML.dll`, so any accelerator name makes sherpa print that line once per
+onnx session (encoder, decoder, joiner) and use the CPU anyway. `sherpaProvider`
+defaults to `cpu`; set an accelerator only with a self-built sherpa runtime.
+
+**Every native log line appears twice** — fixed: the transport logged through its
+own `log()` *and* the controller's `onLog`, which both wrote the same prefixed
+line.
 
 **`socket closed 1011 … exceeded your current quota`** — the key is fine; the
 *Live endpoint* refused the session. The extension now treats quota/billing as
@@ -308,6 +338,23 @@ Function declarations are filtered per model, so a sync-only model never gets
 | `voice_approve` | answer a pending approval |
 | `voice_note` | save a note into the session |
 
+### Everything is Pi's job (no refusals)
+
+The voice model has no tools of its own — no files, no shell, no network, no
+accounts. That is easy for a voice model to misread as "I can't do that", and an
+early version did exactly that: *“hey pi, check my whatsapp, I should have a PDF
+from amma”* got "I'm not able to check your messages" instead of being handed to
+Pi, which can (via `wacli` and a shell). The instruction now says, in as many
+words, that Pi is a general agent (files, shell, web, and the user's own CLI
+tools: mail, WhatsApp, GitHub, calendars), that Pi is the only one who knows what
+it can do, and that refusing on Pi's behalf is forbidden — the worst case of a
+wrong hand-off is Pi answering "can't", while a refusal costs the whole task.
+
+The promised follow-up is wired too: a delivered `pi_ask` marks the turn as
+*owed a reply*, and Pi's `agent_settled` answer is spoken back **even with
+`announce` off**. Without that, the model would say "I'll tell you when Pi's
+back" and then never speak again.
+
 The Pi side also gets a `voice` tool:
 
 ```ts
@@ -356,6 +403,8 @@ Setup details, like the resumption handle and the workspace lock, live in
   frames — the mic upstream is gated, capture process included. No
   `audioStreamEnd`/`activityStart` is sent — those are only valid with manual VAD
   and are rejected under automatic VAD. The session (and its context) stays alive.
+- **Start asleep**: with `connectOnWake` (default) there is no session at all
+  until the wake phrase, so an idle day costs nothing and holds no context.
 - **No transcript seeding**: the model pulls context via `pi_status` /
   `pi_recent`, which is cheaper than streaming Pi's history.
 - **Low latency**: raw PCM passthrough (no re-encode), 20 ms frames, VAD tuned
@@ -409,7 +458,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.4.3** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.5.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -428,7 +477,7 @@ test/                     smoke + endpoint + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (56) + endpoint (19) + lifecycle (19) + sherpa (13)
+npm test   # smoke (59) + endpoint (19) + lifecycle (22) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
@@ -444,8 +493,8 @@ crash probes (malformed escape, invalid `Host`, bad upgrade), an oversized-frame
 `test/lifecycle.ts` drives the real `VoiceController` against a fake Gemini Live
 endpoint: five start/stop cycles, double start, stop during start, restart
 resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
-awake), honest `pi_ask`/`pi_stop` results, cross-process locking and stale-lock
-takeover.
+awake), **start-asleep (`connectOnWake`: no socket until wake, then live)**, honest
+`pi_ask`/`pi_stop` results, cross-process locking and stale-lock takeover.
 
 `test/sherpa.ts` covers the wake-word installer offline: BPE keyword
 spotting/tokenisation (including the uncoverable-phrase error and the digest-named

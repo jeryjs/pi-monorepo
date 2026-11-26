@@ -33,6 +33,9 @@ function statusText(runtime: VoiceRuntime): string {
         `key: ${config.apiKey ? "config" : controller?.keySource ?? "not resolved"}`,
         `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine} · compute ${config.compute}`,
         `wake: ${sherpaStatus(config.kwsModelDir).detail}`,
+        `start: ${config.alwaysOn && config.connectOnWake
+            ? "asleep — connects on the wake phrase (connectOnWake)"
+            : "connects at startup (connectOnWake off)"}`,
         `audio: ${config.audio}`,
         `autonomy: ${config.autonomy}${config.voiceApprovals ? " (voice approvals)" : ""}`,
         `tools: ${capabilities.asyncTools ? "async" : "sync"} function calling · search ${config.searchGrounding ? "on" : "off"}`,

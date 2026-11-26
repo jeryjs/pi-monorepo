@@ -32,8 +32,8 @@ export interface VoiceStatusInput {
 }
 
 export function voiceStatusText(input: VoiceStatusInput): string {
-    if (input.state === "live" || input.state === "sleeping") {
-        const bar = levelBar(input.levels.slice(-10));
+    if (input.state === "live" || input.state === "sleeping" || input.state === "asleep") {
+        const bar = input.state === "asleep" ? "" : levelBar(input.levels.slice(-10));
         const wake = input.alwaysOn ? " ·wake" : "";
 
         return `voice ${input.state}${bar ? " " + bar : ""}${wake}`;

@@ -5,6 +5,54 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-12-01
+
+Starts asleep, and stops refusing on Pi's behalf.
+
+### Added
+
+- **`connectOnWake` (default on): start asleep.** With an always-on wake word,
+  `/voice on` and `pi --voice` used to open the Gemini Live session immediately,
+  so a Pi left running all day held a session (and its context) open for a
+  conversation that mostly never happened. Now the mic and the local wake spotter
+  run, but **no socket, no session, no context** exists until the wake phrase
+  fires; the status bar reads `voice asleep ·wake`. Whatever you say right after
+  the phrase is buffered across the handshake (~4 s, bounded) and replayed, so
+  "hey pi, check my messages" arrives whole instead of losing its first syllables.
+  `connectOnWake: false` restores the eager behaviour.
+- `Start asleep` toggle in `/voice`, plus `/voice set {"connectOnWake":false}`.
+
+### Fixed
+
+- **The voice agent refused requests it should have handed to Pi.** Asked to
+  check WhatsApp for a PDF, it answered "I can't do that" — repeatedly, however it
+  was phrased. The persona described Pi as a *coding* agent, which let the model
+  conclude the request was out of scope, and it had no rule against speaking for
+  Pi's limits. The instruction now states that Pi is a general agent (files,
+  shell, web, and the user's CLI tools: mail, WhatsApp, GitHub, calendars), that
+  only Pi knows what Pi can do, and that refusing on Pi's behalf is forbidden —
+  with the reasoning, because a wrong hand-off costs one sentence while a refusal
+  costs the whole task. `pi_ask`'s own description was widened the same way.
+- **Promised follow-ups were never delivered when `announce` was off.** After a
+  delivered `pi_ask` the model says "on it, I'll tell you when Pi's back" — but
+  Pi's answer was only spoken through the `announce` path, so with announcements
+  disabled the user was promised an update that never came. A delivered request
+  now marks the turn as owed a reply, and Pi's settled answer is spoken back
+  regardless of `announce` (once, deduped against the announce path).
+- **Every native log line was printed twice.** The transport logged via its own
+  `log()` and again through the controller's `onLog`; the sinks are now singular.
+- **The sherpa spotter demanded DirectML and could never get it.** The published
+  prebuilt has no accelerator provider DLL, so `sherpaProvider: "auto"` made
+  sherpa print `DirectML is for Windows only. Fallback to cpu!` for each onnx
+  session and then silently use the CPU, while the log claimed the spotter was
+  running on DirectML. `auto` is now CPU, and an explicit provider is still tried
+  first for self-built runtimes.
+
+### Notes
+
+- `connectOnWake` only applies together with `alwaysOn`: without a wake trigger
+  there is nothing to wake the session up.
+
 ## [0.4.3] - 2026-12-01
 
 The native phrase wake word is now installable from inside Pi, and actually works

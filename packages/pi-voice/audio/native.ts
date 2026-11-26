@@ -718,12 +718,13 @@ export class NativeTransport {
     }
 
     #log(message: string): void {
-        log("native", message);
+        // One place only: the controller's onLog writes the prefixed debug line.
+        // Logging here *and* there printed every native line twice.
         this.options.onLog?.(message);
     }
 
     #error(message: string): void {
-        warn("native", message);
+        // Same as #log: onError (controller `warn`) is the only sink.
         this.options.onError?.(message);
     }
 }
