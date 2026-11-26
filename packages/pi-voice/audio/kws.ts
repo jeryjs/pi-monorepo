@@ -1,23 +1,38 @@
 /**
  * Offline keyword spotting for the native transport, via `sherpa-onnx-node`.
  *
- * Optional and lazy: if the module or model files are missing, the caller falls
- * back to energy VAD. `provider` selects the inference backend
+ * Optional and lazy: if the module or model files are missing we fall back to
+ * energy VAD, and `sherpa.ts` knows how to install both (from `/voice` → Wake
+ * engine, or `/voice sherpa`). `provider` selects the inference backend
  * ("directml" can reach the GPU/NPU through DirectML on Windows); each is tried
  * in order and the first that initialises wins.
+ *
+ * The wake phrase must be given to sherpa as BPE tokens, not raw text, so it is
+ * tokenised against the model's own `tokens.txt` (see `sherpa.tokenizeKeyword`).
  */
 
-import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+    DEFAULT_KEYWORD_SCORE,
+    loadSherpaModule,
+    modelStatus,
+    pickModelFile,
+    writeKeywordsFile,
+} from "../sherpa.ts";
 
 export interface NativeKwsOptions {
     modelDir: string;
     keywords: string;
     provider?: string;
+    /** 0..1; higher = easier to trigger (maps to the spotter's threshold). */
+    sensitivity?: number;
     onWake: (keyword: string) => void;
     onLog?: (message: string) => void;
+}
+
+interface KwsStream {
+    acceptWaveform: (input: { sampleRate: number; samples: Float32Array }) => void;
 }
 
 interface SherpaModule {
@@ -29,34 +44,14 @@ interface SherpaModule {
     };
 }
 
-interface KwsStream {
-    acceptWaveform: (input: { sampleRate: number; samples: Float32Array }) => void;
-}
+/**
+ * Verified against the gigaspeech model: at 0.5 sensitivity the threshold is
+ * 0.25, which detected the model's own test phrases reliably.
+ */
+export function keywordThreshold(sensitivity: number | undefined): number {
+    const value = Number.isFinite(sensitivity) ? (sensitivity as number) : 0.5;
 
-function pickFile(dir: string, prefix: string): string | undefined {
-    try {
-        const match = readdirSync(dir).find((name) => name.startsWith(prefix) && name.endsWith(".onnx"));
-
-        return match ? join(dir, match) : undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-async function loadSherpa(cwd: string): Promise<SherpaModule | undefined> {
-    try {
-        return (await import("sherpa-onnx-node")) as SherpaModule;
-    } catch {
-        // fall through to a project-local resolution
-    }
-
-    try {
-        const require = createRequire(join(cwd, "package.json"));
-
-        return require("sherpa-onnx-node") as SherpaModule;
-    } catch {
-        return undefined;
-    }
+    return Math.min(0.6, Math.max(0.05, 0.45 - value * 0.4));
 }
 
 export class NativeKeywordSpotter {
@@ -74,72 +69,54 @@ export class NativeKeywordSpotter {
         this.provider = provider;
     }
 
-    static async create(options: NativeKwsOptions, cwd = process.cwd()): Promise<NativeKeywordSpotter | undefined> {
+    static async create(options: NativeKwsOptions, _cwd = process.cwd()): Promise<NativeKeywordSpotter | undefined> {
         const { modelDir } = options;
 
         if (!modelDir || !existsSync(modelDir)) {
-            options.onLog?.("sherpa: no kwsModelDir configured");
+            options.onLog?.("sherpa: no wake model directory (run /voice sherpa to install one)");
 
             return undefined;
         }
 
-        const encoder = pickFile(modelDir, "encoder");
-        const decoder = pickFile(modelDir, "decoder");
-        const joiner = pickFile(modelDir, "joiner");
-        const tokens = existsSync(join(modelDir, "tokens.txt")) ? join(modelDir, "tokens.txt") : undefined;
+        const status = modelStatus(modelDir);
 
-        if (!encoder || !decoder || !joiner || !tokens) {
-            options.onLog?.(`sherpa: kws model files incomplete in ${modelDir}`);
+        if (!status.ok) {
+            options.onLog?.(`sherpa: wake model incomplete in ${modelDir}: missing ${status.missing.join(", ")}`);
 
             return undefined;
         }
 
-        // sherpa reads keywords from a file. Name it after the keyword set so
-        // editing kwsKeywords actually changes the wake phrase: reusing a fixed
-        // filename meant the first run's file won every later run.
-        const keywords = options.keywords.trim() || "HEY PI :2.0";
-        const legacy = join(modelDir, "keywords.txt");
-        const digest = createHash("sha1").update(keywords).digest("hex").slice(0, 10);
-        const generated = join(modelDir, `pi-voice-keywords-${digest}.txt`);
-        let keywordsFile = generated;
+        // Tokenised keywords file, named after the phrase set so editing the wake
+        // phrase takes effect (a fixed filename meant the first file always won).
+        const keywords = writeKeywordsFile(modelDir, options.keywords);
 
-        if (!existsSync(generated)) {
-            let legacyMatches = false;
-
-            try {
-                legacyMatches = existsSync(legacy) && readFileSync(legacy, "utf8").trim() === keywords;
-            } catch {
-                legacyMatches = false;
-            }
-
-            if (legacyMatches) {
-                keywordsFile = legacy;
-            } else {
-                try {
-                    writeFileSync(generated, `${keywords}\n`, "utf8");
-                } catch {
-                    options.onLog?.("sherpa: cannot write keywords file");
-
-                    return undefined;
-                }
-            }
-        }
-
-        const sherpa = await loadSherpa(cwd);
-
-        if (!sherpa?.KeywordSpotter) {
-            options.onLog?.("sherpa: sherpa-onnx-node is not installed (npm i sherpa-onnx-node)");
+        if (!keywords.ok) {
+            options.onLog?.(`sherpa: ${keywords.reason}`);
 
             return undefined;
         }
+
+        const patched = loadSherpaModule() as SherpaModule | undefined;
+
+        if (!patched?.KeywordSpotter) {
+            options.onLog?.("sherpa: sherpa-onnx-node is not installed (run /voice sherpa to install it)");
+
+            return undefined;
+        }
+
+        const encoder = pickModelFile(modelDir, "encoder");
+        const decoder = pickModelFile(modelDir, "decoder");
+        const joiner = pickModelFile(modelDir, "joiner");
+        const tokens = join(modelDir, "tokens.txt");
 
         const providers = options.provider && options.provider !== "auto"
             ? [options.provider, "cpu"]
             : ["directml", "cpu"];
+        const threshold = keywordThreshold(options.sensitivity);
 
         for (const provider of providers) {
             try {
-                const spotter = new sherpa.KeywordSpotter({
+                const spotter = new patched.KeywordSpotter({
                     featConfig: { sampleRate: 16_000, featureDim: 80 },
                     modelConfig: {
                         transducer: { encoder, decoder, joiner },
@@ -148,11 +125,17 @@ export class NativeKeywordSpotter {
                         provider,
                         debug: 0,
                     },
-                    keywordsFile,
+                    keywordsFile: keywords.path,
+                    keywordsScore: DEFAULT_KEYWORD_SCORE,
+                    keywordsThreshold: threshold,
+                    numTrailingBlanks: 1,
                 });
                 const stream = spotter.createStream();
 
-                options.onLog?.(`sherpa: keyword spotter ready (${provider})`);
+                options.onLog?.(
+                    `sherpa: keyword spotter ready (${provider}, threshold ${threshold.toFixed(2)}, `
+                    + `${keywords.lines.length} keyword(s))`,
+                );
 
                 return new NativeKeywordSpotter(spotter, stream, provider);
             } catch (error) {

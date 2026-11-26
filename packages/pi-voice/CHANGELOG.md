@@ -5,6 +5,54 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-12-01
+
+The native phrase wake word is now installable from inside Pi, and actually works
+once installed.
+
+### Added
+
+- **Guided wake-word install.** Picking `sherpa` as the wake engine (`/voice` →
+  Wake engine, or `/voice sherpa`) now prompts to install what is missing:
+  `sherpa-onnx-node` (prebuilt, ~23 MB) followed by the KWS model (~17 MB). Both
+  land in `~/.pi/agent` (`pi-voice-deps/`, `pi-voice-models/`); your project is not
+  touched, and nothing is installed without an explicit yes. Progress streams into
+  the settings screen, and a successful install offers to restart voice.
+- `/voice sherpa` runs the same flow outside the TUI (`force` re-installs).
+  `status` and `/voice diagnose` now report the wake-word state.
+- The managed model directory is used automatically when `kwsModelDir` is empty,
+  so installing is all that is needed — no config edit.
+
+### Fixed
+
+- **Keywords were handed to sherpa as raw text.** The wake phrase must be a BPE
+  token sequence (`▁HE Y ▁PI`), not `HEY PI`; sherpa rejects unknown tokens, so the
+  default phrase could never match. Phrases are now tokenised against the model's
+  own `tokens.txt` (greedy longest match; verified against the reference keyword
+  set shipped with the gigaspeech model), with a clear error plus the
+  `text2token` fallback when a phrase cannot be spelled.
+- **`wakeEngine` in native mode was ignored unless a model dir was set by hand**,
+  and `webspeech` (a browser-only engine) left native users on energy VAD without
+  saying so. Native now tries sherpa for anything except an explicit `energy`,
+  resolves the managed model dir, and logs exactly what is missing.
+- **`wakeSensitivity` did nothing in native mode.** It now maps to the sherpa
+  `keywordsThreshold` (0.25 at the 0.5 default — the value the spotter was
+  verified with) and to the energy-VAD multiplier.
+- **Quantised model files are preferred.** The old picker took whichever file
+  `readdir` returned first, so it could load the 12 MB fp32 encoder instead of the
+  4 MB int8 one.
+- The `-mobile` KWS model is deliberately not offered: it aborts inside
+  onnxruntime with a `/downsample/Reshape` shape mismatch.
+
+### Notes
+
+- Installing the runtime runs npm with the current node binary rather than
+  `npm.cmd`: spawning a `.cmd` without a shell is refused on Windows, and a shell
+  would break install paths containing spaces.
+- Model extraction uses `cwd` + a relative archive name, because GNU tar reads
+  `C:/...` as a remote host (`Cannot connect to C: resolve failed`). Windows'
+  bsdtar under `System32` is preferred for its built-in bzip2.
+
 ## [0.4.2] - 2026-12-01
 
 Restart, stop/start and sleep/wake hardening. Three of these were silent

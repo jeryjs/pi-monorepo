@@ -161,10 +161,19 @@ const SUBCOMMANDS: SubcommandSpec[] = [
         description: "auto | sherpa | webspeech | energy",
         weight: 65,
         values: () => [
-            { token: "auto", label: "auto", description: "sherpa if configured, else Web Speech, else VAD" },
-            { token: "sherpa", label: "sherpa", description: "offline keyword spotting (lazy module)" },
-            { token: "webspeech", label: "webspeech", description: "Chrome/Edge recognizer (online)" },
-            { token: "energy", label: "energy", description: "local VAD, speech onset only" },
+            { token: "auto", label: "auto", description: "sherpa when installed, else energy VAD" },
+            { token: "sherpa", label: "sherpa", description: "offline phrase spotter (installs on demand)" },
+            { token: "webspeech", label: "webspeech", description: "Chrome/Edge recognizer (browser transport)" },
+            { token: "energy", label: "energy", description: "local VAD, any loud speech wakes" },
+        ],
+    },
+    {
+        name: "sherpa",
+        aliases: ["wake-install"],
+        description: "install the offline phrase wake word (sherpa-onnx-node + model)",
+        weight: 64,
+        values: () => [
+            { token: "force", label: "force", description: "reinstall even when already set up" },
         ],
     },
     {

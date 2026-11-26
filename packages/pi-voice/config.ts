@@ -34,9 +34,9 @@ export interface VoiceConfig {
     alwaysOn: boolean;
     wakePhrases: string[];
     wakeEngine: WakeEngine;
-    /** sherpa-onnx-node KWS model directory for native wake. Empty = energy VAD. */
+    /** sherpa-onnx-node KWS model directory for native wake. Empty = managed install. */
     kwsModelDir: string;
-    /** Keywords for the KWS model, e.g. "HEY PI :2.0". */
+    /** Keywords for the KWS model, e.g. "HEY PI :2.0" (';' separates keywords). */
     kwsKeywords: string;
     /** sherpa provider: auto (DirectML then CPU), cpu, directml, cuda, nnapi, xnnpack, trt. */
     sherpaProvider: string;

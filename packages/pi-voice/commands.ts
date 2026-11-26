@@ -8,6 +8,7 @@ import { capabilitiesFor, describeModels, liveModelIds } from "./capabilities.ts
 import { completeVoiceArguments } from "./completions.ts";
 import type { VoiceConfig } from "./config.ts";
 import type { VoiceRuntime } from "./runtime.ts";
+import { sherpaStatus, setupSherpaWake } from "./sherpa.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
 
 export type { VoiceRuntime } from "./runtime.ts";
@@ -31,6 +32,7 @@ function statusText(runtime: VoiceRuntime): string {
         `voice name: ${config.voice}${config.language ? ` · lang ${config.language}` : ""}`,
         `key: ${config.apiKey ? "config" : controller?.keySource ?? "not resolved"}`,
         `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine} · compute ${config.compute}`,
+        `wake: ${sherpaStatus(config.kwsModelDir).detail}`,
         `audio: ${config.audio}`,
         `autonomy: ${config.autonomy}${config.voiceApprovals ? " (voice approvals)" : ""}`,
         `tools: ${capabilities.asyncTools ? "async" : "sync"} function calling · search ${config.searchGrounding ? "on" : "off"}`,
@@ -54,7 +56,7 @@ function statusText(runtime: VoiceRuntime): string {
 
 export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): void {
     pi.registerCommand("voice", {
-        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, autonomy, wake, compute, key, debug)",
+        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, compute, key, debug)",
         getArgumentCompletions: (prefix: string) => {
             try {
                 return completeVoiceArguments(prefix, {
@@ -254,6 +256,62 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     return;
                 }
 
+                case "sherpa":
+                case "wake-install": {
+                    // Offline phrase wake: install the runtime + model on demand. The
+                    // TUI wake-engine picker runs the same function.
+                    const status = sherpaStatus(runtime.getConfig().kwsModelDir);
+
+                    if (status.ready && value !== "force") {
+                        say(ctx, `wake word already set up: ${status.detail}`, "info");
+                        return;
+                    }
+
+                    const wasRunning = runtime.controller()?.running ?? false;
+
+                    say(ctx, `${status.detail}. Installing what is missing (a few tens of MB)...`, "info");
+
+                    const result = await setupSherpaWake({
+                        modelDir: runtime.getConfig().kwsModelDir,
+                        onLine: (line) => say(ctx, line, "info"),
+                        confirm: async (title, message) => {
+                            try {
+                                return await ctx.ui.confirm(title, message);
+                            } catch {
+                                // No interactive UI available: never install silently.
+                                return false;
+                            }
+                        },
+                    });
+
+                    if (!result.ok) {
+                        say(ctx, `sherpa setup: ${result.detail}`, "warning");
+                        return;
+                    }
+
+                    if (runtime.getConfig().wakeEngine === "energy") {
+                        runtime.patch({ wakeEngine: "sherpa" });
+                    }
+
+                    if (wasRunning) {
+                        try {
+                            await runtime.stop();
+                            await runtime.start();
+                        } catch (error) {
+                            say(ctx, `installed, but restarting voice failed: ${String(error)}`, "warning");
+                            return;
+                        }
+                    }
+
+                    say(
+                        ctx,
+                        `sherpa wake ready: ${result.detail}`
+                            + (wasRunning ? " (voice restarted)" : ". Start voice with /voice on"),
+                        "info",
+                    );
+                    return;
+                }
+
                 case "compute": {
                     const backend = value.toLowerCase();
 
@@ -322,7 +380,7 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                         + "  status · diagnose · on · off · restart · url · listen · sleep\n"
                         + "  always-on [on|off] · announce [on|off] · debug [on|off]\n"
                         + "  model <id> · voice-name <name> · autonomy <level>\n"
-                        + "  wake-engine <engine> · compute <backend> · key [<key>|clear]\n"
+                        + "  wake-engine <engine> · sherpa · compute <backend> · key [<key>|clear]\n"
                         + "  set <json>",
                         "info",
                     );

@@ -13,7 +13,7 @@ import { registerVoiceCommands, type VoiceRuntime } from "./commands.ts";
 import { diagnoseLive } from "./probe.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
 import { getController, removeController, setController } from "./registry.ts";
-import { capabilitiesFor, liveModelIds } from "./capabilities.ts";
+import { liveModelIds } from "./capabilities.ts";
 import { buildSystemInstruction } from "./bridge/prompt.ts";
 import { functionDeclarations } from "./bridge/tools.ts";
 import { createSetupBuilder } from "./live/setup.ts";

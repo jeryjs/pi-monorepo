@@ -20,6 +20,7 @@ import type { VoiceConfig } from "../config.ts";
 import { log, warn, RingBuffer, float32ToPcm16 } from "../util.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "./aec.ts";
 import { NativeKeywordSpotter } from "./kws.ts";
+import { resolvedModelDir, sherpaStatus } from "../sherpa.ts";
 
 export interface NativeTransportEvents {
     /** 16 kHz s16le microphone bytes, already gated. */
@@ -187,6 +188,8 @@ export class NativeTransport {
     #noiseFloor = 0.012;
     #voicedMs = 0;
     #wakeNoteAt = 0;
+    /** Multiplier over the room noise floor used by the energy wake fallback. */
+    #wakeMultiplier = 2.2;
     #playerMinimal = false;
     #playerSpawnedAt = 0;
     #carry = Buffer.alloc(0);
@@ -268,20 +271,34 @@ export class NativeTransport {
             this.#log("native AEC: NLMS (full duplex)");
         }
 
-        const wantsKws = config.wakeEngine === "sherpa"
-            || (config.wakeEngine === "auto" && config.kwsModelDir.trim().length > 0);
+        // The wake model falls back to the managed directory, so installing it
+        // from `/voice` is enough — no config edit needed. `energy` still means
+        // "never use a phrase spotter".
+        const modelDir = resolvedModelDir(config.kwsModelDir);
+        const wantsKws = config.wakeEngine !== "energy";
+
+        // 0..1 sensitivity: at the default 0.5 this is the tuned 2.2x factor.
+        const sensitivity = Number.isFinite(config.wakeSensitivity) ? Math.min(1, Math.max(0, config.wakeSensitivity)) : 0.5;
+        this.#wakeMultiplier = 3.0 - sensitivity * 1.6;
 
         if (wantsKws) {
             this.#kws = await NativeKeywordSpotter.create({
-                modelDir: config.kwsModelDir,
+                modelDir,
                 keywords: config.kwsKeywords,
                 provider: config.sherpaProvider,
+                sensitivity,
                 onWake: () => undefined,
                 onLog: (message) => this.#log(message),
             }, this.options.cwd);
 
             if (!this.#kws) {
-                this.#log("native wake: sherpa unavailable, falling back to energy VAD");
+                const status = sherpaStatus(config.kwsModelDir);
+
+                this.#log(
+                    status.ready
+                        ? "native wake: sherpa spotter failed to start, falling back to energy VAD"
+                        : `native wake: ${status.detail}; falling back to energy VAD (run /voice sherpa to install it)`,
+                );
             }
         }
 
@@ -583,7 +600,7 @@ export class NativeTransport {
             // Energy wake with an adaptive noise floor, so a quiet mic still
             // wakes: a fixed threshold either misses soft speech or fires at
             // room tone.
-            const threshold = Math.max(0.006, this.#noiseFloor * 2.2);
+            const threshold = Math.max(0.006, this.#noiseFloor * this.#wakeMultiplier);
 
             if (rms < threshold) {
                 this.#noiseFloor = Math.max(0.002, this.#noiseFloor * 0.95 + rms * 0.05);

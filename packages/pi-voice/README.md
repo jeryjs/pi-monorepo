@@ -98,10 +98,10 @@ and Linux default to `:0` / `default`.
 ## Wake word
 
 `alwaysOn` is **off by default**. Enable it with `/voice always-on on` or the
-toggle in the page. Native wake can use an offline sherpa-onnx-node keyword
-spotter (`kwsModelDir` + `kwsKeywords`; provider `directml` can reach the GPU/NPU)
-and otherwise falls back to energy VAD. The browser transport uses the sherpa
-WASM module or Web Speech. The status bar carries a live waveform:
+toggle in the page. The native transport wakes on an offline sherpa-onnx phrase
+spotter, which Pi can install for you; without it the energy VAD is used, which
+wakes on any loud-enough speech rather than a phrase. The browser transport uses
+the sherpa WASM module or Web Speech. The status bar carries a live waveform:
 
 ```
 voice live ▁▂▄▆▄▂ ·wake     # hearing you, always-on
@@ -114,10 +114,32 @@ Engines (`wakeEngine`):
 
 | Value | What it does |
 |---|---|
-| `auto` | sherpa if `wakeModelUrl` is set, else Web Speech, else energy VAD |
-| `sherpa` | offline keyword spotting via a lazily imported module |
-| `webspeech` | Chrome/Edge SpeechRecognition phrase spotter (online) |
+| `auto` | sherpa once installed, otherwise energy VAD |
+| `sherpa` | offline phrase spotting; prompts to install what is missing |
+| `webspeech` | Chrome/Edge SpeechRecognition phrase spotter (browser transport) |
 | `energy` | local VAD — speech onset, not phrase-aware |
+
+### Installing the offline phrase wake word (native)
+
+`/voice` → **Wake engine** → `sherpa` (or `/voice sherpa`) checks what is missing
+and asks before installing anything:
+
+1. `sherpa-onnx-node` — prebuilt inference runtime, about 23 MB,
+   into `~/.pi/agent/pi-voice-deps`
+2. the KWS model (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01`, English,
+   BPE), about 17 MB, into `~/.pi/agent/pi-voice-models/<model>`
+
+The settings screen streams npm/download progress and offers to restart voice when
+the install succeeds. Installing into the agent directory means your project and
+its `package.json` are untouched, and `kwsModelDir` can stay empty — the managed
+model directory is used automatically. Set `kwsModelDir` yourself to use a
+different model.
+
+The wake phrase goes in `kwsKeywords` (`HEY PI :2.0`; the trailing number is the
+boost, and `;` separates several keywords). It is **tokenised** against the
+model's `tokens.txt` — sherpa wants BPE pieces (`▁HE Y ▁PI`), not raw text — so an
+unspellable phrase fails with a clear message and the `text2token` fallback.
+`wakeSensitivity` maps to the spotter's threshold (0.25 at the 0.5 default).
 
 ### Offline KWS (sherpa)
 
@@ -173,12 +195,14 @@ No output means you have a working player registry entry; an `Option not found`
 message means your ffplay build rejects something and the minimal retry is what
 keeps you audible.
 
-**Wake word never fires in native mode** — with `alwaysOn` on and no sherpa model,
-the energy fallback needs the room noise floor to be measured first. It logs
+**Wake word never fires in native mode** — run `/voice sherpa` (or pick
+`wakeEngine = sherpa` in `/voice`) to install the offline spotter; that is what
+makes the wake word phrase-specific. Without it, the energy fallback needs the
+room noise floor to be measured first: it logs
 `native wake: energy floor ... threshold ... level ...` every five seconds in
-debug mode; if `level` stays below `threshold` while you speak, raise the mic
-gain (Windows: Sound settings → Input → device properties) or install
-`sherpa-onnx-node` with `kwsModelDir` for real keyword spotting.
+debug mode, and if `level` stays below `threshold` while you speak, raise the mic
+gain (Windows: Sound settings → Input → device properties). Turn `debug` on to
+see those numbers while you tune `wakeSensitivity`.
 
 **`1011 exceeded your current quota` even though `diagnose` passed** — that was a
 real bug: `diagnose` used to probe a *minimal* setup, so it tested the key but
@@ -358,7 +382,9 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 - The browser transport needs that tab open while voice is active.
 - Native transport echo cancellation is half-duplex, not AEC3.
-- Native wake word is energy VAD unless an offline KWS is supplied.
+- Native wake defaults to energy VAD (any loud speech). Install the offline
+  spotter with `/voice sherpa` for phrase spotting, and remember it is a 3.3M
+  English model — non-English wake phrases need a matching KWS model.
 - Live API is preview: model ids, limits and fields can change.
 - Free-tier traffic may be used to improve Google's products — don't route
   private audio through it.
@@ -383,7 +409,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.4.2** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.4.3** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -394,14 +420,15 @@ controller.ts             session <-> audio server <-> bridge
 live/                     protocol, setup shaping, socket supervisor
 bridge/                   Pi digest, function declarations, dispatch, persona
 audio/                    local HTTP+WS server, minimal RFC6455, ffmpeg transport
+sherpa.ts                 on-demand wake-word installer (runtime + model + keywords)
 web/                      companion page, audio worklets, wake engines
-test/                     protocol/config smoke tests + endpoint + lifecycle
+test/                     smoke + endpoint + lifecycle + installer suites
 ```
 
 ## Tests
 
 ```bash
-npm test   # smoke (56) + endpoint (19) + lifecycle (19)
+npm test   # smoke (56) + endpoint (19) + lifecycle (19) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
@@ -419,3 +446,11 @@ endpoint: five start/stop cycles, double start, stop during start, restart
 resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
 awake), honest `pi_ask`/`pi_stop` results, cross-process locking and stale-lock
 takeover.
+
+`test/sherpa.ts` covers the wake-word installer offline: BPE keyword
+spotting/tokenisation (including the uncoverable-phrase error and the digest-named
+keywords cache), status reporting, a fake npm (success, streamed output, and a
+failing install whose stderr is surfaced) and a model download served from a real
+`tar -cjf` archive to exercise fetch → extract → verify → move, plus the full
+guided setup. The real path was verified by hand against npm and the GitHub model
+release; the resulting spotter detected a phrase in the model's own test wav.

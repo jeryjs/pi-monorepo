@@ -9,6 +9,7 @@
 import { readFileSync } from "node:fs";
 import {
     DynamicBorder,
+    getSelectListTheme,
     getSettingsListTheme,
     type ExtensionContext,
     type Theme,
@@ -16,6 +17,8 @@ import {
 import {
     Container,
     Input,
+    Loader,
+    SelectList,
     SettingsList,
     Text,
     matchesKey,
@@ -25,6 +28,7 @@ import {
 import { liveModelIds } from "./capabilities.ts";
 import type { VoiceConfig } from "./config.ts";
 import type { VoiceRuntime } from "./runtime.ts";
+import { KWS_MODEL, managedDepsDir, sherpaStatus, setupSherpaWake } from "./sherpa.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
 
 export type VoiceTuiAction = "close" | "restart" | "stop" | "diagnose" | "open";
@@ -71,6 +75,305 @@ function enumItem(id: string, label: string, description: string, current: strin
         description,
         currentValue: values.includes(current) ? current : values[0] ?? current,
         values,
+    };
+}
+
+const WAKE_ENGINES = ["auto", "sherpa", "webspeech", "energy"] as const;
+
+/**
+ * Wake-engine picker that installs what the offline phrase spotter needs.
+ *
+ * Picking `sherpa` without `sherpa-onnx-node` (or without the KWS model) shows a
+ * one-keystroke install prompt instead of silently falling back to energy VAD.
+ */
+class WakeEngineSubmenu extends Container {
+    readonly #runtime: VoiceRuntime;
+    readonly #theme: Theme;
+    readonly #tui: TUI;
+    readonly #done: (value?: string) => void;
+
+    readonly #head: Text;
+    readonly #detail: Text;
+    readonly #loader: Loader;
+
+    #mode: "pick" | "offer" | "busy" | "result" = "pick";
+    #list: SelectList | undefined;
+    #result: { ok: boolean; detail: string } | undefined;
+    #tail: string[] = [];
+    /** Engine the pick list was showing before we jumped into the install view. */
+    #previousEngine = "auto";
+    /** Set when the screen closes; stops UI work while an install finishes. */
+    #closed = false;
+
+    constructor(
+        runtime: VoiceRuntime,
+        theme: Theme,
+        tui: TUI,
+        current: string,
+        done: (value?: string) => void,
+    ) {
+        super();
+        this.#runtime = runtime;
+        this.#theme = theme;
+        this.#tui = tui;
+        this.#done = done;
+        this.#head = new Text("", 1, 0);
+        this.#detail = new Text("", 1, 0);
+        this.#loader = new Loader(tui, (text) => theme.fg("accent", text), (text) => theme.fg("muted", text), "working…");
+        this.addChild(this.#head);
+        this.addChild(this.#detail);
+        this.#showPick(current);
+    }
+
+    #status() {
+        return sherpaStatus(this.#runtime.getConfig().kwsModelDir);
+    }
+
+    #showPick(current: string): void {
+        this.#mode = "pick";
+        this.#stopLoader();
+        this.#head.setText(this.#theme.fg("accent", " Wake engine"));
+
+        if (this.#list) {
+            this.removeChild(this.#list);
+        }
+
+        const status = this.#status();
+
+        this.#detail.setText(this.#theme.fg(
+            "muted",
+            status.ready
+                ? `offline phrase wake ready — ${status.detail}`
+                : `offline phrase wake not installed — ${status.detail}`,
+        ));
+
+        this.#list = new SelectList(
+            WAKE_ENGINES.map((engine) => ({
+                value: engine,
+                label: engine,
+                description: engine === "sherpa"
+                    ? (status.ready ? "offline keyword spotter (ready)" : "offline keyword spotter (needs a one-time install)")
+                    : engine === "auto"
+                        ? "sherpa when installed, otherwise energy VAD"
+                        : engine === "webspeech"
+                            ? "browser transport only"
+                            : "wake on any loud-enough speech",
+            })),
+            6,
+            getSelectListTheme(),
+        );
+        this.#list.onSelect = (item) => void this.#pick(item.value, current);
+        this.#list.onCancel = () => this.#done(undefined);
+
+        const index = WAKE_ENGINES.indexOf(current as (typeof WAKE_ENGINES)[number]);
+
+        if (index >= 0) {
+            this.#list.setSelectedIndex(index);
+        }
+
+        this.addChild(this.#list);
+        this.#tui.requestRender();
+    }
+
+    async #pick(engine: string, current: string): Promise<void> {
+        if (engine !== "sherpa") {
+            this.#done(engine);
+
+            return;
+        }
+
+        if (this.#status().ready) {
+            this.#done("sherpa");
+
+            return;
+        }
+
+        this.#previousEngine = current;
+        this.#showOffer();
+    }
+
+    #showOffer(): void {
+        this.#mode = "offer";
+        this.#stopLoader();
+
+        const status = this.#status();
+
+        this.#head.setText(this.#theme.fg("accent", " Install the offline wake word"));
+        this.#detail.setText([
+            this.#theme.fg("muted", status.packageInstalled
+                ? "sherpa-onnx-node is installed; the wake model is missing."
+                : "sherpa-onnx-node is not installed."),
+            "",
+            this.#theme.fg("muted", `One-time, prebuilt download into ${managedDepsDir()}`),
+            this.#theme.fg("muted", `(about 23 MB runtime + ${(KWS_MODEL.bytes / 1024 / 1024).toFixed(1)} MB model). Your project is not modified.`),
+            "",
+            `${this.#theme.fg("accent", "Enter")} install now    ${this.#theme.fg("accent", "Esc")} back`,
+        ].join("\n"));
+        this.#tui.requestRender();
+    }
+
+    async #install(): Promise<void> {
+        this.#mode = "busy";
+        this.#tail = [];
+        this.#head.setText(this.#theme.fg("accent", " Installing the offline wake word"));
+        this.#startLoader("installing sherpa-onnx-node…");
+
+        const onLine = (line: string): void => {
+            this.#tail.push(line);
+
+            if (this.#tail.length > 6) {
+                this.#tail.shift();
+            }
+
+            if (this.#closed) {
+                return;
+            }
+
+            this.#loader.setMessage(line);
+            this.#detail.setText(this.#theme.fg("muted", this.#tail.join("\n")));
+            this.#tui.requestRender();
+        };
+
+        const result = await setupSherpaWake({
+            modelDir: this.#runtime.getConfig().kwsModelDir,
+            onLine,
+            // The user already accepted the install by pressing Enter here.
+            confirm: async () => true,
+        });
+
+        if (this.#closed) {
+            // The settings screen went away (Ctrl-R, Esc); the install itself is
+            // still valid, it just has nobody to report to.
+            return;
+        }
+
+        this.#stopLoader();
+        this.#result = { ok: result.ok, detail: result.detail };
+        this.#showResult();
+    }
+
+    /**
+     * Everything the spotter needs is now on disk. Point `kwsModelDir` at the
+     * managed model (only when it is empty, so an explicit choice is respected):
+     * that config change is what rebuilds the audio side, so voice picks the
+     * spotter up without a second manual restart.
+     */
+    #apply(): void {
+        if (this.#runtime.getConfig().kwsModelDir.trim().length === 0) {
+            this.#runtime.patch({ kwsModelDir: sherpaStatus("").modelDir });
+        }
+
+        this.#done("sherpa");
+    }
+
+    #showResult(): void {
+        this.#mode = "result";
+        const result = this.#result ?? { ok: false, detail: "no result" };
+
+        this.#head.setText(this.#theme.fg(result.ok ? "accent" : "error", result.ok ? " Wake word ready" : " Wake word setup incomplete"));
+        this.#detail.setText([
+            result.detail,
+            "",
+            this.#theme.fg("muted", result.ok
+                ? `Phrase: ${this.#runtime.getConfig().kwsKeywords}. Voice restarts to start listening.`
+                : "Voice keeps working with the energy fallback; you can retry from wake engine → sherpa."),
+            "",
+            result.ok
+                ? `${this.#theme.fg("accent", "Enter")} / ${this.#theme.fg("accent", "Esc")} done (voice restarts)`
+                : `${this.#theme.fg("accent", "Enter")} back`,
+        ].join("\n"));
+        this.#tui.requestRender();
+    }
+
+    #startLoader(message: string): void {
+        if (!this.children.includes(this.#loader)) {
+            this.addChild(this.#loader);
+        }
+
+        this.#loader.setMessage(message);
+        this.#loader.start();
+    }
+
+    #stopLoader(): void {
+        this.#loader.stop();
+
+        if (this.children.includes(this.#loader)) {
+            this.removeChild(this.#loader);
+        }
+    }
+
+    dispose(): void {
+        this.#closed = true;
+        this.#stopLoader();
+    }
+
+    handleInput(data: string): void {
+        if (this.#mode === "pick") {
+            this.#list?.handleInput(data);
+
+            return;
+        }
+
+        if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+            if (this.#mode === "result" && this.#result?.ok) {
+                this.#apply();
+
+                return;
+            }
+
+            if (this.#mode === "busy") {
+                return;
+            }
+
+            this.#showPick(this.#previousEngine);
+
+            return;
+        }
+
+        if (!matchesKey(data, "return")) {
+            return;
+        }
+
+        if (this.#mode === "offer") {
+            void this.#install();
+
+            return;
+        }
+
+        if (this.#mode === "result") {
+            if (this.#result?.ok) {
+                this.#apply();
+
+                return;
+            }
+
+            this.#showPick(this.#previousEngine);
+        }
+    }
+}
+
+function wakeEngineItem(
+    config: VoiceConfig,
+    runtime: VoiceRuntime,
+    theme: Theme,
+    tui: TUI,
+    onSubmenu?: (submenu: { dispose?: () => void }) => void,
+): SettingItem {
+    const status = sherpaStatus(config.kwsModelDir);
+
+    return {
+        id: "wakeEngine",
+        label: "Wake engine",
+        description: "sherpa = offline phrase spotter (installs on demand); energy = any loud speech",
+        currentValue: config.wakeEngine === "auto" && status.ready ? "auto (sherpa)" : config.wakeEngine,
+        submenu: (currentValue, done) => {
+            const value = currentValue.replace(" (sherpa)", "");
+            const submenu = new WakeEngineSubmenu(runtime, theme, tui, value, done);
+
+            onSubmenu?.(submenu);
+
+            return submenu;
+        },
     };
 }
 
@@ -135,7 +438,12 @@ function textItem(
     };
 }
 
-function buildItems(runtime: VoiceRuntime, theme: Theme, tui: TUI): SettingItem[] {
+function buildItems(
+    runtime: VoiceRuntime,
+    theme: Theme,
+    tui: TUI,
+    onSubmenu?: (submenu: { dispose?: () => void }) => void,
+): SettingItem[] {
     const config = runtime.getConfig();
 
     return [
@@ -150,14 +458,14 @@ function buildItems(runtime: VoiceRuntime, theme: Theme, tui: TUI): SettingItem[
         boolItem("voiceApprovals", "Voice approvals", "Ask out loud before risky shell commands", config.voiceApprovals),
         boolItem("announce", "Announce results", "Speak Pi's completions and failures", config.announce),
 
-        enumItem("wakeEngine", "Wake engine", "Browser only: sherpa (offline KWS), Web Speech, or energy VAD", config.wakeEngine, ["auto", "sherpa", "webspeech", "energy"]),
-        textItem("wakeSensitivity", "Wake sensitivity", "0-1; higher = easier to trigger", String(config.wakeSensitivity), theme, tui),
-        enumItem("compute", "Compute", "Wake-model backend: cpu, auto (NPU/GPU), webgpu, webnn", config.compute, ["cpu", "auto", "webgpu", "webnn"]),
-        textItem("wakeModelUrl", "Wake model URL", "Browser: module exporting createKeywordSpotter", config.wakeModelUrl, theme, tui),
-        textItem("kwsModelDir", "Sherpa KWS model dir", "Native wake: sherpa-onnx-node model directory (empty = energy VAD)", config.kwsModelDir, theme, tui),
-        textItem("kwsKeywords", "Sherpa keywords", "e.g. 'HEY PI :2.0'", config.kwsKeywords, theme, tui),
-        enumItem("sherpaProvider", "Sherpa provider", "Inference backend; directml can use the GPU/NPU", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
+        wakeEngineItem(config, runtime, theme, tui, onSubmenu),
         textItem("wakePhrases", "Wake phrases", "Comma-separated (default: hey pi)", config.wakePhrases.join(", "), theme, tui),
+        textItem("wakeSensitivity", "Wake sensitivity", "0-1; higher = easier to trigger (native energy + sherpa threshold)", String(config.wakeSensitivity), theme, tui),
+        enumItem("compute", "Compute", "Browser wake model backend: cpu, auto (NPU/GPU), webgpu, webnn", config.compute, ["cpu", "auto", "webgpu", "webnn"]),
+        textItem("wakeModelUrl", "Wake model URL", "Browser: module exporting createKeywordSpotter", config.wakeModelUrl, theme, tui),
+        textItem("kwsModelDir", "Sherpa model dir", "Empty = managed install; set to use your own KWS model directory", config.kwsModelDir, theme, tui),
+        textItem("kwsKeywords", "Sherpa keywords", "Phrase(s) to spot, e.g. 'HEY PI :2.0'; ';' separates several", config.kwsKeywords, theme, tui),
+        enumItem("sherpaProvider", "Sherpa provider", "Inference backend; directml can use the GPU/NPU", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
 
         textItem("language", "Language", "BCP-47 code, empty = automatic", config.language, theme, tui),
         textItem("temperature", "Temperature", "0-2", String(config.temperature), theme, tui),
@@ -228,10 +536,16 @@ function headerText(runtime: VoiceRuntime, theme: Theme): string {
     const state = controller?.running ? controller.liveState : "off";
     const key = controller?.keySource ?? "not resolved";
     const pages = controller?.peerCount ?? 0;
+    const sherpa = sherpaStatus(config.kwsModelDir);
+    const wake = config.alwaysOn
+        ? sherpa.ready
+            ? `on · ${sherpa.version ? `sherpa ${sherpa.version}` : "sherpa"}`
+            : `on · energy VAD (${sherpa.detail})`
+        : "off";
 
     return [
         theme.style(`Pi Voice ${VERSION}`, { fg: "accent", bold: true }),
-        theme.fg("muted", `state ${state} · transport ${config.audio} · model ${config.model} · wake ${config.alwaysOn ? "on" : "off"}`),
+        theme.fg("muted", `state ${state} · transport ${config.audio} · model ${config.model} · wake ${wake}`),
         theme.fg("dim", `key ${key} · pages ${pages} · voice ${config.voice}`),
     ].join("\n");
 }
@@ -250,20 +564,35 @@ function hintText(runtime: VoiceRuntime, theme: Theme): string {
 class VoiceSettingsComponent extends Container {
     readonly #list: SettingsList;
     readonly #finish: (action: VoiceTuiAction) => void;
+    readonly #header: Text;
+    readonly #runtime: VoiceRuntime;
+    readonly #theme: Theme;
+    /** Submenu currently open, so it can be shut down together with the screen. */
+    #submenu: { dispose?: () => void } | undefined;
 
     constructor(runtime: VoiceRuntime, theme: Theme, tui: TUI, done: (action: VoiceTuiAction) => void) {
         super();
         this.#finish = done;
+        this.#runtime = runtime;
+        this.#theme = theme;
 
         this.addChild(new DynamicBorder());
-        this.addChild(new Text(headerText(runtime, theme), 1, 0));
+        this.#header = new Text(headerText(runtime, theme), 1, 0);
+        this.addChild(this.#header);
         this.addChild(new DynamicBorder());
 
         this.#list = new SettingsList(
-            buildItems(runtime, theme, tui),
+            buildItems(runtime, theme, tui, (submenu) => {
+                this.#submenu = submenu;
+            }),
             16,
             getSettingsListTheme(),
-            (id, value) => applyChange(runtime, id, value),
+            (id, value) => {
+                applyChange(runtime, id, value);
+                // The wake/sherpa status in the header depends on the config.
+                this.#header.setText(headerText(this.#runtime, this.#theme));
+                this.#header.invalidate();
+            },
             () => done("close"),
             { enableSearch: true },
         );
@@ -271,6 +600,14 @@ class VoiceSettingsComponent extends Container {
 
         this.addChild(new DynamicBorder());
         this.addChild(new Text(hintText(runtime, theme), 1, 0));
+    }
+
+    dispose(): void {
+        this.#submenu?.dispose?.();
+
+        for (const child of this.children) {
+            (child as { dispose?: () => void }).dispose?.();
+        }
     }
 
     handleInput(data: string): void {
