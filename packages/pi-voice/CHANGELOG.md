@@ -5,6 +5,31 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-26
+
+Native mode could be silent: Pi heard you but never spoke.
+
+### Fixed
+
+- **`ffplay` was spawned with `-ac`,** which is an ffmpeg-only option. It exited
+  immediately with `Failed to set value '1' for option 'ac': Option not found`, so
+  every model reply was written into a dead process and nothing was audible. The
+  channels option is gone (raw `s16le` is mono), and if `ffplay` ever rejects an
+  option again the player is respawned once with a minimal argument set and the
+  reason is reported instead of failing silently.
+- **The echo canceller could diverge** by adapting while the reference signal was
+  effectively silent, which distorted the microphone the model hears on later
+  turns. Adaptation is now skipped below a reference-energy floor, the filter is
+  shorter (768 taps ≈ 48 ms) and runs only while the model is actually speaking,
+  so the mic path stays exact and cheap when you are the only one talking.
+- **Partial capture chunks are no longer dropped.** A frame split across two
+  `ffmpeg` reads used to lose its trailing bytes; the remainder is carried into
+  the next chunk.
+- **Native wake is quieter-friendly**: the energy fallback now tracks the room
+  noise floor and requires 120 ms of speech instead of a fixed 0.05 threshold
+  that soft microphones never crossed. It logs the floor/threshold/level every
+  five seconds in debug mode.
+
 ## [0.4.0] - 2026-11-26
 
 Reload-safe sessions, one instance per workspace, native full duplex with real

@@ -12,7 +12,7 @@
  */
 
 export interface AecOptions {
-    /** Filter length in samples (16 kHz). 1536 ≈ 96 ms of echo path. */
+    /** Filter length in samples (16 kHz). 768 ≈ 48 ms of echo path. */
     taps?: number;
     /** Estimated speaker→mic delay in ms. */
     delayMs?: number;
@@ -21,6 +21,9 @@ export interface AecOptions {
 }
 
 export class AcousticEchoCanceller {
+    /** Below this reference energy the filter is not adapted (see process). */
+    static readonly ADAPT_FLOOR = 1e-2;
+
     readonly #taps: number;
     readonly #delay: number;
     readonly #mu: number;
@@ -31,7 +34,7 @@ export class AcousticEchoCanceller {
     #lastEchoEnergy = 0;
 
     constructor(options: AecOptions = {}) {
-        this.#taps = Math.max(256, Math.floor(options.taps ?? 1536));
+        this.#taps = Math.max(256, Math.floor(options.taps ?? 768));
         this.#delay = Math.max(0, Math.round(((options.delayMs ?? 40) / 1000) * 16_000));
         this.#mu = Math.min(0.9, Math.max(0.01, options.mu ?? 0.35));
         this.#weights = new Float32Array(this.#taps);
@@ -87,7 +90,11 @@ export class AcousticEchoCanceller {
             out[i] = residual;
             echoEnergy += echo * echo;
 
-            if (!freeze) {
+            // Adapt only when the reference actually carries signal. Against a
+            // near-silent reference the normalisation is meaningless and the
+            // weights would drift on noise, which then distorts the mic the
+            // model hears on the next turn.
+            if (!freeze && norm > AcousticEchoCanceller.ADAPT_FLOOR) {
                 const gain = (this.#mu * residual) / norm;
 
                 for (let j = 0; j < taps; j++) {

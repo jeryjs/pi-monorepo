@@ -94,26 +94,35 @@ export function detectDefaultInput(ffmpegPath: string): string {
     return "";
 }
 
-function playbackArgs(): string[] {
-    return [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nodisp",
-        "-autoexit",
-        "-fflags",
-        "nobuffer",
-        "-flags",
-        "low_delay",
-        "-f",
-        "s16le",
-        "-ar",
-        "24000",
-        "-ac",
-        "1",
-        "-",
-    ];
+/**
+ * ffplay playback arguments.
+ *
+ * ffplay does NOT accept `-ac` (it is an ffmpeg-only option) and older builds
+ * reject other AVOptions too, so a rejected option is retried with the minimal
+ * set instead of silently producing no sound.
+ */
+export function playbackArgs(minimal = false): string[] {
+    const options = minimal
+        ? ["-nodisp", "-autoexit", "-f", "s16le", "-ar", "24000", "-"]
+        : [
+            "-nodisp",
+            "-autoexit",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-f",
+            "s16le",
+            "-ar",
+            "24000",
+            "-",
+        ];
+
+    // Raw s16le is mono by default; do not pass a channels option.
+    return ["-hide_banner", "-loglevel", "error", ...options];
 }
+
+const PLAYER_OPTION_ERROR = /option not found|failed to set|unknown option|unrecognized option/i;
 
 export class NativeTransport {
     #capture: ChildProcessWithoutNullStreams | undefined;
@@ -128,6 +137,12 @@ export class NativeTransport {
     #aec: AcousticEchoCanceller | undefined;
     #kws: NativeKeywordSpotter | undefined;
     #lastKeywordAt = 0;
+    #noiseFloor = 0.012;
+    #voicedMs = 0;
+    #wakeNoteAt = 0;
+    #playerMinimal = false;
+    #playerSpawnedAt = 0;
+    #carry = Buffer.alloc(0);
 
     readonly #options: NativeTransportOptions;
 
@@ -295,14 +310,59 @@ export class NativeTransport {
     #spawnPlayer(): void {
         const { config } = this.options;
 
-        const child = spawn(config.ffplayPath, playbackArgs(), {
+        const child = spawn(config.ffplayPath, playbackArgs(this.#playerMinimal), {
             stdio: ["pipe", "ignore", "pipe"],
             windowsHide: true,
         }) as ChildProcessWithoutNullStreams;
 
+        this.#playerSpawnedAt = Date.now();
+
         child.on("error", (error) => this.#error(`ffplay: ${error.message}`));
-        child.stderr?.on("data", (chunk: Buffer) => log("native", "ffplay", chunk.toString().trim()));
-        child.on("exit", (code) => log("native", "ffplay exited", code));
+        child.stderr?.on("data", (chunk: Buffer) => {
+            const text = chunk.toString().trim();
+
+            if (!text) {
+                return;
+            }
+
+            log("native", "ffplay", text);
+
+            // ffplay rejected one of our options: retry once with the bare set
+            // (this is what makes playback work on builds without -fflags etc.).
+            if (!this.#playerMinimal && PLAYER_OPTION_ERROR.test(text)) {
+                this.#playerMinimal = true;
+                this.#error(`ffplay rejected a playback option (${text}); retrying with a minimal argument set`);
+
+                try {
+                    child.kill();
+                } catch {
+                    // ignore
+                }
+
+                this.#player = undefined;
+                this.#spawnPlayer();
+            }
+        });
+        child.on("exit", (code) => {
+            log("native", "ffplay exited", code);
+
+            if (this.#player !== child) {
+                return;
+            }
+
+            this.#player = undefined;
+
+            // Only respawn if it had been healthy for a while: an immediate exit
+            // means bad arguments or a missing audio device, and retrying would
+            // just spin.
+            if (this.#started && code !== 0 && Date.now() - this.#playerSpawnedAt > 1000) {
+                setTimeout(() => {
+                    if (this.#started && !this.#player) {
+                        this.#spawnPlayer();
+                    }
+                }, 300);
+            }
+        });
 
         this.#player = child;
     }
@@ -344,13 +404,18 @@ export class NativeTransport {
     }
 
     #onCapture(chunk: Buffer): void {
-        // Work in whole 20 ms frames (320 samples = 640 bytes at 16 kHz).
+        // Work in whole 20 ms frames (320 samples = 640 bytes at 16 kHz); a chunk
+        // can split a frame, so carry the remainder into the next one instead of
+        // dropping audio.
         const frameBytes = 640;
+        const data = this.#carry.length > 0 ? Buffer.concat([this.#carry, chunk]) : chunk;
+        const usable = data.length - (data.length % frameBytes);
 
-        for (let offset = 0; offset + frameBytes <= chunk.length; offset += frameBytes) {
-            const frame = chunk.subarray(offset, offset + frameBytes);
-            this.#handleFrame(frame);
+        for (let offset = 0; offset < usable; offset += frameBytes) {
+            this.#handleFrame(data.subarray(offset, offset + frameBytes));
         }
+
+        this.#carry = usable < data.length ? Buffer.from(data.subarray(usable)) : Buffer.alloc(0);
     }
 
     #handleFrame(frame: Buffer): void {
@@ -383,8 +448,29 @@ export class NativeTransport {
                 return;
             }
 
-            if (rms > bargeThreshold && Date.now() > this.#wakeCooldownUntil) {
+            // Energy wake with an adaptive noise floor, so a quiet mic still
+            // wakes: a fixed threshold either misses soft speech or fires at
+            // room tone.
+            const threshold = Math.max(0.006, this.#noiseFloor * 2.2);
+
+            if (rms < threshold) {
+                this.#noiseFloor = Math.max(0.002, this.#noiseFloor * 0.95 + rms * 0.05);
+                this.#voicedMs = 0;
+            } else {
+                this.#voicedMs += 20;
+            }
+
+            if (Date.now() - this.#wakeNoteAt > 5000) {
+                this.#wakeNoteAt = Date.now();
+                this.#log(
+                    `native wake: energy floor ${this.#noiseFloor.toFixed(4)} `
+                    + `threshold ${threshold.toFixed(4)} level ${rms.toFixed(4)}`,
+                );
+            }
+
+            if (this.#voicedMs >= 120 && Date.now() > this.#wakeCooldownUntil) {
                 this.#wakeCooldownUntil = Date.now() + 1500;
+                this.#voicedMs = 0;
                 this.#emitWake("energy");
             }
 
@@ -401,11 +487,25 @@ export class NativeTransport {
             this.flush();
         }
 
-        const outgoing = this.#aec
-            ? new Uint8Array(floatToInt16(this.#aec.process(rawFloat)).buffer)
-            : new Uint8Array(frame);
+        const outgoing = this.#cancel(rawFloat, frame);
 
         this.options.onMic(outgoing);
+    }
+
+    /**
+     * Apply echo cancellation only while the model is actually speaking. With no
+     * playback reference there is nothing to subtract, so passing the frame
+     * through untouched keeps the mic signal exact and the CPU cost at zero
+     * while the user talks.
+     */
+    #cancel(raw: Float32Array, frame: Buffer): Uint8Array {
+        const aec = this.#aec;
+
+        if (!aec || !this.playing) {
+            return new Uint8Array(frame);
+        }
+
+        return new Uint8Array(floatToInt16(aec.process(raw)).buffer);
     }
 
     #onKeyword(keyword: string): void {
@@ -430,7 +530,8 @@ export class NativeTransport {
         this.options.onWake(source);
 
         if (pre.length > 0) {
-            const outgoing = this.#aec ? this.#aec.process(pre) : pre;
+            const aec = this.#aec;
+            const outgoing = aec && this.playing ? aec.process(pre) : pre;
             this.options.onMic(float32ToPcm16(outgoing));
         }
     }

@@ -158,6 +158,28 @@ ok   gemini-3.8-live-extended-thinking setupComplete (526ms)
 FAIL gemini-3.1-flash-live-preview    close 1011: quota…
 ```
 
+**Native mode: the waveform moves but Pi never speaks** — the player was dying on
+startup. `ffplay` does **not** accept ffmpeg-only options such as `-ac`; it
+printed `Failed to set value '1' for option 'ac': Option not found` and exited,
+so every reply was written into a dead process. That is fixed (and the player now
+retries once with a minimal argument set and tells you if an option is still
+rejected). Quick manual check:
+
+```
+node -e "process.stdout.write(Buffer.alloc(96000))" | ffplay -nodisp -loglevel error -f s16le -ar 24000 -
+```
+
+No output means you have a working player registry entry; an `Option not found`
+message means your ffplay build rejects something and the minimal retry is what
+keeps you audible.
+
+**Wake word never fires in native mode** — with `alwaysOn` on and no sherpa model,
+the energy fallback needs the room noise floor to be measured first. It logs
+`native wake: energy floor ... threshold ... level ...` every five seconds in
+debug mode; if `level` stays below `threshold` while you speak, raise the mic
+gain (Windows: Sound settings → Input → device properties) or install
+`sherpa-onnx-node` with `kwsModelDir` for real keyword spotting.
+
 **`1011 exceeded your current quota` even though `diagnose` passed** — that was a
 real bug: `diagnose` used to probe a *minimal* setup, so it tested the key but
 not the tools. The culprit is **Google Search grounding**: function declarations

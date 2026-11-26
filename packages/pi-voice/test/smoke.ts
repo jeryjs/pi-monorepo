@@ -12,6 +12,7 @@ import { completeVoiceArguments } from "../completions.ts";
 import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "../config.ts";
 import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
+import { playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
@@ -519,6 +520,31 @@ test("NLMS cancels a delayed echo", () => {
     assert.ok(output < input * 0.25, `residual ${output.toFixed(4)} vs echo ${input.toFixed(4)}`);
 });
 
+test("AEC leaves the mic untouched when the reference is silent", () => {
+    // Guards the divergence bug: adapting against a near-silent reference used a
+    // meaningless normalisation and dragged the weights, distorting later turns.
+    const aec = new AcousticEchoCanceller();
+    const mic = new Float32Array(320);
+
+    for (let i = 0; i < mic.length; i++) {
+        mic[i] = Math.sin(i * 0.11) * 0.2;
+    }
+
+    let cleaned = mic;
+
+    for (let frame = 0; frame < 500; frame++) {
+        aec.pushReference(new Float32Array(320));
+        cleaned = aec.process(mic);
+    }
+
+    for (let i = 0; i < mic.length; i++) {
+        assert.ok(
+            Math.abs((cleaned[i] as number) - (mic[i] as number)) < 1e-6,
+            `silent reference altered the mic at ${i}: ${cleaned[i]}`,
+        );
+    }
+});
+
 test("24k playback resamples to 16k for the AEC reference", () => {
     assert.equal(resample24kTo16k(new Int16Array(2400)).length, 1600);
     assert.equal(floatToInt16(new Float32Array([0, 1, -1]))[1], 32767);
@@ -527,6 +553,20 @@ test("24k playback resamples to 16k for the AEC reference", () => {
 test("native AEC defaults to NLMS full duplex", () => {
     assert.equal(DEFAULT_VOICE_CONFIG.nativeAec, "nlms");
     assert.equal(DEFAULT_VOICE_CONFIG.bargeIn, true);
+});
+
+test("ffplay args never use ffmpeg-only options such as -ac", () => {
+    for (const args of [playbackArgs(), playbackArgs(true)]) {
+        assert.ok(!args.includes("-ac"), `unexpected -ac in ${args.join(" ")}`);
+        assert.ok(!args.includes("-channels"), "unexpected -channels");
+        assert.ok(args.includes("24000"), "playback must request 24 kHz");
+        assert.ok(args.includes("s16le"), "playback must request raw s16le");
+    }
+
+    // The minimal set must drop optional AVOptions only.
+    assert.ok(playbackArgs().includes("-fflags"), "full args keep latency options");
+    assert.ok(!playbackArgs(true).includes("-fflags"), "minimal args drop latency options");
+    assert.ok(playbackArgs(true).includes("-nodisp"));
 });
 
 console.log(`\n${passed} checks passed`);
