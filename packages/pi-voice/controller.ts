@@ -983,6 +983,11 @@ export class VoiceController implements VoiceControl {
 
         if (session.idleMs > this.#config.idleSleepMs) {
             log("controller", "idle: gating the mic upstream, session kept");
+            // Gate the capture process too, not just the session. The native
+            // transport only stops sending frames when *it* is told to, so gating
+            // the session alone made the next mic frame reopen it and idle sleep
+            // became a no-op that flickered live/sleeping every tick.
+            this.#native?.setStreaming(false);
             session.setStreaming(false);
             this.#broadcast({ t: "sleep" });
         }

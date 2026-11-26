@@ -352,6 +352,26 @@ await controller.stop();
 ok("/reload rebind keeps the Live socket and hands subscriptions to the new bridge");
 
 // ---------------------------------------------------------------------------
+// 5b. idle gate: quiet time gates the mic but keeps the session
+// ---------------------------------------------------------------------------
+
+const idleController = new VoiceController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ idleSleepMs: 300 }),
+);
+
+await idleController.start();
+await until(() => idleController.liveState === "live", "idle test: session live");
+await until(() => idleController.liveState === "sleeping", "idle gate to engage");
+ok("idle time gates the mic upstream instead of dropping the session");
+
+idleController.wake();
+assert.equal(idleController.liveState, "live", "wake restores the live state");
+await idleController.stop();
+ok("wake after an idle gate resumes listening on the same session");
+
+// ---------------------------------------------------------------------------
 // 6. tool calls: honest results, real abort
 // ---------------------------------------------------------------------------
 
