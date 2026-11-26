@@ -16,6 +16,7 @@
       "./packages/pi-keyrouter/index.ts",
       "./packages/pi-bg-terminal/index.ts",
       "./packages/pi-unify-provider/index.ts",
+      "./packages/pi-voice/index.ts",
       "./extensions/opencode-429-proxy/index.ts",
       "./extensions/compaction-model.ts",
       "./extensions/cx-providers.ts",
