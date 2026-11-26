@@ -4,7 +4,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilitiesFor, liveModelIds } from "../capabilities.ts";
@@ -444,6 +444,17 @@ test("affective dialog is gated off (3.8 rejects audio when set)", () => {
     })(undefined) as Record<string, any>;
 
     assert.equal(forced.generationConfig.enableAffectiveDialog, undefined);
+});
+
+console.log("release");
+
+test("package version matches the changelog", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
+    const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+    const first = /^##\s+\[(\d+\.\d+\.\d+)\]/m.exec(changelog);
+
+    assert.ok(first, "changelog has a versioned section");
+    assert.equal(first?.[1], pkg.version);
 });
 
 console.log(`\n${passed} checks passed`);

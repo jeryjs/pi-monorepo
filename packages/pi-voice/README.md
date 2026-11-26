@@ -298,6 +298,11 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 - Free-tier traffic may be used to improve Google's products — don't route
   private audio through it.
 
+## Version
+
+Current: **0.2.0** — pre-1.0 while the Gemini Live API is in preview. See
+[CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
+
 ## Layout
 
 ```
