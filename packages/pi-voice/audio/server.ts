@@ -130,7 +130,16 @@ export async function startAudioServer(options: AudioServerOptions): Promise<Aud
     server.on("upgrade", (req, socket, head) => {
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
-        if (url.pathname !== "/ws" || url.searchParams.get("t") !== options.token) {
+        if (url.pathname !== "/ws") {
+            note(`ws upgrade rejected: unexpected path ${url.pathname}`);
+            socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+            socket.destroy();
+
+            return;
+        }
+
+        if (url.searchParams.get("t") !== options.token) {
+            note("ws upgrade rejected: token mismatch (stale page? reopen the printed URL)");
             socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
             socket.destroy();
 

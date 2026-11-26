@@ -435,9 +435,15 @@ test("flash omits affective dialog (it rejects it)", () => {
     assert.equal(setup.generationConfig.enableAffectiveDialog, undefined);
 });
 
-test("3.8 keeps affective dialog", () => {
-    const setup = build(undefined) as Record<string, any>;
-    assert.equal(setup.generationConfig.enableAffectiveDialog, true);
+test("affective dialog is gated off (3.8 rejects audio when set)", () => {
+    const forced = createSetupBuilder({
+        config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { affectiveDialog: true }),
+        capabilities: caps,
+        systemInstruction: "x",
+        tools: [],
+    })(undefined) as Record<string, any>;
+
+    assert.equal(forced.generationConfig.enableAffectiveDialog, undefined);
 });
 
 console.log(`\n${passed} checks passed`);

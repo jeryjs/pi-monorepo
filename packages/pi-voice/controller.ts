@@ -35,6 +35,12 @@ export interface StartResult {
     resumed: boolean;
 }
 
+/**
+ * One token per Pi process. Reusing it means `/voice restart` keeps an already
+ * open page working instead of leaving it to reconnect forever against a new token.
+ */
+const PROCESS_TOKEN = randomBytes(16).toString("hex");
+
 export class VoiceController implements VoiceControl {
     #config: VoiceConfig;
     /** Snapshot the setup builder reads; mutated in place when degrading features. */
@@ -162,7 +168,7 @@ export class VoiceController implements VoiceControl {
             alwaysOn: this.#config.alwaysOn,
         });
 
-        const token = randomBytes(16).toString("hex");
+        const token = PROCESS_TOKEN;
 
         this.#server = await startAudioServer({
             host: this.#config.host,
@@ -612,6 +618,10 @@ export class VoiceController implements VoiceControl {
                 if (typeof message.value === "number") {
                     this.pushLevel(message.value);
                 }
+                break;
+
+            case "mic":
+                // The page reports its own mic state; nothing to do server-side.
                 break;
 
             case "end":

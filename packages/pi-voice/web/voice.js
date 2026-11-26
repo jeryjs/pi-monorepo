@@ -52,6 +52,7 @@ const state = {
     awake: false,
     ending: false,
     reconnectTimer: null,
+    reconnectAttempts: 0,
     lastVoiceAt: 0,
     lines: { user: null, model: null },
     bufferMs: 0,
@@ -126,17 +127,23 @@ function notice(text, ms = 6000) {
 // ---------------------------------------------------------------------------
 
 function connect() {
+    if (!TOKEN) {
+        setDot("error", "missing access token — open the URL Pi printed");
+        return;
+    }
+
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${scheme}://${location.host}/ws?t=${encodeURIComponent(TOKEN)}`);
     socket.binaryType = "arraybuffer";
     state.ws = socket;
 
     socket.onopen = () => {
+        state.reconnectAttempts = 0;
         setDot("live", "connected");
         send({ t: "hello", ua: navigator.userAgent, compute: pickCompute(state.config.compute) });
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
         state.ws = null;
 
         if (state.ending) {
@@ -144,9 +151,19 @@ function connect() {
             return;
         }
 
-        setDot("error", "reconnecting…");
+        state.reconnectAttempts += 1;
+
+        // An old tab carries a token from a previous Pi process. Retrying cannot
+        // fix that, so say so instead of spamming "reconnecting" forever.
+        if (state.reconnectAttempts > 6) {
+            setDot("error", `disconnected (${event.code}) — reopen the URL Pi printed`);
+            return;
+        }
+
+        const delay = Math.min(8000, 500 * 1.7 ** (state.reconnectAttempts - 1));
+        setDot("error", `reconnecting (${event.code})…`);
         clearTimeout(state.reconnectTimer);
-        state.reconnectTimer = setTimeout(connect, 900);
+        state.reconnectTimer = setTimeout(connect, delay);
     };
 
     socket.onerror = () => setDot("error", "socket error");
@@ -222,6 +239,7 @@ function onControl(message) {
             break;
 
         case "hello":
+            state.reconnectAttempts = 0;
             if (typeof message.alwaysOn === "boolean") {
                 state.alwaysOn = message.alwaysOn;
                 ui.alwaysOn.checked = message.alwaysOn;
@@ -545,6 +563,10 @@ async function toggleTalk() {
     }
 
     state.micOn = !state.micOn;
+
+    if (state.micOn) {
+        ui.notice.classList.add("hidden");
+    }
 
     if (state.micOn && state.alwaysOn && !state.awake) {
         // In always-on mode the button means "listen now".

@@ -139,7 +139,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     customVocabulary: [],
     proactiveAudio: false,
     proactiveVideo: false,
-    affectiveDialog: true,
+    affectiveDialog: false,
     thinkingLevel: "",
     thinkingBudget: 0,
     vadSilenceMs: 500,

@@ -38,6 +38,16 @@ context, so the microphone is allowed. Then press **Start listening**, or enable
 Say the wake phrase (default **“hey pi”**). The TUI status bar shows a live mic
 waveform either way, so you can see whether Pi is hearing you.
 
+### Start with voice
+
+```bash
+pi --voice
+```
+
+Registers `--voice`: starts enabled, opens the page, and turns on always-on wake
+listening (waiting for the wake phrase). One click in the page is still required
+before any browser starts audio.
+
 ### Key
 
 Resolved in the same order Pi's own Google provider uses:
@@ -135,13 +145,23 @@ FAIL gemini-3.1-flash-live-preview    close 1011: quota…
 ```
 
 **`1011 exceeded your current quota` even though `diagnose` passed** — that was a
-real bug in the completer's sibling: `diagnose` used to probe a *minimal* setup,
-so it tested the key but not the tools. The culprit is **Google Search
-grounding**: function declarations connect fine, but `{googleSearch:{}}` alone
-makes a free-tier project refuse the entire session with that 1011. It is now
-off by default; enable it with `/voice set {"searchGrounding":true}` only on a
-billed project. If it is still refused, the extension drops it and reconnects
-once automatically. `diagnose` now probes the exact setup the session sends.
+real bug: `diagnose` used to probe a *minimal* setup, so it tested the key but
+not the tools. The culprit is **Google Search grounding**: function declarations
+connect fine, but `{googleSearch:{}}` alone makes a free-tier project refuse the
+entire session with that 1011. It is now off by default; enable it with
+`/voice set {"searchGrounding":true}` only on a billed project. If it is still
+refused, the extension drops it and reconnects once automatically. `diagnose`
+now probes the exact setup the session sends.
+
+**Session connects, then every mic frame closes it with `1007`** — two Live API
+traps, both handled now:
+
+- `enableAffectiveDialog` is **accepted at setup** on 3.8 but makes the first
+audio frame invalid. It is gated off per model (`capabilities.affectiveDialog`),
+so it is never sent unless a model actually supports it.
+- `audioStreamEnd` and `activityStart`/`activityEnd` are only valid with
+**manual** VAD. With automatic VAD the session now stops sending frames instead
+of emitting those markers.
 
 **`1007 Thinking level must be specified`** — extended-thinking models reject a
 setup without a level. The setup builder now supplies `low` automatically; set

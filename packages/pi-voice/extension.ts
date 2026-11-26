@@ -67,6 +67,12 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
     setDebug(config.debug);
 
+    pi.registerFlag("voice", {
+        description: "Start with voice enabled and always-on (waiting for the wake phrase)",
+        type: "boolean",
+        default: false,
+    });
+
     const refreshStatus = (ctx: ExtensionContext | undefined = context): void => {
         try {
             if (controller?.running) {
@@ -177,12 +183,24 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     pi.on("session_start", async (_event, ctx) => {
         context = ctx;
         config = loadVoiceConfig();
+
+        // `pi --voice` starts enabled and listening for the wake phrase.
+        const forced = pi.getFlag("voice") === true;
+
+        if (forced) {
+            config = patchVoiceConfig(config, { enabled: true, autoStart: true, alwaysOn: true });
+        }
+
         setDebug(config.debug);
         refreshStatus(ctx);
 
-        if (config.enabled && config.autoStart) {
+        if (config.enabled && (config.autoStart || forced)) {
             try {
                 await start();
+
+                if (forced) {
+                    controller?.setAlwaysOn(true);
+                }
             } catch (error) {
                 warn("extension", `auto-start failed: ${String(error)}`);
             }

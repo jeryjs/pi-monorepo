@@ -11,10 +11,7 @@
 
 import { Emitter, backoffDelay, log, sleep, warn } from "../util.ts";
 import {
-    activityEndMessage,
-    activityStartMessage,
     audioInputMessage,
-    audioStreamEndMessage,
     clientContentMessage,
     decodePcmBase64,
     durationToMs,
@@ -161,6 +158,8 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     #ws: WebSocketLike | undefined;
     #state: LiveState = "idle";
     #handle: string | undefined;
+    /** True only when the handle came from persisted state, not from this connection. */
+    #handleFromStore = false;
     #attempt = 0;
     #generation = 0;
     #closedByUser = false;
@@ -193,6 +192,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     /** Seed the handle to resume on the next connect (from persisted session state). */
     setResumptionHandle(handle: string | undefined): void {
         this.#handle = handle;
+        this.#handleFromStore = Boolean(handle);
     }
 
     get streaming(): boolean {
@@ -293,7 +293,8 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             this.#lastActivity = Date.now();
             this.#setState(this.#setupComplete ? "live" : this.#state);
         } else {
-            this.#send(audioStreamEndMessage());
+            // No audioStreamEnd: it is only valid with manual VAD, and we use
+            // automatic VAD. Stopping the frames is enough to gate upstream.
             this.#setState("sleeping");
         }
     }
@@ -324,14 +325,14 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         this.#send(toolResponseMessage(responses));
     }
 
-    /** Cut the model off immediately (programmatic barge-in). */
+    /** Cut the model off locally. Server-side barge-in is driven by mic audio. */
     interrupt(): void {
         if (this.#state !== "live") {
             return;
         }
 
-        this.#send(activityStartMessage());
-        this.#send(activityEndMessage());
+        // activityStart/activityEnd are only valid with manual VAD; sending them
+        // under automatic VAD is rejected (1007). The page flushes playback.
         this.emit("interrupted", undefined);
     }
 
@@ -426,7 +427,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
 
         // A resumption handle can be invalidated server-side (or belong to an
         // older project/key). Drop it and reconnect fresh instead of dying.
-        if (this.#handle && isStaleHandleClose(code, reason)) {
+        if (this.#handleFromStore && this.#handle && isStaleHandleClose(code, reason)) {
             this.#handle = undefined;
             this.#attempt = 0;
             this.emit("handleInvalid", undefined);
@@ -511,6 +512,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         if (message.setupComplete) {
             this.#setupComplete = true;
             this.#attempt = 0;
+            this.#handleFromStore = false;
             this.#setState(this.#streaming ? "live" : "sleeping");
             log("live", "setup complete");
             return;
