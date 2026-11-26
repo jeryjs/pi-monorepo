@@ -92,7 +92,20 @@ test("tools include functions, mic VAD configured", () => {
     // Grounding is opt-in: free-tier projects refuse it with a 1011 quota close.
     assert.ok(!tools.some((entry) => entry.googleSearch !== undefined));
     assert.equal(setup.realtimeInputConfig.automaticActivityDetection.disabled, false);
-    assert.equal(setup.realtimeInputConfig.activityHandling, "START_OF_ACTIVITY_INTERRUPTS");
+    assert.equal(setup.realtimeInputConfig.activityHandling, "NO_INTERRUPTION");
+});
+
+test("barge-in is opt-in (echo otherwise cuts the model mid-sentence)", () => {
+    assert.equal(DEFAULT_VOICE_CONFIG.bargeIn, false);
+
+    const on = createSetupBuilder({
+        config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { bargeIn: true }),
+        capabilities: caps,
+        systemInstruction: "x",
+        tools: [],
+    })(undefined) as Record<string, any>;
+
+    assert.equal(on.realtimeInputConfig.activityHandling, "START_OF_ACTIVITY_INTERRUPTS");
 });
 
 test("search grounding is opt-in", () => {
@@ -190,7 +203,7 @@ test("garbage normalizes to defaults", () => {
     assert.equal(config.model, DEFAULT_VOICE_CONFIG.model);
     assert.equal(config.alwaysOn, false);
     assert.equal(config.vadSilenceMs, 4000);
-    assert.equal(config.audio, "browser");
+    assert.equal(config.audio, "native");
 });
 
 test("patch applies and re-normalizes", () => {
@@ -201,6 +214,10 @@ test("patch applies and re-normalizes", () => {
 });
 
 console.log("prompt");
+test("native is the default transport; browser is opt-in", () => {
+    assert.equal(DEFAULT_VOICE_CONFIG.audio, "native");
+});
+
 test("persona encodes bridge role and autonomy", () => {
     const text = buildSystemInstruction({
         config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { persona: "Call me boss." }),
@@ -212,6 +229,7 @@ test("persona encodes bridge role and autonomy", () => {
     assert.ok(text.includes("Call me boss."));
     assert.ok(text.includes("C:/proj"));
     assert.ok(text.includes("voice_approve"));
+    assert.ok(text.includes("voice_sleep"));
 });
 
 console.log("util");

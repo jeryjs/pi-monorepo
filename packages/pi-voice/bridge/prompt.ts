@@ -57,6 +57,14 @@ export function buildSystemInstruction(input: PromptInput): string {
         lines.push("- Pi will tell you when long work finishes or fails; report it briefly without being asked, once.");
     }
 
+    lines.push(
+        "Ending a conversation:",
+        "- If the user says they are done, finished, want to stop talking, are leaving, or says goodnight "
+        + "(“that's all”, “we can stop”, “thanks, bye”, “stop listening”), say one short goodbye and then call "
+        + "voice_sleep. Do not keep listening or ask more questions after that.",
+        "- voice_sleep only gates your ears: Pi keeps working, and the wake phrase brings you back.",
+    );
+
     if (config.searchGrounding) {
         lines.push("- You may use Google Search for fresh, factual questions the codebase cannot answer.");
     }

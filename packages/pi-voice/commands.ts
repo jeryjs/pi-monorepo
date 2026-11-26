@@ -1,24 +1,16 @@
 /**
- * `/voice` command surface. Deliberately command-first (no settings UI): the
- * config file is small and hand-editable, and this keeps the extension light.
+ * `/voice` command surface. No arguments opens the settings TUI; subcommands
+ * remain for scripting and quick actions.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { capabilitiesFor, describeModels, liveModelIds } from "./capabilities.ts";
 import { completeVoiceArguments } from "./completions.ts";
 import type { VoiceConfig } from "./config.ts";
-import type { VoiceController } from "./controller.ts";
+import type { VoiceRuntime } from "./runtime.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
 
-export interface VoiceRuntime {
-    getConfig(): VoiceConfig;
-    patch(patch: Partial<VoiceConfig>): VoiceConfig;
-    controller(): VoiceController | undefined;
-    start(): Promise<void>;
-    stop(): Promise<void>;
-    /** Open a real Live socket per model and report what the server says. */
-    diagnose(): Promise<string>;
-}
+export type { VoiceRuntime } from "./runtime.ts";
 
 function say(ctx: ExtensionCommandContext, message: string, type: "info" | "warning" | "error" = "info"): void {
     try {
@@ -80,6 +72,59 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
             const trimmed = args.trim();
 
             if (!trimmed) {
+                if (ctx.mode === "tui") {
+                    // Lazy: keep the extension entry light and only load the TUI
+                    // when the settings screen is actually opened.
+                    const { openVoiceTui } = await import("./tui.ts");
+                    const action = await openVoiceTui(runtime, ctx);
+
+                    switch (action) {
+                        case "restart":
+                            await runtime.stop();
+
+                            try {
+                                await runtime.start();
+                                say(ctx, "voice restarted", "info");
+                            } catch (error) {
+                                say(ctx, `voice failed to start: ${String(error)}`, "error");
+                            }
+                            return;
+
+                        case "stop":
+                            await runtime.stop();
+                            say(ctx, "voice off", "info");
+                            return;
+
+                        case "diagnose": {
+                            say(ctx, "probing the Live API with your key…", "info");
+
+                            try {
+                                say(ctx, await runtime.diagnose(), "info");
+                            } catch (error) {
+                                say(ctx, `diagnose failed: ${String(error)}`, "error");
+                            }
+                            return;
+                        }
+
+                        case "open": {
+                            const controller = runtime.controller();
+
+                            if (!controller?.running || !controller.url) {
+                                say(ctx, "browser transport is off: set Transport to browser", "warning");
+                                return;
+                            }
+
+                            controller.openPage();
+                            say(ctx, controller.url, "info");
+                            return;
+                        }
+
+                        default:
+                            say(ctx, "voice settings saved", "info");
+                            return;
+                    }
+                }
+
                 say(ctx, statusText(runtime), "info");
 
                 return;

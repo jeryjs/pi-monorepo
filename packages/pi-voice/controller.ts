@@ -92,6 +92,17 @@ export class VoiceController implements VoiceControl {
         return this.#server?.url;
     }
 
+    /** Open the companion page (no-op when the browser transport is off). */
+    openPage(): boolean {
+        if (!this.#server) {
+            return false;
+        }
+
+        this.#open(this.#server.url);
+
+        return true;
+    }
+
     get model(): string {
         return this.#config.model;
     }
@@ -170,18 +181,25 @@ export class VoiceController implements VoiceControl {
 
         const token = PROCESS_TOKEN;
 
-        this.#server = await startAudioServer({
-            host: this.#config.host,
-            port: this.#config.port,
-            token,
-            clientConfig: () => this.#clientConfig(),
-            onPeer: (peer, attach) => {
-                this.#peers.add(peer);
-                attach((data, isBinary) => this.#onPeerData(peer, data, isBinary));
-                this.#sendHello(peer);
-            },
-            onLog: (message) => log("audio", message),
-        });
+        // Browser transport is opt-in: native (ffmpeg) is the default, so no HTTP
+        // server, no page, no tab unless `audio` is `browser`/`both`.
+        const wantsBrowser = this.#config.audio !== "native";
+        const wantsNative = this.#config.audio !== "browser";
+
+        if (wantsBrowser) {
+            this.#server = await startAudioServer({
+                host: this.#config.host,
+                port: this.#config.port,
+                token,
+                clientConfig: () => this.#clientConfig(),
+                onPeer: (peer, attach) => {
+                    this.#peers.add(peer);
+                    attach((data, isBinary) => this.#onPeerData(peer, data, isBinary));
+                    this.#sendHello(peer);
+                },
+                onLog: (message) => log("audio", message),
+            });
+        }
 
         const buildSetup = createSetupBuilder({
             config: this.#setupConfig,
@@ -210,35 +228,46 @@ export class VoiceController implements VoiceControl {
 
         session.connect();
 
-        if (this.#config.audio !== "browser") {
+        if (wantsNative) {
+            const native = new NativeTransport({
+                config: this.#config,
+                onMic: (bytes) => {
+                    if (!this.#session) {
+                        return;
+                    }
+
+                    if (!this.#session.streaming) {
+                        this.#session.setStreaming(true);
+                    }
+
+                    this.#session.sendMic(bytes);
+                },
+                onWake: (source) => {
+                    this.wake();
+                    this.#broadcast({ t: "wake", source });
+                },
+                onLog: (message) => log("native", message),
+                onLevel: (value) => this.pushLevel(value),
+                onError: (message) => warn("native", message),
+            });
+
             try {
-                const native = new NativeTransport({
-                    config: this.#config,
-                    onMic: (bytes) => {
-                        if (!this.#session) {
-                            return;
-                        }
-
-                        if (!this.#session.streaming) {
-                            this.#session.setStreaming(true);
-                        }
-
-                        this.#session.sendMic(bytes);
-                    },
-                    onWake: (source) => {
-                        this.wake();
-                        this.#broadcast({ t: "wake", source });
-                    },
-                    onLog: (message) => log("native", message),
-                    onLevel: (value) => this.pushLevel(value),
-                    onError: (message) => warn("native", message),
-                });
-
                 await native.start();
                 this.#native = native;
                 this.#native.setStreaming(!this.#config.alwaysOn);
             } catch (error) {
-                warn("controller", `native audio unavailable: ${String(error)}`);
+                if (!wantsBrowser) {
+                    session.close();
+                    await this.#server?.close();
+                    this.#server = undefined;
+
+                    throw new Error(
+                        `native audio unavailable: ${String(error)}. `
+                        + "Install ffmpeg, set the input device in /voice → Audio, or switch transport to browser.",
+                    );
+                }
+
+                warn("controller", `native audio unavailable: ${String(error)} (continuing with browser)`);
             }
         }
         this.#running = true;
@@ -256,12 +285,12 @@ export class VoiceController implements VoiceControl {
             voice: this.#config.voice,
         });
 
-        if (this.#config.openBrowser && this.#config.audio !== "native") {
+        if (this.#server && this.#config.openBrowser) {
             this.#open(this.#server.url);
         }
 
         return {
-            url: this.#server.url,
+            url: this.#server?.url ?? "",
             model: this.#config.model,
             voice: this.#config.voice,
             resumed: Boolean(previous.handle),
@@ -524,6 +553,7 @@ export class VoiceController implements VoiceControl {
             micDeviceId: config.micDeviceId,
             outputDeviceId: config.outputDeviceId,
             alwaysOn: config.alwaysOn,
+            bargeIn: config.bargeIn,
             wakePhrases: config.wakePhrases,
             wakeEngine: config.wakeEngine,
             wakeSensitivity: config.wakeSensitivity,

@@ -80,7 +80,9 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
         },
         {
             name: "voice_sleep",
-            description: "Stop listening and go quiet until the user says the wake phrase again.",
+            description:
+                "Stop listening until the wake phrase. Call this when the user signals they are done talking "
+                + "(finished, leaving, goodnight, “we can stop”, “that's all”), after one short goodbye.",
             parameters: obj({ reason: { type: "string" } }),
         },
         {

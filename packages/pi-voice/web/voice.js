@@ -53,9 +53,9 @@ const state = {
     ending: false,
     reconnectTimer: null,
     reconnectAttempts: 0,
+    playbackMs: 0,
     lastVoiceAt: 0,
     lines: { user: null, model: null },
-    bufferMs: 0,
     tokens: 0,
     startedAt: 0,
 };
@@ -213,7 +213,8 @@ function onControl(message) {
         case "sleep":
             state.awake = false;
             setChip("wake: asleep");
-            flushPlayback();
+            // Do not flush: the model may still be saying goodbye. Only an
+            // explicit interrupt should cut playback.
             break;
 
         case "wake":
@@ -285,7 +286,7 @@ async function ensureAudio() {
     playback.connect(ctx.destination);
     playback.port.onmessage = (event) => {
         if (event.data?.type === "buffer") {
-            state.bufferMs = event.data.ms;
+            state.playbackMs = event.data.ms;
             renderStats();
         }
     };
@@ -355,6 +356,14 @@ function onMicFrame(frame) {
 
     if (state.wakeEngine && state.wakeEngine.supportsFeed) {
         state.wakeEngine.feed(frame);
+    }
+
+    // Half-duplex by default: while the model is speaking, do not send the mic
+    // upstream. Speaker echo and room noise otherwise register as barge-in and
+    // the server cuts the model off mid-sentence. Barge-in is opt-in.
+    if (state.config.bargeIn !== true && state.playbackMs > 60) {
+        preRoll.push(frame);
+        return;
     }
 
     // Always-on with no explicit start still needs a pre-roll while asleep.
@@ -517,7 +526,7 @@ function appendTranscript(side, text, final) {
 
 function renderStats() {
     const parts = [
-        `buffer ${state.bufferMs}ms`,
+        `buffer ${state.playbackMs}ms`,
         `tokens ${state.tokens}`,
         `compute ${pickCompute(state.config.compute)}`,
         `backends ${Object.entries(detectComputeBackends()).filter(([, v]) => v).map(([k]) => k).join("/")}`,

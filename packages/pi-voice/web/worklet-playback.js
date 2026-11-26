@@ -22,6 +22,11 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.targetGain = 1;
         this.last = 0;
         this.idleFrames = 0;
+        // Start only once a small jitter buffer exists; network gaps otherwise
+        // sound like the model stopping mid-sentence.
+        this.primed = false;
+        this.primeSamples = Math.round(SOURCE_RATE * 0.09);
+        this.frames = 0;
 
         this.port.onmessage = (event) => {
             const message = event.data;
@@ -37,6 +42,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
                 this.pos = 0;
                 this.last = 0;
                 this.idleFrames = 0;
+                this.primed = false;
             } else if (message.type === "gain") {
                 this.targetGain = message.value;
             }
@@ -72,6 +78,23 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             return true;
         }
 
+        this.frames++;
+
+        if (!this.primed) {
+            if (this.count >= this.primeSamples) {
+                this.primed = true;
+            } else {
+                out.fill(0);
+                this.last = 0;
+
+                if (this.frames % 8 === 0) {
+                    this.port.postMessage({ type: "buffer", ms: Math.round((this.count / SOURCE_RATE) * 1000) });
+                }
+
+                return true;
+            }
+        }
+
         // Smooth gain toward the target to avoid zipper noise.
         this.gain += (this.targetGain - this.gain) * 0.02;
 
@@ -103,7 +126,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             this.pos -= advance;
         }
 
-        if ((this.idleFrames & 31) === 0) {
+        if (this.frames % 16 === 0) {
             this.port.postMessage({ type: "buffer", ms: Math.round((this.count / SOURCE_RATE) * 1000) });
         }
 

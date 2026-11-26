@@ -45,18 +45,49 @@ function hasBinary(command: string): boolean {
     }
 }
 
-function captureArgs(config: VoiceConfig): string[] {
-    const input = config.nativeInput.trim();
+function captureArgs(config: VoiceConfig, input: string): string[] {
+    const device = input.trim();
 
     if (process.platform === "win32") {
-        return ["-f", "dshow", "-i", input || "audio=default"];
+        return ["-f", "dshow", "-i", device || "audio=default"];
     }
 
     if (process.platform === "darwin") {
-        return ["-f", "avfoundation", "-i", input || ":0"];
+        return ["-f", "avfoundation", "-i", device || ":0"];
     }
 
-    return ["-f", "pulse", "-i", input || "default"];
+    return ["-f", "pulse", "-i", device || "default"];
+}
+
+/**
+ * Pick a capture device automatically so native works without configuration.
+ * On Windows, ffmpeg's dshow backend needs an exact device name, so ask it.
+ */
+export function detectDefaultInput(ffmpegPath: string): string {
+    if (process.platform !== "win32") {
+        return process.platform === "darwin" ? ":0" : "default";
+    }
+
+    try {
+        const result = spawnSync(
+            ffmpegPath,
+            ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            { encoding: "utf8", timeout: 8000, windowsHide: true },
+        );
+        const text = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+
+        for (const line of text.split(/\r?\n/)) {
+            const match = /"([^"]+)"\s+\(audio\)/.exec(line);
+
+            if (match?.[1]) {
+                return `audio=${match[1]}`;
+            }
+        }
+    } catch {
+        // fall through to the default
+    }
+
+    return "";
 }
 
 function playbackArgs(): string[] {
@@ -89,6 +120,7 @@ export class NativeTransport {
     #wakeCooldownUntil = 0;
     #starting = false;
     #started = false;
+    #input = "";
 
     readonly #options: NativeTransportOptions;
 
@@ -151,6 +183,8 @@ export class NativeTransport {
         }
 
         this.#spawnPlayer();
+        this.#input = config.nativeInput.trim() || detectDefaultInput(config.ffmpegPath);
+        this.#log(`native input device: ${this.#input || "none detected"}`);
         this.#spawnCapture();
         this.#started = true;
         this.#starting = false;
@@ -242,7 +276,7 @@ export class NativeTransport {
             "-hide_banner",
             "-loglevel",
             "error",
-            ...captureArgs(config),
+            ...captureArgs(config, this.#input),
             "-ac",
             "1",
             "-ar",

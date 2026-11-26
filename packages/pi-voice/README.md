@@ -19,24 +19,33 @@ work is needed. It is not a second coding agent — it is the go-between.
 - The Gemini socket lives **inside the Pi process**. The API key never reaches the
   browser, tool calls execute natively, and the extra loopback hop costs ~0.2 ms
   against a 20–100 ms network RTT.
-- Audio I/O is pluggable: a **browser tab** (default, real WebRTC echo
-  cancellation) or **native ffmpeg** (headless, no tab).
+- Audio I/O is pluggable and **native by default** (ffmpeg, headless, no tab).
+  The **browser companion page** (WebRTC echo cancellation) is opt-in via
+  `audio: "browser"` (or `"both"`).
 
 ## Quick start
 
 ```bash
 # from the monorepo root
-/voice on
+/voice          # open the settings screen
+/voice on       # start the voice session
 ```
 
-`/voice on` starts the local endpoint, connects the Live session, and opens the
-companion page (one tab in the browser you already run, ~15–40 MB).
+By default audio is **native**: the extension drives `ffmpeg`/`ffplay` directly,
+so there is no browser, no HTTP server and no tab. Install ffmpeg (it ships
+`ffplay`); on Windows the capture device is auto-detected.
 
-Open the page from the **printed URL** (`http://127.0.0.1:…`) — it is a secure
-context, so the microphone is allowed. Then press **Start listening**, or enable
-**Always-on wake word** (one click is required before any browser starts audio).
-Say the wake phrase (default **“hey pi”**). The TUI status bar shows a live mic
-waveform either way, so you can see whether Pi is hearing you.
+### Opting into the browser transport
+
+Set **Transport** to `browser` (or `both`) in `/voice`. The extension then starts
+the local companion page and prints its URL. Open it from that URL
+(`http://127.0.0.1:...`, a secure context), allow the microphone, and press
+**Start listening** or enable **Always-on wake word** — one click is required
+before any browser starts audio. This path gives WebRTC AEC and the offline
+phrase engines (sherpa / Web Speech).
+
+Either way the TUI status bar shows a live mic waveform, so you can see whether
+Pi is hearing you.
 
 ### Start with voice
 
@@ -44,9 +53,9 @@ waveform either way, so you can see whether Pi is hearing you.
 pi --voice
 ```
 
-Registers `--voice`: starts enabled, opens the page, and turns on always-on wake
-listening (waiting for the wake phrase). One click in the page is still required
-before any browser starts audio.
+Registers `--voice`: starts enabled and turns on always-on wake listening. With
+the default native transport there is no page; with `audio: "browser"` it opens
+the page and one click is required before audio starts.
 
 ### Key
 
@@ -63,15 +72,17 @@ Set one explicitly with `/voice key AIza...`, or `/voice key clear` to go back t
 
 ## Audio transports
 
-| | `audio: "browser"` (default) | `audio: "native"` |
+| | `audio: "native"` (default) | `audio: "browser"` (opt-in) |
 |---|---|---|
-| Echo cancellation | **WebRTC AEC3** (excellent) | half-duplex mute-while-speaking |
-| Extra RAM | ~15–40 MB (shared tab) | ~30–60 MB |
-| Needs | a browser tab open | `ffmpeg` + `ffplay` on PATH |
-| Wake word | sherpa KWS / Web Speech / VAD | energy VAD |
-| NPU | **WebNN → Intel AI Boost** | — |
+| Echo cancellation | half-duplex mute-while-speaking | **WebRTC AEC3** |
+| Extra RAM | ~30–60 MB | ~15–40 MB (shared tab) |
+| Needs | `ffmpeg` + `ffplay` on PATH | a browser tab open |
+| Wake word | energy VAD | sherpa KWS / Web Speech / VAD |
+| NPU | — | **WebNN → Intel AI Boost** |
 
-`audio: "both"` starts both and lets either side drive the session.
+`audio: "both"` starts both and lets either side drive the session. Leaving
+`nativeInput` empty auto-detects the first Windows dshow capture device; macOS
+and Linux default to `:0` / `default`.
 
 ### Native device strings
 
@@ -87,7 +98,9 @@ Set one explicitly with `/voice key AIza...`, or `/voice key clear` to go back t
 ## Wake word
 
 `alwaysOn` is **off by default**. Enable it with `/voice always-on on` or the
-toggle in the page. The status bar carries a live waveform:
+toggle in the page. In the native transport the detector is **energy VAD**; the
+phrase engines (sherpa / Web Speech) belong to the browser transport. The status
+bar carries a live waveform:
 
 ```
 voice live ▁▂▄▆▄▂ ·wake     # hearing you, always-on
@@ -200,10 +213,22 @@ Details that make it behave like a real completer:
 - `set` offers typed JSON snippets (`{"audio":"native"}`, `{"bargeIn":false}`, …).
 - Unknown input returns nothing, so Pi falls back cleanly.
 
+## Settings
+
+`/voice` with no arguments opens a searchable settings screen built from the same
+components as Pi's own `/settings`: every option in this file, text and number
+fields opened as submenus, changes saved as you go.
+
+```
+↑↓ move · Enter change · type to search
+Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Ctrl-O open page · Esc close
+```
+
 ## Commands
 
 ```
-/voice                     status
+/voice                     open the settings screen (TUI)
+/voice status              print status without the TUI
 /voice diagnose            open a real Live socket per model and report the server's answer
 /voice on | off | restart
 /voice url
@@ -242,6 +267,18 @@ The Pi side also gets a `voice` tool:
 voice({ action: "speak", text: "build finished, two tests failed" })
 voice({ action: "listen" | "sleep" | "status" | "always_on", enabled?: boolean })
 ```
+
+Saying you are done (“that's all”, “we can stop”, “goodnight”, “stop listening”)
+makes the model give one short goodbye and call `voice_sleep`, which stops the mic
+until the wake phrase brings it back. Pi itself keeps working.
+
+### Barge-in
+
+`bargeIn` is **off by default**. With server VAD interruptions enabled, speaker
+echo and room noise register as speech, so the model gets cut off mid-sentence
+and later resumes the unfinished sentence. While it speaks the page is
+half-duplex and playback prebuffers ~90 ms. Enable `bargeIn` only on headphones
+or a clean microphone; otherwise use the “Shh” button to stop playback.
 
 ## Autonomy and approvals
 
@@ -300,7 +337,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.2.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.3.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout

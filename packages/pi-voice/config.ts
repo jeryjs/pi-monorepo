@@ -144,7 +144,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     thinkingBudget: 0,
     vadSilenceMs: 500,
     vadPrefixMs: 40,
-    bargeIn: true,
+    bargeIn: false,
 
     digestTurns: 6,
     digestChars: 900,
@@ -155,7 +155,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     port: 8722,
     openBrowser: true,
 
-    audio: "browser",
+    audio: "native",
     nativeInput: "",
     nativeOutput: "",
     ffmpegPath: "ffmpeg",

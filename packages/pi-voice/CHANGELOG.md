@@ -5,6 +5,35 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-26
+
+Native transport by default, a full settings TUI, and the "model stops
+mid-sentence" fix.
+
+### Added
+
+- `/voice` with no arguments opens a full settings screen: searchable, every
+  option, text/number fields as submenus, and actions on control keys
+  (`Ctrl-R` restart, `Ctrl-T` stop, `Ctrl-D` diagnose, `Ctrl-O` page). Loaded
+  lazily so the extension entry stays light.
+- The native transport auto-detects the first Windows dshow capture device, so it
+  works without configuring `nativeInput`.
+- Ending a conversation: when the user says they are done, leaving, or says
+  goodnight, the model gives one short goodbye and calls `voice_sleep`, which
+  stops the mic until the wake phrase.
+
+### Changed
+
+- **Native (ffmpeg) is the default transport.** No HTTP server, page or browser
+  tab is started unless `audio` is `browser` or `both`.
+- **`bargeIn` is off by default.** With server VAD interruptions enabled, speaker
+  echo and room noise counted as speech and cut the model off mid-sentence; it
+  then resumed the unfinished sentence on the next turn. While the model speaks
+  the page is now half-duplex, and playback prebuffers ~90 ms so network gaps do
+  not sound like a stop.
+- The page no longer flushes playback when going to sleep, so a goodbye is not
+  cut off.
+
 ## [0.2.0] - 2026-11-26
 
 Fixes the "session connects, then dies on the first mic frame" failure and makes
