@@ -1,0 +1,31 @@
+{
+  "name": "@jeryjs/pi-voice",
+  "version": "0.1.0",
+  "description": "Always-on Gemini Live voice for Pi: a hands-free in-between assistant that talks with you and drives your Pi session",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node test/smoke.ts && node test/server.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "voice",
+    "gemini",
+    "live-api",
+    "realtime",
+    "wake-word"
+  ],
+  "author": "jeryjs",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
