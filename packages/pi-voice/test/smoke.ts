@@ -11,6 +11,7 @@ import { capabilitiesFor, liveModelIds } from "../capabilities.ts";
 import { completeVoiceArguments } from "../completions.ts";
 import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "../config.ts";
 import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
+import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
 import { friendlyCloseError, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
@@ -92,20 +93,18 @@ test("tools include functions, mic VAD configured", () => {
     // Grounding is opt-in: free-tier projects refuse it with a 1011 quota close.
     assert.ok(!tools.some((entry) => entry.googleSearch !== undefined));
     assert.equal(setup.realtimeInputConfig.automaticActivityDetection.disabled, false);
-    assert.equal(setup.realtimeInputConfig.activityHandling, "NO_INTERRUPTION");
+    assert.equal(setup.realtimeInputConfig.activityHandling, "START_OF_ACTIVITY_INTERRUPTS");
 });
 
-test("barge-in is opt-in (echo otherwise cuts the model mid-sentence)", () => {
-    assert.equal(DEFAULT_VOICE_CONFIG.bargeIn, false);
-
-    const on = createSetupBuilder({
-        config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { bargeIn: true }),
+test("barge-in can be turned off (no server interruptions)", () => {
+    const off = createSetupBuilder({
+        config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { bargeIn: false }),
         capabilities: caps,
         systemInstruction: "x",
         tools: [],
     })(undefined) as Record<string, any>;
 
-    assert.equal(on.realtimeInputConfig.activityHandling, "START_OF_ACTIVITY_INTERRUPTS");
+    assert.equal(off.realtimeInputConfig.activityHandling, "NO_INTERRUPTION");
 });
 
 test("search grounding is opt-in", () => {
@@ -473,6 +472,61 @@ test("package version matches the changelog", () => {
 
     assert.ok(first, "changelog has a versioned section");
     assert.equal(first?.[1], pkg.version);
+});
+
+console.log("native AEC");
+
+test("NLMS cancels a delayed echo", () => {
+    const rate = 16_000;
+    const total = rate; // 1 second is enough to converge
+    const delay = Math.round(rate * 0.04);
+    const reference = new Float32Array(total);
+    let seed = 123_456_789;
+    const random = (): number => {
+        seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+
+        return (seed / 0xffff_ffff) * 2 - 1;
+    };
+
+    for (let i = 0; i < total; i++) {
+        reference[i] = random() * 0.3;
+    }
+
+    const echo = new Float32Array(total);
+
+    for (let i = delay; i < total; i++) {
+        echo[i] = (reference[i - delay] as number) * 0.5;
+    }
+
+    const aec = new AcousticEchoCanceller({ delayMs: 40, taps: 1024 });
+    const frame = 320;
+    let input = 0;
+    let output = 0;
+
+    for (let start = 0; start + frame <= total; start += frame) {
+        aec.pushReference(reference.subarray(start, start + frame));
+        const mic = echo.subarray(start, start + frame);
+        const cleaned = aec.process(mic);
+
+        if (start > total / 2) {
+            for (let i = 0; i < frame; i++) {
+                input += (mic[i] as number) ** 2;
+                output += (cleaned[i] as number) ** 2;
+            }
+        }
+    }
+
+    assert.ok(output < input * 0.25, `residual ${output.toFixed(4)} vs echo ${input.toFixed(4)}`);
+});
+
+test("24k playback resamples to 16k for the AEC reference", () => {
+    assert.equal(resample24kTo16k(new Int16Array(2400)).length, 1600);
+    assert.equal(floatToInt16(new Float32Array([0, 1, -1]))[1], 32767);
+});
+
+test("native AEC defaults to NLMS full duplex", () => {
+    assert.equal(DEFAULT_VOICE_CONFIG.nativeAec, "nlms");
+    assert.equal(DEFAULT_VOICE_CONFIG.bargeIn, true);
 });
 
 console.log(`\n${passed} checks passed`);

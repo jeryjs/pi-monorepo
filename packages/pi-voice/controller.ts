@@ -25,6 +25,8 @@ import { LiveSession } from "./live/session.ts";
 import { createSetupBuilder } from "./live/setup.ts";
 import { persistVoiceState, readVoiceState } from "./state.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
+import { acquireLock, releaseLock, updateLockUrl } from "./lock.ts";
+import { clearPersistedHandle, loadPersistedHandle, savePersistedHandle } from "./persist.ts";
 import { setVoiceStatus, voiceStatusText } from "./ui.ts";
 import { log, warn } from "./util.ts";
 
@@ -65,8 +67,8 @@ export class VoiceController implements VoiceControl {
     #lastError: string | undefined;
     #startedAt = 0;
 
-    readonly #pi: ExtensionAPI;
-    readonly #ctx: ExtensionContext;
+    #pi: ExtensionAPI;
+    #ctx: ExtensionContext;
 
     constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig) {
         this.#pi = pi;
@@ -82,6 +84,19 @@ export class VoiceController implements VoiceControl {
 
     private get ctx(): ExtensionContext {
         return this.#ctx;
+    }
+
+    /**
+     * Reattach to a reloaded Pi session without dropping the Gemini connection.
+     * `/reload` disposes the old extension runner, so the bridge is rebuilt while
+     * the socket, audio transport and resumption handle stay intact.
+     */
+    rebind(pi: ExtensionAPI, ctx: ExtensionContext): void {
+        this.#pi = pi;
+        this.#ctx = ctx;
+        this.#bridge = new AgentBridge(pi, ctx.cwd);
+        this.#wireBridge();
+        this.#renderStatus(true);
     }
 
     get running(): boolean {
@@ -168,6 +183,16 @@ export class VoiceController implements VoiceControl {
             );
         }
 
+        const lock = acquireLock(this.ctx.cwd);
+
+        if (!lock.ok) {
+            throw new Error(
+                `voice is already running in this workspace (pid ${lock.lock.pid})`
+                + (lock.lock.url ? ` at ${lock.lock.url}` : "")
+                + ". Use that instance, or stop it first.",
+            );
+        }
+
         this.#capabilities = capabilitiesFor(this.#config.model);
         this.#setupConfig = { ...this.#config };
 
@@ -215,10 +240,13 @@ export class VoiceController implements VoiceControl {
         });
 
         const previous = readVoiceState(this.ctx);
-        const ageMs = previous.updatedAt ? Date.now() - Date.parse(previous.updatedAt) : Number.POSITIVE_INFINITY;
+        const persisted = loadPersistedHandle(this.ctx.cwd);
+        // Session entries vanish with --no-session, so fall back to the file.
+        const seed = previous.handle ? previous : persisted;
+        const ageMs = seed?.updatedAt ? Date.now() - Date.parse(seed.updatedAt) : Number.POSITIVE_INFINITY;
 
-        if (previous.handle && previous.model === this.#config.model && ageMs < 2 * 60 * 60_000) {
-            session.setResumptionHandle(previous.handle);
+        if (seed?.handle && seed.model === this.#config.model && ageMs < 2 * 60 * 60_000) {
+            session.setResumptionHandle(seed.handle);
             log("controller", "resuming previous voice session");
         }
 
@@ -231,6 +259,7 @@ export class VoiceController implements VoiceControl {
         if (wantsNative) {
             const native = new NativeTransport({
                 config: this.#config,
+                cwd: this.ctx.cwd,
                 onMic: (bytes) => {
                     if (!this.#session) {
                         return;
@@ -289,6 +318,8 @@ export class VoiceController implements VoiceControl {
             this.#open(this.#server.url);
         }
 
+        updateLockUrl(this.ctx.cwd, this.#server?.url);
+
         return {
             url: this.#server?.url ?? "",
             model: this.#config.model,
@@ -319,7 +350,10 @@ export class VoiceController implements VoiceControl {
 
         if (handle) {
             persistVoiceState(this.pi, { handle, model: this.#config.model, voice: this.#config.voice });
+            savePersistedHandle(this.ctx.cwd, { handle, model: this.#config.model, voice: this.#config.voice });
         }
+
+        releaseLock(this.ctx.cwd);
 
         this.#session?.close();
         this.#session = undefined;
@@ -456,6 +490,7 @@ export class VoiceController implements VoiceControl {
         session.on("handleInvalid", () => {
             // The persisted handle was rejected; make sure a restart does not reuse it.
             persistVoiceState(this.pi, { handle: undefined, model: this.#config.model, voice: this.#config.voice });
+            clearPersistedHandle(this.ctx.cwd);
             this.#broadcast({ t: "notice", text: "Saved voice session expired; starting a fresh one." });
         });
 
@@ -465,6 +500,7 @@ export class VoiceController implements VoiceControl {
             if (now - this.#lastPersist > 20_000) {
                 this.#lastPersist = now;
                 persistVoiceState(this.pi, { handle, model: this.#config.model, voice: this.#config.voice });
+                savePersistedHandle(this.ctx.cwd, { handle, model: this.#config.model, voice: this.#config.voice });
             }
         });
 

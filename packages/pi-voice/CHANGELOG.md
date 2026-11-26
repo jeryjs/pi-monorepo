@@ -5,6 +5,42 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-26
+
+Reload-safe sessions, one instance per workspace, native full duplex with real
+AEC, and offline native wake via sherpa.
+
+### Added
+
+- **`/reload` keeps the running voice session.** The controller is kept on the
+  process (not the extension module) and rebound to the reloaded runner, so a
+  reload no longer resumes an already-closed Live session (`1008`) or opens a
+  duplicate. `session_shutdown` with `reason: "reload"` deliberately does not
+  stop it.
+- **File-backed resumption state** at `~/.pi/agent/pi-voice-state.json`, keyed by
+  workspace, so continuation works with `--no-session` and across process
+  restarts (handles are valid for two hours after a session ends). A rejected
+  handle is cleared, and the next start is fresh.
+- **One instance per workspace** via a lock file recording the owning PID (and
+  page URL). A second Pi process in the same project refuses to start a duplicate
+  Live session and microphone, and reports the running instance.
+- **Native full duplex**: a time-domain NLMS acoustic echo canceller with
+  double-talk detection subtracts the known playback signal from the mic, so
+  barge-in works on speakers without the model hearing itself.
+- **Native wake via `sherpa-onnx-node`**: offline keyword spotting with a
+  provider option (`directml` can reach the GPU/NPU); falls back to energy VAD
+  when the module or model files are missing.
+
+### Changed
+
+- `bargeIn` is on by default again, now that echo control is in place in both
+  transports. Turn it off if a noisy room still cuts the model.
+- `nativeAec` defaults to `nlms` (full duplex) instead of `half-duplex`.
+
+### Fixed
+
+- Native wake pre-roll is generated from the AEC-cleaned signal.
+
 ## [0.3.0] - 2026-11-26
 
 Native transport by default, a full settings TUI, and the "model stops

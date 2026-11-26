@@ -15,6 +15,8 @@ import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { VoiceConfig } from "../config.ts";
 import { log, warn, RingBuffer, float32ToPcm16 } from "../util.ts";
+import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "./aec.ts";
+import { NativeKeywordSpotter } from "./kws.ts";
 
 export interface NativeTransportEvents {
     /** 16 kHz s16le microphone bytes, already gated. */
@@ -28,6 +30,8 @@ export interface NativeTransportEvents {
 
 export interface NativeTransportOptions {
     config: VoiceConfig;
+    /** Workspace, used to resolve a project-local sherpa-onnx-node. */
+    cwd?: string;
     onMic: (bytes: Uint8Array) => void;
     onWake: (source: string) => void;
     onLevel?: (value: number) => void;
@@ -121,6 +125,9 @@ export class NativeTransport {
     #starting = false;
     #started = false;
     #input = "";
+    #aec: AcousticEchoCanceller | undefined;
+    #kws: NativeKeywordSpotter | undefined;
+    #lastKeywordAt = 0;
 
     readonly #options: NativeTransportOptions;
 
@@ -185,6 +192,29 @@ export class NativeTransport {
         this.#spawnPlayer();
         this.#input = config.nativeInput.trim() || detectDefaultInput(config.ffmpegPath);
         this.#log(`native input device: ${this.#input || "none detected"}`);
+
+        if (config.nativeAec === "nlms") {
+            this.#aec = new AcousticEchoCanceller();
+            this.#log("native AEC: NLMS (full duplex)");
+        }
+
+        const wantsKws = config.wakeEngine === "sherpa"
+            || (config.wakeEngine === "auto" && config.kwsModelDir.trim().length > 0);
+
+        if (wantsKws) {
+            this.#kws = await NativeKeywordSpotter.create({
+                modelDir: config.kwsModelDir,
+                keywords: config.kwsKeywords,
+                provider: config.sherpaProvider,
+                onWake: () => undefined,
+                onLog: (message) => this.#log(message),
+            }, this.options.cwd);
+
+            if (!this.#kws) {
+                this.#log("native wake: sherpa unavailable, falling back to energy VAD");
+            }
+        }
+
         this.#spawnCapture();
         this.#started = true;
         this.#starting = false;
@@ -233,6 +263,13 @@ export class NativeTransport {
             player.stdin.write(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
         } catch (error) {
             log("native", "playback write failed", error);
+        }
+
+        if (this.#aec) {
+            // Feed the known playback signal as the echo reference.
+            const copy = Buffer.from(bytes);
+            const int16 = new Int16Array(copy.buffer, copy.byteOffset, Math.floor(copy.byteLength / 2));
+            this.#aec.pushReference(resample24kTo16k(int16));
         }
     }
 
@@ -331,32 +368,31 @@ export class NativeTransport {
         }
 
         const rms = Math.sqrt(sum / samples.length);
+        const rawFloat = this.#toFloat(samples);
         this.options.onLevel?.(rms);
 
         const bargeThreshold = 0.05;
 
         if (!this.#streaming) {
-            // Sleep: keep a pre-roll and look for speech onset.
-            this.#preRoll.push(this.#toFloat(samples));
+            // Sleep: keep a pre-roll and look for the wake phrase.
+            this.#preRoll.push(rawFloat);
+
+            if (this.#kws) {
+                this.#kws.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
+
+                return;
+            }
 
             if (rms > bargeThreshold && Date.now() > this.#wakeCooldownUntil) {
                 this.#wakeCooldownUntil = Date.now() + 1500;
-
-                // Hand the phrase (and a little before it) to the session so the
-                // wake words are not lost from the request.
-                const pre = this.#preRoll.tail(16_000 * 0.5);
-                this.#preRoll.clear();
-                this.options.onWake("energy");
-
-                if (pre.length > 0) {
-                    this.options.onMic(float32ToPcm16(pre));
-                }
+                this.#emitWake("energy");
             }
 
             return;
         }
 
-        // Half-duplex: while the model is speaking, only a clear barge-in gets through.
+        // Half-duplex only when AEC is disabled; NLMS keeps full duplex so the
+        // user can barge in without the model hearing itself.
         if (this.options.config.nativeAec === "half-duplex" && this.playing) {
             if (rms < bargeThreshold) {
                 return;
@@ -365,7 +401,38 @@ export class NativeTransport {
             this.flush();
         }
 
-        this.options.onMic(new Uint8Array(frame));
+        const outgoing = this.#aec
+            ? new Uint8Array(floatToInt16(this.#aec.process(rawFloat)).buffer)
+            : new Uint8Array(frame);
+
+        this.options.onMic(outgoing);
+    }
+
+    #onKeyword(keyword: string): void {
+        if (this.#streaming) {
+            return;
+        }
+
+        const now = Date.now();
+
+        if (now - this.#lastKeywordAt < 1200) {
+            return;
+        }
+
+        this.#lastKeywordAt = now;
+        this.#emitWake(`sherpa:${keyword}`);
+    }
+
+    /** Replay the phrase (and a little before it) so the model hears the request. */
+    #emitWake(source: string): void {
+        const pre = this.#preRoll.tail(16_000 * 0.5);
+        this.#preRoll.clear();
+        this.options.onWake(source);
+
+        if (pre.length > 0) {
+            const outgoing = this.#aec ? this.#aec.process(pre) : pre;
+            this.options.onMic(float32ToPcm16(outgoing));
+        }
     }
 
     #toFloat(samples: Int16Array): Float32Array {

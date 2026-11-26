@@ -74,11 +74,11 @@ Set one explicitly with `/voice key AIza...`, or `/voice key clear` to go back t
 
 | | `audio: "native"` (default) | `audio: "browser"` (opt-in) |
 |---|---|---|
-| Echo cancellation | half-duplex mute-while-speaking | **WebRTC AEC3** |
+| Echo cancellation | **NLMS AEC** (full duplex) | **WebRTC AEC3** |
 | Extra RAM | ~30–60 MB | ~15–40 MB (shared tab) |
 | Needs | `ffmpeg` + `ffplay` on PATH | a browser tab open |
-| Wake word | energy VAD | sherpa KWS / Web Speech / VAD |
-| NPU | — | **WebNN → Intel AI Boost** |
+| Wake word | sherpa KWS / energy VAD | sherpa WASM / Web Speech / VAD |
+| NPU | sherpa provider (`directml`) | **WebNN → Intel AI Boost** |
 
 `audio: "both"` starts both and lets either side drive the session. Leaving
 `nativeInput` empty auto-detects the first Windows dshow capture device; macOS
@@ -98,9 +98,10 @@ and Linux default to `:0` / `default`.
 ## Wake word
 
 `alwaysOn` is **off by default**. Enable it with `/voice always-on on` or the
-toggle in the page. In the native transport the detector is **energy VAD**; the
-phrase engines (sherpa / Web Speech) belong to the browser transport. The status
-bar carries a live waveform:
+toggle in the page. Native wake can use an offline sherpa-onnx-node keyword
+spotter (`kwsModelDir` + `kwsKeywords`; provider `directml` can reach the GPU/NPU)
+and otherwise falls back to energy VAD. The browser transport uses the sherpa
+WASM module or Web Speech. The status bar carries a live waveform:
 
 ```
 voice live ▁▂▄▆▄▂ ·wake     # hearing you, always-on
@@ -274,11 +275,11 @@ until the wake phrase brings it back. Pi itself keeps working.
 
 ### Barge-in
 
-`bargeIn` is **off by default**. With server VAD interruptions enabled, speaker
-echo and room noise register as speech, so the model gets cut off mid-sentence
-and later resumes the unfinished sentence. While it speaks the page is
-half-duplex and playback prebuffers ~90 ms. Enable `bargeIn` only on headphones
-or a clean microphone; otherwise use the “Shh” button to stop playback.
+`bargeIn` is **on**: speech interrupts the model. That needs echo control, which
+both transports provide — native runs an NLMS acoustic echo canceller in front of
+the mic (full duplex, double-talk aware), and the browser uses WebRTC AEC3. If the
+model still gets cut off, turn barge-in off in `/voice`; the page then goes
+half-duplex while it speaks and playback prebuffers ~90 ms.
 
 ## Autonomy and approvals
 
@@ -335,9 +336,24 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 - Free-tier traffic may be used to improve Google's products — don't route
   private audio through it.
 
+## Sessions and `/reload`
+
+- **`/reload` keeps the running voice session.** The controller lives on the
+  process rather than the extension module, so the reloaded module reclaims it and
+  rebinds to the new session runner: no `1008 session not found`, no duplicate
+  socket, no restart of the conversation.
+- The resumption handle is also written to
+  `~/.pi/agent/pi-voice-state.json`, keyed by workspace, so it survives
+  `--no-session` and process restarts. Handles are valid for two hours after a
+  session ends; if the server rejects one anyway, the extension clears it and
+  starts fresh once.
+- **One instance per workspace.** A lock file records the owning PID (and the
+  page URL in browser mode). A second Pi process in the same project refuses to
+  start a duplicate and points at the running instance instead.
+
 ## Version
 
-Current: **0.3.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.4.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout

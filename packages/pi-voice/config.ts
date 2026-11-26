@@ -34,6 +34,12 @@ export interface VoiceConfig {
     alwaysOn: boolean;
     wakePhrases: string[];
     wakeEngine: WakeEngine;
+    /** sherpa-onnx-node KWS model directory for native wake. Empty = energy VAD. */
+    kwsModelDir: string;
+    /** Keywords for the KWS model, e.g. "HEY PI :2.0". */
+    kwsKeywords: string;
+    /** sherpa provider: auto (DirectML then CPU), cpu, directml, cuda, nnapi, xnnpack, trt. */
+    sherpaProvider: string;
     /** sherpa-onnx keyword-spotter asset base URL (lazy-loaded, cached). */
     wakeModelUrl: string;
     /** 0..1, higher = easier to trigger. */
@@ -86,8 +92,8 @@ export interface VoiceConfig {
     nativeOutput: string;
     ffmpegPath: string;
     ffplayPath: string;
-    /** Native echo mitigation: half-duplex mute-while-speaking, or off. */
-    nativeAec: "half-duplex" | "off";
+    /** Native echo mitigation: NLMS AEC (full duplex), half-duplex mute, or off. */
+    nativeAec: "nlms" | "half-duplex" | "off";
     host: string;
     port: number;
     openBrowser: boolean;
@@ -117,6 +123,9 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     alwaysOn: false,
     wakePhrases: ["hey pi", "hi pi", "ok pi"],
     wakeEngine: "auto",
+    kwsModelDir: "",
+    kwsKeywords: "HEY PI :2.0",
+    sherpaProvider: "auto",
     wakeModelUrl: "",
     wakeSensitivity: 0.5,
     // CPU is the safe default for the local wake-word model; "auto" prefers
@@ -144,7 +153,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     thinkingBudget: 0,
     vadSilenceMs: 500,
     vadPrefixMs: 40,
-    bargeIn: false,
+    bargeIn: true,
 
     digestTurns: 6,
     digestChars: 900,
@@ -160,7 +169,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     nativeOutput: "",
     ffmpegPath: "ffmpeg",
     ffplayPath: "ffplay",
-    nativeAec: "half-duplex",
+    nativeAec: "nlms",
 
     autonomy: "approvals",
     voiceApprovals: true,
@@ -227,6 +236,9 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     alwaysOn: bool("alwaysOn"),
     wakePhrases: stringList("wakePhrases"),
     wakeEngine: oneOf("wakeEngine", ["auto", "sherpa", "webspeech", "energy"] as const),
+    kwsModelDir: str("kwsModelDir"),
+    kwsKeywords: str("kwsKeywords"),
+    sherpaProvider: str("sherpaProvider"),
     wakeModelUrl: str("wakeModelUrl"),
     wakeSensitivity: num("wakeSensitivity", 0, 1),
     compute: oneOf("compute", ["auto", "cpu", "webgpu", "webnn"] as const),
@@ -261,7 +273,7 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     nativeOutput: str("nativeOutput"),
     ffmpegPath: str("ffmpegPath"),
     ffplayPath: str("ffplayPath"),
-    nativeAec: oneOf("nativeAec", ["half-duplex", "off"] as const),
+    nativeAec: oneOf("nativeAec", ["nlms", "half-duplex", "off"] as const),
     autonomy: oneOf("autonomy", ["concierge", "steer", "approvals"] as const),
     voiceApprovals: bool("voiceApprovals"),
     announce: bool("announce"),

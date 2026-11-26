@@ -154,6 +154,9 @@ function buildItems(runtime: VoiceRuntime, theme: Theme, tui: TUI): SettingItem[
         textItem("wakeSensitivity", "Wake sensitivity", "0-1; higher = easier to trigger", String(config.wakeSensitivity), theme, tui),
         enumItem("compute", "Compute", "Wake-model backend: cpu, auto (NPU/GPU), webgpu, webnn", config.compute, ["cpu", "auto", "webgpu", "webnn"]),
         textItem("wakeModelUrl", "Wake model URL", "Browser: module exporting createKeywordSpotter", config.wakeModelUrl, theme, tui),
+        textItem("kwsModelDir", "Sherpa KWS model dir", "Native wake: sherpa-onnx-node model directory (empty = energy VAD)", config.kwsModelDir, theme, tui),
+        textItem("kwsKeywords", "Sherpa keywords", "e.g. 'HEY PI :2.0'", config.kwsKeywords, theme, tui),
+        enumItem("sherpaProvider", "Sherpa provider", "Inference backend; directml can use the GPU/NPU", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
         textItem("wakePhrases", "Wake phrases", "Comma-separated (default: hey pi)", config.wakePhrases.join(", "), theme, tui),
 
         textItem("language", "Language", "BCP-47 code, empty = automatic", config.language, theme, tui),
@@ -165,7 +168,7 @@ function buildItems(runtime: VoiceRuntime, theme: Theme, tui: TUI): SettingItem[
         textItem("customVocabulary", "Custom vocabulary", "Comma-separated words to bias recognition", config.customVocabulary.join(", "), theme, tui),
         boolItem("proactiveAudio", "Proactive audio", "Let the model ignore speech not addressed to it", config.proactiveAudio),
         boolItem("proactiveVideo", "Proactive video", "Let the model ignore irrelevant video", config.proactiveVideo),
-        boolItem("bargeIn", "Barge-in", "Off: echo and noise cannot cut the model off mid-sentence", config.bargeIn),
+        boolItem("bargeIn", "Barge-in", "Speech interrupts the model; needs good AEC, disable if it cuts", config.bargeIn),
         enumItem("thinkingLevel", "Thinking level", "Level for models that accept it (default = model default)", config.thinkingLevel || "Default", ["Default", "minimal", "low", "medium", "high"]),
         textItem("thinkingBudget", "Thinking budget", "Tokens; 0 = model default", String(config.thinkingBudget), theme, tui),
 
@@ -178,7 +181,7 @@ function buildItems(runtime: VoiceRuntime, theme: Theme, tui: TUI): SettingItem[
 
         textItem("nativeInput", "Native input device", "ffmpeg device: audio=<name> (Win), :0 (mac), default (Linux); empty = auto-detect", config.nativeInput, theme, tui),
         textItem("nativeOutput", "Native output device", "Playback device hint", config.nativeOutput, theme, tui),
-        enumItem("nativeAec", "Native echo", "half-duplex mutes the mic while the model speaks; off", config.nativeAec, ["half-duplex", "off"]),
+        enumItem("nativeAec", "Native echo", "nlms = full-duplex AEC; half-duplex mutes the mic; off", config.nativeAec, ["nlms", "half-duplex", "off"]),
         textItem("ffmpegPath", "ffmpeg path", "Binary used for native capture", config.ffmpegPath, theme, tui),
         textItem("ffplayPath", "ffplay path", "Binary used for native playback", config.ffplayPath, theme, tui),
 

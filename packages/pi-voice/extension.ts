@@ -12,6 +12,7 @@ import { VoiceController, type StartResult } from "./controller.ts";
 import { registerVoiceCommands, type VoiceRuntime } from "./commands.ts";
 import { diagnoseLive } from "./probe.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
+import { getController, removeController, setController } from "./registry.ts";
 import { capabilitiesFor, liveModelIds } from "./capabilities.ts";
 import { buildSystemInstruction } from "./bridge/prompt.ts";
 import { functionDeclarations } from "./bridge/tools.ts";
@@ -96,18 +97,35 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
         if (!controller) {
             controller = new VoiceController(pi, context, config);
+            setController(context.cwd, controller);
         } else {
             controller.updateConfig(config);
         }
 
-        const result = await controller.start();
-        refreshStatus();
+        try {
+            const result = await controller.start();
+            refreshStatus();
 
-        return result;
+            return result;
+        } catch (error) {
+            // A failed start (lock held, no ffmpeg, no key) must not leave a
+            // half-registered controller behind.
+            if (!controller.running) {
+                removeController(context.cwd, controller);
+                controller = undefined;
+            }
+
+            throw error;
+        }
     };
 
     const stop = async (): Promise<void> => {
         await controller?.stop();
+
+        if (context) {
+            removeController(context.cwd, controller);
+        }
+
         controller = undefined;
         refreshStatus();
     };
@@ -180,7 +198,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         },
     };
 
-    pi.on("session_start", async (_event, ctx) => {
+    pi.on("session_start", async (event, ctx) => {
         context = ctx;
         config = loadVoiceConfig();
 
@@ -191,6 +209,31 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             config = patchVoiceConfig(config, { enabled: true, autoStart: true, alwaysOn: true });
         }
 
+        const existing = getController(ctx.cwd);
+
+        // `/reload` disposes the old runner but not the process. Reclaim the live
+        // controller instead of resuming an already-closed Live session (1008) or
+        // opening a duplicate.
+        if (existing?.running && event.reason === "reload") {
+            controller = existing;
+            controller.rebind(pi, ctx);
+            controller.updateConfig(config);
+
+            if (forced) {
+                controller.setAlwaysOn(true);
+            }
+
+            refreshStatus(ctx);
+
+            return;
+        }
+
+        if (existing) {
+            await existing.stop();
+            removeController(ctx.cwd, existing);
+        }
+
+        controller = undefined;
         setDebug(config.debug);
         refreshStatus(ctx);
 
@@ -207,7 +250,12 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
     });
 
-    pi.on("session_shutdown", async () => {
+    pi.on("session_shutdown", async (event) => {
+        // Keep the live controller across `/reload`; the reloaded module reclaims it.
+        if (event.reason === "reload") {
+            return;
+        }
+
         await stop();
     });
 
