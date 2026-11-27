@@ -330,8 +330,9 @@ function makeController(
     ctx: ExtensionContext,
     config: VoiceConfig,
     createAudio: (options: NativeTransportOptions) => AudioSink = (options) => new SilentAudio(options),
+    onConfigChange?: (next: VoiceConfig) => void,
 ): VoiceController {
-    return new VoiceController(api, ctx, config, { createAudio });
+    return new VoiceController(api, ctx, config, { createAudio, onConfigChange });
 }
 
 function makeConfig(overrides: Partial<VoiceConfig> = {}): VoiceConfig {
@@ -512,6 +513,25 @@ await until(() => talker.liveState === "sleeping", "gate after the talking stops
 ok("silence after speech still reaches the idle gate");
 await talker.stop();
 
+// An open model turn is activity, not idleness. With a short idleSleepMs (5 s is
+// allowed) extended thinking or a slow tool call used to gate the mic mid-answer,
+// dropping barge-in and the user's reply.
+const busy = makeController(makePi().api, makeCtx(), makeConfig({ idleSleepMs: 300 }));
+
+await busy.start();
+await until(() => busy.liveState === "live", "busy: live");
+
+const busyConnection = live.connections[live.connections.length - 1]!;
+const pcm = Buffer.from(new Int16Array([0, 1_000, -1_000, 0]).buffer).toString("base64");
+
+live.send(busyConnection, { serverContent: { modelTurn: { parts: [{ inlineData: { data: pcm } }] } } });
+await new Promise((resolve) => setTimeout(resolve, 1200));
+assert.equal(busy.liveState, "live", "a turn that is still open must not be gated");
+live.send(busyConnection, { serverContent: { turnComplete: true } });
+await until(() => busy.liveState === "sleeping", "gate after the turn ends");
+ok("the idle gate waits for the open model turn instead of cutting the answer");
+await busy.stop();
+
 // ---------------------------------------------------------------------------
 // 5c. start asleep: no Live socket until the wake phrase
 // ---------------------------------------------------------------------------
@@ -582,6 +602,29 @@ wakeDisabled.updateConfig(makeConfig({ alwaysOn: false, connectOnWake: true }));
 await until(() => Boolean(live.connections[beforeDisable]?.setup), "connect after always-on off");
 await wakeDisabled.stop();
 ok("disabling always-on while asleep connects instead of leaving dead air");
+
+// The voice model's own `voice_always_on` tool reaches the controller through
+// setAlwaysOn(), not updateConfig(). That path used to flip the field alone: the
+// session stayed dormant and capture stayed gated, so the user's next sentence went
+// into a microphone that was not listening, and the wake phrase could not help
+// because it listened to the same closed mic.
+const persisted: boolean[] = [];
+const toolDisabled = makeController(makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: true, connectOnWake: true }),
+    undefined,
+    (next) => persisted.push(next.alwaysOn),
+);
+const beforeToolDisable = live.connections.length;
+
+await toolDisabled.start();
+assert.equal(toolDisabled.liveState, "asleep", "starts asleep with the wake word armed");
+toolDisabled.setAlwaysOn(false);
+await until(() => Boolean(live.connections[beforeToolDisable]?.setup), "connect after voice_always_on off");
+await until(() => toolDisabled.liveState === "live", "live after the tool turned always-on off");
+await toolDisabled.stop();
+assert.deepEqual(persisted, [false], "the tool's change is handed to the persister");
+ok("voice_always_on off while asleep connects the session and persists the change");
 
 // ---------------------------------------------------------------------------
 // 6. tool calls: honest results, real abort
@@ -755,6 +798,30 @@ await until(() => Boolean(live.connections[afterDrop]?.setup), "reconnect on wak
 await until(() => revivable.liveState === "live", "live again after wake");
 ok("the wake phrase opens a fresh session after the close (no restart needed)");
 await revivable.stop();
+
+// A handle *this* connection received can still be rejected: the server rotates
+// sessions and changes projects. Recovery used to be gated on "the handle came from
+// disk", so this case sat in `error` holding the dead handle, and every wake reused
+// it. Now the handle is cleared and a fresh session is opened.
+const rotated = makeController(makePi().api, makeCtx(), makeConfig());
+const rotatedIndex = live.connections.length;
+
+await rotated.start();
+await until(() => Boolean(live.connections[rotatedIndex]?.setup), "rotated: setup");
+await until(() => rotated.liveState === "live", "rotated: live");
+
+live.closeConnection(live.connections[rotatedIndex]!, 1008, "BidiGenerateContent session not found");
+await until(() => live.connections.length > rotatedIndex + 1, "reconnect after a rejected server handle");
+
+const freshHandle = live.connections[rotatedIndex + 1]!;
+await until(() => Boolean(freshHandle.setup), "fresh setup after the rejected handle");
+assert.equal(
+    (freshHandle.setup?.sessionResumption as { handle?: string } | undefined)?.handle,
+    undefined,
+    "the rejected handle is not sent again",
+);
+await rotated.stop();
+ok("a rejected handle issued by the server reconnects fresh instead of dying");
 
 // With no wake phrase there is nothing to re-arm, so the old behaviour stands.
 const noWake = makeController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false, connectOnWake: false }));

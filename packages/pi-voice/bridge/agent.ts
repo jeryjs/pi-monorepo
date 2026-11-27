@@ -75,10 +75,18 @@ function textOf(message: unknown): string {
     return parts.join(" ").trim();
 }
 
-function roleOf(message: unknown): "user" | "assistant" {
+/**
+ * Conversation role, or `undefined` for anything that is not the conversation.
+ *
+ * Pi emits `message_end` for tool results and system messages too. Treating every
+ * non-user message as an assistant reply meant a tool result was stored as
+ * `lastAssistant`, spoken aloud at `agent_settled`, and pasted into the digest —
+ * a shell command's output read out as if the agent had said it.
+ */
+function roleOf(message: unknown): "user" | "assistant" | undefined {
     const role = (message as { role?: unknown } | undefined)?.role;
 
-    return role === "user" ? "user" : "assistant";
+    return role === "user" ? "user" : role === "assistant" ? "assistant" : undefined;
 }
 
 export class AgentBridge {
@@ -182,6 +190,11 @@ export class AgentBridge {
             }
 
             const role = roleOf((event as { message?: unknown }).message);
+
+            if (!role) {
+                return;
+            }
+
             this.#recent.push({ role, text, at: Date.now() });
 
             if (this.#recent.length > this.keepMessages) {
@@ -264,7 +277,6 @@ export class AgentBridge {
             if (role !== "user" && role !== "assistant") {
                 continue;
             }
-
             seeded.push({ role, text, at: Date.now() });
         }
 
@@ -380,11 +392,16 @@ export class AgentBridge {
         this.ask("Stop what you are doing and wait for further instructions.", "steer");
     }
 
-    note(text: string): void {
+    /** Save a note into the Pi session. Returns false when the entry could not be written. */
+    note(text: string): boolean {
         try {
             this.pi.appendEntry("voice.note", { text, at: new Date().toISOString() });
+
+            return true;
         } catch (error) {
             log("bridge", "appendEntry failed", error);
+
+            return false;
         }
     }
 

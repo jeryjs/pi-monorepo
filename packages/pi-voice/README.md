@@ -172,7 +172,14 @@ unspellable phrase fails with a clear message and the `text2token` fallback.
 acoustics to one tokenised phrase, it decodes continuously and matches the
 *words*: one edit allowed per word of three or more letters, none for short ones,
 plus a length-guarded joined form, so `HAYPE`, `HEY P` and `HEYPI` fire while
-"hey bud", "the pie is ready" and "okay pi" do not.
+"hey bud", "the pie is ready" and "okay pi" do not. The joined form spends one
+edit per half rather than two across the whole string, which is what keeps "hey
+no" from opening a session while still accepting "HAY PE". It matches the whole
+decoded segment (not just the newly added words), so a phrase the decoder splits
+across two updates still fires.
+
+One known limit: a two-letter first word needs the decoder to emit it as its own
+word — with the wake phrase "ok pi", the transcript "OKAY PI" does not match.
 
 That matters because keyword spotting is unforgiving: on one real user's six
 recordings of "hey pi" the 3.3M spotter fired at no threshold, while a general ASR
@@ -542,11 +549,14 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
   the same instant cannot both win. A second Pi process in the same project
   refuses to start a duplicate and points at the running instance instead. Locks
   are advisory: a lock held by a dead PID (or older than 12 hours, in case the PID
-  was reused) is taken over rather than blocking voice forever.
+  was reused) is taken over rather than blocking voice forever — the takeover goes
+  through an exclusive claim file and is verified after writing, so two processes
+  starting together against the *same stale lock* cannot both end up believing
+  they own the workspace.
 
 ## Version
 
-Current: **0.7.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.7.1** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -564,7 +574,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (77) + lifecycle (35) + sherpa (13)
+npm test   # smoke (82) + lifecycle (38) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

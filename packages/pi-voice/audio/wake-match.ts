@@ -7,7 +7,10 @@
  * ("hey bud", "the pie is ready", "a pie").
  *
  * Rules: one edit per word of three or more letters, none for short words, and a
- * length-guarded joined form for words the decoder runs together.
+ * length-guarded joined form for words the decoder runs together. The joined form
+ * spends its one allowed edit per half rather than two across the whole string,
+ * which is the difference between "HAYPE" (a real way "hey pi" comes back) and
+ * "HEYNO" (ordinary speech).
  */
 
 export interface WakeMatch {
@@ -94,9 +97,21 @@ export function matchWakePhrase(text: string, phrases: readonly string[]): WakeM
             }
         }
 
-        // 2) joined: "HEYPI", "HAYPE", "HAY PE" -> "HAYPE". The length guard is what
-        //    keeps "HEY" alone (from "hey bud") from matching a 5-letter phrase.
+        // 2) joined: "HEYPI", "HAYPE", "HAY PE" -> "HAYPE".
+        //
+        // Budgeting two edits across the whole string made the short word free:
+        // "HEYNO" and "HEY PO" are both within two edits of "HEYPI", so "hey no"
+        // opened a session. Split the candidate into the same halves as the phrase
+        // and allow one edit in each: "HAY"+"PE" (1+1) still matches, "HEY"+"NO"
+        // (0+2) does not. For phrases longer than two words keep the strict budget.
         const joined = target.join("");
+        const head = target.slice(0, -1).join("");
+        const tail = target[target.length - 1] as string;
+
+        // Trade-off, deliberate: one edit in the short word still matches ("HEY PO"
+        // is one edit from HEYPI). Only a phonetic model could tell that apart from
+        // "HAY PE", which is a real way the decoder splits "hey pi". The strict rule
+        // (zero edits for short words) is the token path above.
 
         for (let i = 0; i < words.length; i++) {
             for (let span = 1; span <= 2 && i + span <= words.length; span++) {
@@ -106,9 +121,35 @@ export function matchWakePhrase(text: string, phrases: readonly string[]): WakeM
                     continue;
                 }
 
+                if (target.length === 2) {
+                    // The edit may fall on either side of the split ("HEYP" dropped a
+                    // letter from the head), so try the three plausible split points
+                    // instead of assuming the tail always starts at len - tail.length.
+                    const from = Math.max(0, head.length - 1);
+                    const to = Math.min(candidate.length, head.length + 1);
+                    let best = Number.POSITIVE_INFINITY;
+                    let split = -1;
+
+                    for (let headLength = from; headLength <= to; headLength++) {
+                        const headDistance = editDistance(candidate.slice(0, headLength), head);
+                        const tailDistance = editDistance(candidate.slice(headLength), tail);
+
+                        if (headDistance <= 1 && tailDistance <= 1 && headDistance + tailDistance < best) {
+                            best = headDistance + tailDistance;
+                            split = headLength;
+                        }
+                    }
+
+                    if (split >= 0) {
+                        return { matched: true, phrase, heard: candidate, distance: best };
+                    }
+
+                    continue;
+                }
+
                 const distance = editDistance(candidate, joined);
 
-                if (distance <= 2) {
+                if (distance <= 1) {
                     return { matched: true, phrase, heard: candidate, distance };
                 }
             }

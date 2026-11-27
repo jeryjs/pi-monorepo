@@ -194,8 +194,8 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     #ws: WebSocketLike | undefined;
     #state: LiveState = "idle";
     #handle: string | undefined;
-    /** True only when the handle came from persisted state, not from this connection. */
-    #handleFromStore = false;
+    /** Pending proactive-resume timer from a GoAway, scoped to its connection. */
+    #goAwayTimer: ReturnType<typeof setTimeout> | undefined;
     #attempt = 0;
     #generation = 0;
     #closedByUser = false;
@@ -232,7 +232,6 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
     /** Seed the handle to resume on the next connect (from persisted session state). */
     setResumptionHandle(handle: string | undefined): void {
         this.#handle = handle;
-        this.#handleFromStore = Boolean(handle);
     }
 
     get streaming(): boolean {
@@ -282,7 +281,14 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             }
 
             log("live", "socket open; sending setup");
-            socket.send(JSON.stringify({ setup: this.options.buildSetup(this.#handle) }));
+
+            try {
+                socket.send(JSON.stringify({ setup: this.options.buildSetup(this.#handle) }));
+            } catch (error) {
+                // An unguarded throw here escaped into the listener and left the
+                // session "connecting" forever with nothing reported.
+                this.emit("error", new Error(`could not send setup: ${String(error)}`));
+            }
         });
 
         socket.addEventListener("message", (event) => {
@@ -408,6 +414,11 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         this.#closedByUser = true;
         this.#generation++;
 
+        if (this.#goAwayTimer) {
+            clearTimeout(this.#goAwayTimer);
+            this.#goAwayTimer = undefined;
+        }
+
         if (this.#reconnectTimer) {
             clearTimeout(this.#reconnectTimer);
             this.#reconnectTimer = undefined;
@@ -430,7 +441,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
 
     // -----------------------------------------------------------------------
 
-    #send(payload: string, queueable = false): void {
+    #send(payload: string, queueable = false): boolean {
         const socket = this.#ws;
 
         // Audio is worthless once late, so it is dropped while reconnecting. Text
@@ -439,15 +450,21 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         if (!socket || socket.readyState !== OPEN || !this.#setupComplete) {
             if (queueable && this.#outbox.length < LiveSession.OUTBOX_LIMIT) {
                 this.#outbox.push(payload);
+
+                return true;
             }
 
-            return;
+            return false;
         }
 
         try {
             socket.send(payload);
+
+            return true;
         } catch (error) {
             log("live", "send failed", error);
+
+            return false;
         }
     }
 
@@ -477,9 +494,19 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
 
         const pending = this.#outbox.splice(0, this.#outbox.length);
         log("live", `flushing ${pending.length} queued message(s)`);
+        const failed: string[] = [];
 
         for (const payload of pending) {
-            this.#send(payload);
+            // Re-queue on failure: a tool result or approval prompt that vanished was
+            // the difference between the model answering and the user talking to nobody.
+            if (!this.#send(payload) && this.#outbox.length + failed.length < LiveSession.OUTBOX_LIMIT) {
+                failed.push(payload);
+            }
+        }
+
+        if (failed.length > 0) {
+            this.#outbox.unshift(...failed);
+            log("live", `${failed.length} queued message(s) could not be sent; keeping them`);
         }
     }
 
@@ -489,8 +516,12 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         }
 
         // A resumption handle can be invalidated server-side (or belong to an
-        // older project/key). Drop it and reconnect fresh instead of dying.
-        if (this.#handleFromStore && this.#handle && isStaleHandleClose(code, reason)) {
+        // older project/key). Drop it and reconnect fresh instead of dying. This
+        // used to be gated on "came from disk", but a handle issued by the server
+        // during this very connection can be rejected too (a rotated session, a
+        // changed project), and the session then sat in `error` retrying the same
+        // dead handle on every wake.
+        if (this.#handle && isStaleHandleClose(code, reason)) {
             this.#handle = undefined;
             this.#attempt = 0;
             this.emit("handleInvalid", undefined);
@@ -565,7 +596,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             const message = parseServerMessage(text);
 
             if (message) {
-                this.#handleServer(message);
+                this.#handleServer(message, generation);
             }
         };
 
@@ -581,11 +612,16 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         deliver(asText(data));
     }
 
-    #handleServer(message: ServerMessage): void {
+    #handleServer(message: ServerMessage, generation: number): void {
+        // A message from a socket that has already been replaced must not touch the
+        // handle, the outbox or the state of the connection that replaced it.
+        if (generation !== this.#generation) {
+            return;
+        }
+
         if (message.setupComplete) {
             this.#setupComplete = true;
             this.#attempt = 0;
-            this.#handleFromStore = false;
             this.#setState(this.#streaming ? "live" : "sleeping");
             log("live", "setup complete");
             this.#flushOutbox();
@@ -599,20 +635,47 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             if (update.resumable !== false) {
                 this.#handle = update.newHandle;
                 this.emit("resumption", update.newHandle);
+            } else {
+                // The server says this session cannot be resumed. Keeping the old
+                // handle meant the next connect sent one the server had just told us
+                // was dead, and the resulting close looked like a network failure.
+                this.#handle = undefined;
+                this.emit("handleInvalid", undefined);
+                log("live", "server marked the session unresumable; cleared the handle");
             }
+        } else if (message.sessionResumptionUpdate?.resumable === false && this.#handle) {
+            // Same update shape without a new handle: never ignore it.
+            this.#handle = undefined;
+            this.emit("handleInvalid", undefined);
+            log("live", "server marked the session unresumable; cleared the handle");
         }
 
         if (message.goAway) {
             const ms = durationToMs(message.goAway.timeLeft) ?? 0;
             this.emit("goAway", ms);
-            // Reconnect shortly before the server aborts the connection.
+
+            // Reconnect shortly before the server aborts the connection. Both the
+            // timer and the check are scoped to this connection: the old code only
+            // asked "is there a socket?", so a GoAway from a connection that had
+            // already been replaced killed the healthy new one.
             const lead = Math.max(500, ms - 1500);
-            setTimeout(() => {
-                if (!this.#closedByUser && this.#ws) {
-                    log("live", "proactive resume before GoAway");
-                    this.reconnectNow();
+            const forGeneration = generation;
+
+            if (this.#goAwayTimer) {
+                clearTimeout(this.#goAwayTimer);
+            }
+
+            this.#goAwayTimer = setTimeout(() => {
+                this.#goAwayTimer = undefined;
+
+                if (this.#closedByUser || forGeneration !== this.#generation || !this.#ws) {
+                    return;
                 }
-            }, lead).unref?.();
+
+                log("live", "proactive resume before GoAway");
+                this.reconnectNow();
+            }, lead);
+            (this.#goAwayTimer as { unref?: () => void }).unref?.();
         }
 
         if (message.toolCall?.functionCalls) {

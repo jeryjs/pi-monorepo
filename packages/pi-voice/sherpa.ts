@@ -439,9 +439,10 @@ export function npmInvocation(): Invocation {
         return { command: process.execPath, prefixArgs: [cli], shell: false };
     }
 
-    // Last resort: let a shell resolve npm.cmd. Args are quoted by cmd, so the
-    // prefix dir must not contain shell metacharacters.
-    return { command: "npm install", prefixArgs: [], shell: true };
+    // Last resort: let a shell resolve npm.cmd. The command is just "npm" — it used
+    // to be "npm install" while the argument list already started with "install",
+    // so the fallback tried to install a package literally named "install".
+    return { command: "npm", prefixArgs: [], shell: true };
 }
 
 function run(
@@ -595,7 +596,16 @@ async function download(url: string, target: string, onLine: (line: string) => v
 
     const total = Number(response.headers.get("content-length") ?? 0);
     const reader = response.body.getReader();
-    const fd = openSync(target, "w");
+    let fd: number;
+
+    try {
+        fd = openSync(target, "w");
+    } catch (error) {
+        // Outside the download loop: a permission error here used to reject the whole
+        // step instead of returning the installer's normal error result.
+        return { ok: false, detail: `cannot write ${target}: ${String(error)}` };
+    }
+
     let written = 0;
     let nextReport = 0;
 

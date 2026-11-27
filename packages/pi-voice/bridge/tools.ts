@@ -224,7 +224,9 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
                 return respond({ error: "text is required" });
             }
 
-            bridge.note(text);
+            if (!bridge.note(text)) {
+                return respond({ error: "the note could not be saved to the session; tell the user" });
+            }
 
             return respond({ status: "saved" });
         }

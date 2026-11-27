@@ -5,6 +5,83 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-12-01
+
+Two independent audits of 0.7.0 (one on the removal diff, one on runtime behaviour)
+found no crash, but they found ten real bugs. All are fixed here, each with a test.
+
+### Fixed
+
+- **Tool results were spoken as assistant replies.** `roleOf()` mapped every non-user
+  `message_end` to `assistant`, and Pi emits that event for `toolResult` messages. A
+  shell command's output became `lastAssistant`, was read out loud at `agent_settled`,
+  and was pasted into the digest. Now only `user`/`assistant` are stored — the same
+  filter `seedTranscript` already applied.
+- **`voice_always_on` changed a field and nothing else.** Turning the wake word off
+  while the session was asleep left it dormant with capture gated: the next sentence
+  went into a microphone that was not listening, and the wake phrase could not help
+  because it listened to the same closed mic. It now runs the same transition as
+  `/voice always-on off` and persists the change (`onConfigChange`), instead of
+  living only in memory.
+- **`/voice model` kept the old model's capabilities.** The setup builder captured
+  the capability table and the function declarations once, so switching to a preview
+  model still declared `NON_BLOCKING` tools it does not support and could omit the
+  thinking level an extended-thinking model requires. Both are resolved per connect,
+  and a model change drops the resumption handle that belonged to the old model.
+- **A server-issued resumption handle was rejected fatally.** Recovery was gated on
+  "the handle came from disk", so a handle the server invalidated mid-run left the
+  session in `error` holding it, and every wake reused it. Any stale-handle close now
+  clears the handle, reports `handleInvalid` (so the persisted copy goes too) and
+  reconnects fresh.
+- **`resumable: false` was ignored.** The old handle stayed and was sent on the next
+  connect, to a server that had just said the session could not be resumed. It is
+  cleared now, with or without a new handle in the same update.
+- **The ASR wake word missed split phrases.** Matching only the words added since the
+  previous pass required "hey pi" to arrive inside one decoder update: `"HEY"` then
+  `"HEY PI"` produced the windows `"HEY"` and `" PI"`, so the phrase never appeared.
+  It now matches the whole decoded segment, once per segment.
+- **"hey no" woke the ASR engine.** The joined form allowed two edits across the whole
+  string, which made a two-letter word almost free. It now spends one edit per half:
+  `HAY`+`PE` matches, `HEY`+`NO` does not. One edit in the short word is still
+  tolerated by design (`HEY PO`), because the same tolerance is what accepts a split
+  `HAY PE`.
+- **The idle gate could cut the model off mid-answer.** `#tickIdle` only looked at mic
+  silence, so with `idleSleepMs` at its 5 s minimum, extended thinking or a slow tool
+  call gated capture during an open turn and took barge-in and the user's reply with
+  it. An open model turn now counts as activity.
+- **`inputGain: 0` meant unity gain.** `gain > 0 ? gain : 1` turned a deliberate mute
+  into full volume. Zero (and any non-negative value) is applied as written.
+- **`playingUntil` ignored the playback backlog.** It was computed from the newest
+  chunk alone, and `flush()` reset it to 0 even as the replacement player was handed
+  that chunk. With a slow output device, `playing` went false while audio was still
+  audible, skipping AEC and half-duplex exactly when the model was loudest.
+
+### Changed
+
+- `AudioSink.stop()` is awaited: the capture process has to be gone before the lock is
+  released and a replacement takes the microphone. `/voice restart` and transport
+  rebuilds could otherwise re-open the device too early (Windows "device busy"), and
+  `stop()` escalates to SIGKILL after a grace period.
+- The capture restart counter only resets after 3 s of healthy audio (a device that
+  emitted one frame and died used to restart forever); capture is supervised on
+  `error` as well as `exit`, and ffplay is respawned after a clean exit too — a clean
+  exit used to leave the session with no player and no error.
+- Wake-engine exceptions are reported instead of swallowed (`onError` → `/voice
+  status`), and after 20 consecutive failures the engine marks itself failed so the
+  energy VAD takes over rather than feeding a dead recognizer.
+- `NativeKeywordSpotter` honours the `onWake` given to `create()` (it was required and
+  then ignored, so a caller using the documented contract hit an undefined call).
+- GoAway timers are tracked and generation-scoped (an old timer could kill a healthy
+  replacement socket), the setup frame's `send` is guarded, and the outbox re-queues
+  a failed flush instead of splicing text into the void.
+- Lock takeover is claimed atomically and verified after writing; `AcquireResult`
+  carries `reason: "busy" | "unwritable"` so the error says what actually happened.
+  Persisted state uses a unique temp file and prunes expired workspace entries.
+- `npm` fallback on Windows no longer runs `npm install install` (command was
+  `"npm install"` while the argument list already began with `install`).
+- `voice_note` / `voice` `speak` report failure instead of claiming success, and the
+  deferred-notice timer is cleared on teardown.
+
 ## [0.7.0] - 2026-12-01
 
 ### Removed

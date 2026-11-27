@@ -130,7 +130,19 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
 
         if (!controller) {
-            controller = new VoiceController(pi, context, config);
+            controller = new VoiceController(pi, context, config, {
+                // The voice model's `voice_always_on` tool changes a setting from inside
+                // the controller; persist it here so it survives the next start.
+                onConfigChange: (next) => {
+                    config = next;
+
+                    try {
+                        saveVoiceConfig(config);
+                    } catch (error) {
+                        warn("config", `could not save pi-voice.json: ${String(error)}`);
+                    }
+                },
+            });
             // `pi_stop` must really abort the running turn; the context is replaced on
             // reload, so read it through the closure instead of capturing a value.
             controller.setAgentAbort(() => {
@@ -442,7 +454,12 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     return { content: [{ type: "text", text: "text is required for action=speak" }] };
                 }
 
-                controller.speak(text);
+                // `speak` returns false when the session is reconnecting or closed;
+                // answering "spoken" regardless told the main agent the user had heard
+                // something they never heard.
+                if (!controller.speak(text)) {
+                    return { content: [{ type: "text", text: "the voice session could not speak right now (reconnecting or asleep); try again in a moment" }] };
+                }
 
                 return { content: [{ type: "text", text: "spoken" }] };
             }

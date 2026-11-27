@@ -115,12 +115,14 @@ export class VoiceController implements VoiceControl {
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
     #createAudio: (options: NativeTransportOptions) => AudioSink;
+    readonly #onConfigChange: ((config: VoiceConfig) => void) | undefined;
 
     constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig, options: VoiceControllerOptions = {}) {
         this.#pi = pi;
         this.#ctx = ctx;
         this.#config = config;
         this.#createAudio = options.createAudio ?? ((transportOptions) => new NativeTransport(transportOptions));
+        this.#onConfigChange = options.onConfigChange;
         this.#capabilities = capabilitiesFor(config.model);
         this.#bridge = new AgentBridge(pi, ctx.cwd);
         this.#seedBridgeFromSession();
@@ -335,10 +337,11 @@ export class VoiceController implements VoiceControl {
         const lock = acquireLock(this.ctx.cwd);
 
         if (!lock.ok) {
-            throw new Error(
-                `voice is already running in this workspace (pid ${lock.lock.pid})`
-                + ". Use that instance, or stop it first.",
-            );
+            const who = lock.reason === "unwritable"
+                ? `voice could not write its lock file in ${lock.lock.cwd} (is the agent directory read-only?)`
+                : `voice is already running in this workspace (pid ${lock.lock.pid})`;
+
+            throw new Error(`${who}. Use that instance, or stop it first.`);
         }
 
         this.#capabilities = capabilitiesFor(this.#config.model);
@@ -361,9 +364,12 @@ export class VoiceController implements VoiceControl {
 
         const buildSetup = createSetupBuilder({
             config: this.#setupConfig,
-            capabilities: this.#capabilities,
+            // Both are read per connect: `/voice model` changes the capability table,
+            // and a captured object kept declaring NON_BLOCKING tools (and omitting a
+            // required thinking level) for a model that no longer supports them.
+            capabilities: () => this.#capabilities,
             systemInstruction: instruction,
-            tools: functionDeclarations(this.#capabilities),
+            tools: () => functionDeclarations(this.#capabilities),
         });
 
         const session = new LiveSession({
@@ -425,7 +431,7 @@ export class VoiceController implements VoiceControl {
             this.#native = native;
             this.#native.setStreaming(!this.#config.alwaysOn);
         } catch (error) {
-            native.stop();
+            await Promise.resolve(native.stop()).catch(() => undefined);
 
             if (generation !== this.#generation) {
                 throw new Error("voice start cancelled");
@@ -508,7 +514,9 @@ export class VoiceController implements VoiceControl {
         this.#native = undefined;
 
         try {
-            native?.stop();
+            // Awaited: the capture process must be gone before the lock is released
+            // and a replacement can take the microphone (Windows "device busy").
+            await native?.stop();
         } catch (error) {
             log("controller", "native stop failed", error);
         }
@@ -522,6 +530,19 @@ export class VoiceController implements VoiceControl {
         this.#lastLevelAt = 0;
         this.#lastAudioOutAt = 0;
         this.#endDroppedAudio();
+
+        // A held notice belongs to the session that was just closed: leaving the
+        // timer armed let it fire into the next one.
+        if (this.#deferredNoticesTimer) {
+            clearTimeout(this.#deferredNoticesTimer);
+            this.#deferredNoticesTimer = undefined;
+        }
+
+        this.#deferredNotices = [];
+        this.#dropAudio = false;
+        // A turn left open by a session that died must not block the idle gate of the
+        // next one forever.
+        this.#modelTurnOpen = false;
         releaseLock(this.ctx.cwd);
     }
 
@@ -550,6 +571,15 @@ export class VoiceController implements VoiceControl {
 
         if (this.#setupConfig) {
             Object.assign(this.#setupConfig, config);
+        }
+
+        // A resumption handle belongs to the model that issued it. Sending it after a
+        // model switch produced a setup the new model rejected (or a session that
+        // resumed with the wrong capabilities), so drop it and start clean.
+        if (previous.model !== config.model && this.#session) {
+            log("controller", `model changed to ${config.model}; dropping the resumption handle`);
+            this.#session.setResumptionHandle(undefined);
+            this.#saveHandle(undefined);
         }
 
         this.#renderStatus(true);
@@ -758,7 +788,27 @@ export class VoiceController implements VoiceControl {
     }
 
     setAlwaysOn(value: boolean): void {
+        if (this.#config.alwaysOn === value) {
+            return;
+        }
+
+        // Changing only the field left the state machine behind: with always-on off
+        // while dormant, the session stayed dormant and the transport stayed gated, so
+        // the user's next sentence was captured and thrown away. The wake phrase could
+        // not bring it back either, because the mic it listens to was closed.
         this.#config = { ...this.#config, alwaysOn: value };
+
+        if (this.#setupConfig) {
+            this.#setupConfig.alwaysOn = value;
+        }
+
+        if (this.#running && this.#dormant && !value) {
+            log("controller", "always-on disabled while asleep; connecting now");
+            this.wake();
+        }
+
+        this.#onConfigChange?.(this.#config);
+        this.#renderStatus(true);
     }
 
     /** Make the voice model say something (used by Pi's `voice` tool). */
@@ -1194,6 +1244,15 @@ export class VoiceController implements VoiceControl {
         // native mode. Sleep on *voice* silence instead, which is what the setting
         // actually promises.
         if (Date.now() - this.#lastVoiceAt < this.#config.idleSleepMs) {
+            return;
+        }
+
+        // A turn the server is still generating is activity, not idleness: with a
+        // short idleSleepMs (5 s is allowed) extended thinking or a slow tool call
+        // gated the mic mid-answer, so barge-in and the user's reply were dropped.
+        if (this.#modelTurnOpen) {
+            this.#lastVoiceAt = Date.now();
+
             return;
         }
 

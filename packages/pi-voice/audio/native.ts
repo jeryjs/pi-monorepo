@@ -61,7 +61,8 @@ export interface WakeEngineStatus {
  */
 export interface AudioSink {
     start(): Promise<void>;
-    stop(): void;
+    /** Resolves once capture and playback are really gone (the device is released). */
+    stop(): void | Promise<void>;
     play(bytes: Uint8Array): void;
     flush(): void;
     setStreaming(streaming: boolean): void;
@@ -69,6 +70,21 @@ export interface AudioSink {
     readonly playingUntil: number;
     /** Wake engine that actually started; undefined = energy VAD. */
     readonly wakeEngine: WakeEngineStatus | undefined;
+}
+
+export function gainToFloat(samples: Int16Array, gain: number): Float32Array {
+    // Zero is a real setting (mute), not a missing one: `gain > 0 ? gain : 1` silently
+    // applied unity gain, so a user who muted the microphone was still heard — and
+    // still woke the wake-word engine.
+    const scale = Number.isFinite(gain) && gain >= 0 ? gain : 1;
+    const out = new Float32Array(samples.length);
+
+    for (let i = 0; i < samples.length; i++) {
+        const value = ((samples[i] as number) / 32768) * scale;
+        out[i] = value > 1 ? 1 : value < -1 ? -1 : value;
+    }
+
+    return out;
 }
 
 function hasBinary(command: string): boolean {
@@ -403,6 +419,9 @@ export class NativeTransport implements AudioSink {
     /** Restart the capture process at most this many times before reporting failure. */
     static readonly CAPTURE_ATTEMPTS = 5;
 
+    /** When the current capture process was spawned (health window for retries). */
+    #captureSpawnedAt = 0;
+
     /** Which engine actually got constructed (nothing = energy VAD). */
     get wakeEngine(): WakeEngineStatus | undefined {
         if (this.#asr) {
@@ -513,6 +532,7 @@ export class NativeTransport implements AudioSink {
                 phrases: config.wakePhrases,
                 provider: config.sherpaProvider,
                 onLog: (message) => this.#log(message),
+                onError: (message) => this.#error(message),
             });
 
             if (!this.#asr) {
@@ -528,6 +548,7 @@ export class NativeTransport implements AudioSink {
                 sensitivity,
                 onWake: () => undefined,
                 onLog: (message) => this.#log(message),
+                onError: (message) => this.#error(message),
             }, this.options.cwd);
 
             if (!this.#kws) {
@@ -549,7 +570,14 @@ export class NativeTransport implements AudioSink {
         this.#log("native audio started");
     }
 
-    stop(): void {
+    /**
+     * Stop capture and playback and *wait* for both children to exit.
+     *
+     * The wait matters on Windows: `/voice restart` (and any settings change that
+     * rebuilds the transport) used to spawn the new ffmpeg while the old one still
+     * held the dshow device, and the replacement died with "device busy".
+     */
+    async stop(): Promise<void> {
         this.#started = false;
 
         if (this.#captureTimer) {
@@ -557,23 +585,53 @@ export class NativeTransport implements AudioSink {
             this.#captureTimer = undefined;
         }
 
-        for (const child of [this.#capture, this.#player]) {
-            if (!child) {
-                continue;
-            }
-
-            try {
-                child.kill();
-            } catch {
-                // ignore
-            }
-        }
+        const children = [this.#capture, this.#player].filter((child): child is ChildProcessWithoutNullStreams => Boolean(child));
 
         this.#capture = undefined;
         this.#player = undefined;
         this.#carry = Buffer.alloc(0);
         this.#captureAttempts = 0;
         this.#playingUntil = 0;
+
+        await Promise.all(children.map((child) => NativeTransport.#killAndWait(child)));
+    }
+
+    /** SIGTERM, then SIGKILL after a grace period; resolves once the child is gone. */
+    static #killAndWait(child: ChildProcessWithoutNullStreams, graceMs = 1500): Promise<void> {
+        return new Promise<void>((resolve) => {
+            let settled = false;
+
+            const finish = (): void => {
+                if (settled) {
+                    return;
+                }
+
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+
+            const timer = setTimeout(() => {
+                try {
+                    child.kill("SIGKILL");
+                } catch {
+                    // already gone
+                }
+
+                // Do not hang the caller on a process the OS refuses to reap.
+                setTimeout(finish, 500).unref?.();
+            }, graceMs);
+            (timer as { unref?: () => void }).unref?.();
+
+            child.once("close", finish);
+            child.once("error", finish);
+
+            try {
+                child.kill();
+            } catch {
+                finish();
+            }
+        });
     }
 
     setStreaming(streaming: boolean): void {
@@ -586,21 +644,18 @@ export class NativeTransport implements AudioSink {
 
     /** Queue 24 kHz s16le model audio for the speakers. */
     play(bytes: Uint8Array): void {
-        const player = this.#player;
+        const first = this.#player;
 
-        if (!player || !player.stdin.writable) {
+        if (!first || !first.stdin.writable) {
             return;
         }
 
         // Output gain is applied once, here, so the AEC reference stays exact.
         const source = scalePcm16(bytes, this.options.config.outputGain);
 
-        // Track the acoustic tail so half-duplex gating covers speaker ringing.
-        this.#playingUntil = Date.now() + Math.round((source.length / 2 / 24_000) * 1000) + 250;
-
         // A stalled player must not build an unbounded buffer: better to drop audio
         // than to fall seconds behind the conversation.
-        if (player.stdin.writableLength > NativeTransport.MAX_PLAYBACK_BYTES) {
+        if (first.stdin.writableLength > NativeTransport.MAX_PLAYBACK_BYTES) {
             log("native", "playback backlog; dropping queued audio");
             this.flush();
         }
@@ -610,6 +665,15 @@ export class NativeTransport implements AudioSink {
         if (!target || !target.stdin.writable) {
             return;
         }
+
+        // Audible until everything already queued plus this chunk has played, plus a
+        // speaker tail. Counting only this chunk made `playing` false while a backlog
+        // was still audible, which skipped AEC and disabled half-duplex right when the
+        // model was talking loudest.
+        const queuedMs = Math.round((target.stdin.writableLength / 2 / 24_000) * 1000);
+        const chunkMs = Math.round((source.length / 2 / 24_000) * 1000);
+
+        this.#playingUntil = Date.now() + queuedMs + chunkMs + 250;
 
         try {
             target.stdin.write(Buffer.from(source.buffer, source.byteOffset, source.byteLength));
@@ -689,10 +753,11 @@ export class NativeTransport implements AudioSink {
 
             this.#player = undefined;
 
-            // Only respawn if it had been healthy for a while: an immediate exit
-            // means bad arguments or a missing audio device, and retrying would
-            // just spin.
-            if (this.#started && code !== 0 && Date.now() - this.#playerSpawnedAt > 1000) {
+            // Respawn whenever it was healthy for a while. Requiring a non-zero exit
+            // meant a clean exit (a device disappearing, a pipe closed by the OS) left
+            // the session with no player at all: play() returned early forever, so the
+            // model went silent with no error anywhere.
+            if (this.#started && Date.now() - this.#playerSpawnedAt > 1000) {
                 setTimeout(() => {
                     if (this.#started && !this.#player) {
                         this.#spawnPlayer();
@@ -725,6 +790,7 @@ export class NativeTransport implements AudioSink {
             windowsHide: true,
         }) as ChildProcessWithoutNullStreams;
 
+        this.#captureSpawnedAt = Date.now();
         child.stdout.on("data", (chunk: Buffer) => this.#onCapture(chunk));
         child.stderr.on("data", (chunk: Buffer) => {
             const text = chunk.toString().trim();
@@ -742,7 +808,15 @@ export class NativeTransport implements AudioSink {
                 log("native", "ffmpeg", text);
             }
         });
-        child.on("error", (error) => this.#error(`ffmpeg: ${error.message}`));
+        child.on("error", (error) => {
+            this.#error(`ffmpeg: ${error.message}`);
+
+            // A spawn failure emits `error` and `close`, never `exit`: without this the
+            // capture process was simply gone and nothing restarted it.
+            if (!this.#captureTimer) {
+                this.#onCaptureExit(null);
+            }
+        });
         child.on("exit", (code) => this.#onCaptureExit(code));
 
         this.#capture = child;
@@ -786,8 +860,11 @@ export class NativeTransport implements AudioSink {
     }
 
     #onCapture(chunk: Buffer): void {
-        // Capture is producing audio again: clear the restart counter.
-        if (this.#captureAttempts > 0) {
+        // Capture is producing audio again: clear the restart counter, but only once
+        // the process has proved it is healthy. Resetting on the first chunk let a
+        // device that opened, emitted one frame and died restart forever: each exit
+        // incremented the counter and the next chunk wiped it.
+        if (this.#captureAttempts > 0 && Date.now() - this.#captureSpawnedAt > 3000) {
             this.#captureAttempts = 0;
         }
 
@@ -846,17 +923,20 @@ export class NativeTransport implements AudioSink {
                 );
             }
 
-            if (this.#asr) {
+            if (this.#asr && !this.#asr.failed) {
                 this.#asr.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
 
                 return;
             }
 
-            if (this.#kws) {
+            if (this.#kws && !this.#kws.failed) {
                 this.#kws.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
 
                 return;
             }
+
+            // A wake engine that gave up (see feed's failure path) leaves the energy
+            // VAD as the fallback, which is what `wakeEngine: auto` promises.
 
             // Energy wake with an adaptive noise floor, so a quiet mic still
             // wakes: a fixed threshold either misses soft speech or fires at
@@ -956,16 +1036,7 @@ export class NativeTransport implements AudioSink {
     }
 
     #toFloat(samples: Int16Array): Float32Array {
-        const gain = this.options.config.inputGain;
-        const scale = Number.isFinite(gain) && gain > 0 ? gain : 1;
-        const out = new Float32Array(samples.length);
-
-        for (let i = 0; i < samples.length; i++) {
-            const value = ((samples[i] as number) / 32768) * scale;
-            out[i] = value > 1 ? 1 : value < -1 ? -1 : value;
-        }
-
-        return out;
+        return gainToFloat(samples, this.options.config.inputGain);
     }
 
     #log(message: string): void {

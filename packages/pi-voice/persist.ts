@@ -6,7 +6,7 @@
  * workspace. Resumption tokens are valid for two hours after a session ends.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { agentDir } from "./keychain.ts";
@@ -52,12 +52,32 @@ function writeAll(data: Record<string, PersistedVoiceState>): void {
 
     try {
         mkdirSync(dirname(path), { recursive: true });
-        const temporary = `${path}.tmp`;
-        writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+        // Unique temp name: every workspace shares this file, so a fixed `.tmp` meant
+        // two writers could clobber each other's temporary file and one rename would
+        // fail — silently, taking the other workspace's handle with it.
+        const temporary = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+        writeFileSync(temporary, `${JSON.stringify(prune(data), null, 2)}\n`, "utf8");
         renameSync(temporary, path);
     } catch {
         // A read-only agent directory must not break voice.
     }
+}
+
+/** Drop entries whose handle has expired: the file is shared across workspaces. */
+function prune(data: Record<string, PersistedVoiceState>): Record<string, PersistedVoiceState> {
+    const kept: Record<string, PersistedVoiceState> = {};
+    const now = Date.now();
+
+    for (const [key, entry] of Object.entries(data)) {
+        const age = entry.updatedAt ? now - Date.parse(entry.updatedAt) : Number.POSITIVE_INFINITY;
+
+        // A record without a handle carries nothing worth keeping either.
+        if (entry.handle && Number.isFinite(age) && age <= TTL_MS) {
+            kept[key] = entry;
+        }
+    }
+
+    return kept;
 }
 
 /** Highest sequence ever written for this workspace, even if the entry has expired. */

@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilitiesFor, liveModelIds } from "../capabilities.ts";
@@ -13,7 +13,7 @@ import { completeVoiceArguments } from "../completions.ts";
 import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "../config.ts";
 import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
-import { micVerdict, playbackArgs } from "../audio/native.ts";
+import { micVerdict, gainToFloat, playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isDormantClose, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { editDistance, matchWakePhrase } from "../audio/wake-match.ts";
 import { clearWarnings, log, recentWarnings, setDebug, warn } from "../util.ts";
@@ -30,6 +30,7 @@ import {
 } from "../live/protocol.ts";
 import { createSetupBuilder } from "../live/setup.ts";
 import { functionDeclarations } from "../bridge/tools.ts";
+import { AgentBridge } from "../bridge/agent.ts";
 import { agentReplyNotice, buildSystemInstruction } from "../bridge/prompt.ts";
 import { RingBuffer, backoffDelay, clip, float32ToPcm16 } from "../util.ts";
 
@@ -90,6 +91,42 @@ test("setup has model, audio modality and compression", () => {
 test("resumption handle is threaded through", () => {
     const setup = build("handle-123") as Record<string, any>;
     assert.equal(setup.sessionResumption.handle, "handle-123");
+});
+
+test("the setup follows the current model, not the one that was configured at start", () => {
+    // `/voice model` swaps the capability table. The builder used to capture the
+    // capabilities and the declarations once, so the new model kept receiving
+    // NON_BLOCKING async tools it does not support.
+    let current = capabilitiesFor("gemini-3.8-live");
+    const model = { ...DEFAULT_VOICE_CONFIG, thinkingLevel: "" };
+    const dynamic = createSetupBuilder({
+        config: model,
+        capabilities: () => current,
+        systemInstruction: "x",
+        tools: () => functionDeclarations(current),
+    });
+
+    const before = dynamic(undefined) as Record<string, any>;
+    const beforeAsk = (before.tools as any[])
+        .flatMap((entry) => entry.functionDeclarations ?? [])
+        .find((entry: any) => entry.name === "pi_ask");
+
+    assert.equal(beforeAsk.behavior, "NON_BLOCKING", "the async model gets a non-blocking pi_ask");
+
+    current = capabilitiesFor("gemini-3.1-flash-live-preview");
+    const after = dynamic(undefined) as Record<string, any>;
+    const afterAsk = (after.tools as any[])
+        .flatMap((entry) => entry.functionDeclarations ?? [])
+        .find((entry: any) => entry.name === "pi_ask");
+
+    assert.equal(afterAsk.behavior, undefined, "a sync-only model must not be handed NON_BLOCKING tools");
+    assert.equal(after.model, "models/gemini-3.8-live", "the model id still comes from config");
+
+    // Extended thinking refuses a setup without a level; the table knows, the old
+    // captured capabilities did not.
+    current = capabilitiesFor("gemini-3.8-live-extended-thinking");
+    const thinking = dynamic(undefined) as Record<string, any>;
+    assert.equal(thinking.generationConfig.thinkingConfig.thinkingLevel, "low");
 });
 
 test("tools include functions, mic VAD configured", () => {
@@ -761,6 +798,37 @@ test("a foreign lock is left alone, a stale one is taken over", () => {
     releaseLock(workspace);
 });
 
+test("taking over a stale lock is atomic and leaves no claim behind", () => {
+    // Two processes starting together used to both read the stale entry, both write
+    // through one shared `.tmp`, and both be told they owned the workspace.
+    const stale = { pid: process.pid, cwd: workspace, startedAt: new Date(Date.now() - 86_400_000).toISOString(), token: "old" };
+    writeFileSync(lockFileFor(workspace), JSON.stringify(stale), "utf8");
+
+    assert.equal(acquireLock(workspace).ok, true, "the stale lock is taken over");
+    assert.equal(readLock(workspace)?.token !== "old", true, "the lock now belongs to us");
+    assert.equal(readLock(workspace)?.token, readLock(workspace)?.token);
+    assert.equal(
+        existsSync(`${lockFileFor(workspace)}.claim`),
+        false,
+        "the takeover claim is removed",
+    );
+
+    // A claim held by another (living) process must block, not overwrite.
+    releaseLock(workspace);
+    writeFileSync(lockFileFor(workspace), JSON.stringify(stale), "utf8");
+    writeFileSync(`${lockFileFor(workspace)}.claim`, "", "utf8");
+    const blocked = acquireLock(workspace);
+
+    assert.equal(blocked.ok, false, "a concurrent takeover is refused, not raced");
+    assert.equal(
+        (blocked as { reason?: string }).reason,
+        "busy",
+        "the refusal says why (busy, not a lock we silently overwrote)",
+    );
+    rmSync(`${lockFileFor(workspace)}.claim`, { force: true });
+    releaseLock(workspace);
+});
+
 test("resumption handles never move backwards", () => {
     savePersistedHandle(workspace, { handle: "h-2", seq: 2, model: "m", voice: "v" });
     assert.equal(loadPersistedHandle(workspace)?.handle, "h-2");
@@ -899,6 +967,14 @@ test("real ASR output for 'hey pi' matches, ordinary speech does not", () => {
     }
 });
 
+test("ordinary speech does not wake the ASR engine", () => {
+    // "hey no" is the one that used to fire: two edits across the whole joined
+    // string made the short word almost free.
+    for (const heard of ["HEY NO", "HEY BUD", "HEY THERE", "THE PIE IS READY", "I SAID HI"]) {
+        assert.equal(matchWakePhrase(heard, ["hey pi"]).matched, false, `should not match: ${heard}`);
+    }
+});
+
 test("the phrase does not have to be at the start of the sentence", () => {
     const match = matchWakePhrase("um so hey pi can you check my messages", ["hey pi"]);
 
@@ -908,7 +984,12 @@ test("the phrase does not have to be at the start of the sentence", () => {
 
 test("every configured wake phrase is tried, not just the first", () => {
     assert.equal(matchWakePhrase("HI PI ARE YOU THERE", ["hey pi", "hi pi"]).matched, true);
-    assert.equal(matchWakePhrase("OKAY PI", ["hey pi", "ok pi"]).matched, true);
+    assert.equal(matchWakePhrase("OK PI", ["hey pi", "ok pi"]).matched, true);
+
+    // Known limitation, documented in the module: a two-letter head word needs the
+    // decoder to emit it as its own word. "ok pi" does not match "OKAY PI", because
+    // the joined form only tolerates one edit per half and "AY" is two from "PI".
+    assert.equal(matchWakePhrase("OKAY PI", ["ok pi"]).matched, false);
 });
 
 test("edit distance is a real distance", () => {
@@ -936,5 +1017,62 @@ test("an ordinary reply is not framed as an interruption", () => {
 });
 
 rmSync(continuityDir, { recursive: true, force: true });
+
+console.log("input gain");
+test("inputGain 0 mutes the microphone instead of meaning 'unset'", () => {
+    const samples = new Int16Array([16_384, -16_384, 0, 4_096]);
+
+    // 0 used to fall through to unity gain (`gain > 0 ? gain : 1`), so a muted mic
+    // still fed the model and still woke the wake-word engine.
+    assert.deepEqual([...gainToFloat(samples, 0)].map((value) => Math.abs(value)), [0, 0, 0, 0]);
+    assert.equal(gainToFloat(samples, 1)[0], 0.5);
+    assert.equal(gainToFloat(samples, 2)[0], 1, "gain above unity clips instead of wrapping");
+    assert.equal(gainToFloat(samples, 1)[1], -0.5);
+    assert.equal(gainToFloat(samples, Number.NaN)[0], 0.5, "a broken value falls back to unity");
+});
+
+console.log("bridge");
+
+test("a tool result is never stored or spoken as an assistant reply", () => {
+    // Pi emits message_end for tool results. Treating every non-user message as an
+    // assistant reply meant a command's output became `lastAssistant`, was read out
+    // loud at agent_settled, and was pasted into the digest.
+    const handlers = new Map<string, (event: unknown) => void>();
+    const api = {
+        on: (name: string, handler: (event: unknown) => void) => {
+            handlers.set(name, handler);
+
+            return () => handlers.delete(name);
+        },
+        appendEntry: () => undefined,
+    } as unknown as Parameters<typeof AgentBridge.prototype.ask>[0] extends never ? never : never;
+    const bridge = new AgentBridge(api as never, "C:/proj");
+    const replies: string[] = [];
+
+    bridge.on((payload) => {
+        const event = payload as { kind?: string; reply?: { text?: string } };
+
+        if (event.kind === "reply" && event.reply?.text) {
+            replies.push(event.reply.text);
+        }
+    });
+
+    const emit = (role: string, text: string): void => {
+        handlers.get("message_end")?.({ message: { role, content: [{ type: "text", text }] } });
+    };
+
+    emit("toolResult", "SECRET TOOL OUTPUT");
+    assert.deepEqual(replies, [], "a tool result must not be emitted as a reply");
+    assert.equal(bridge.status.lastAssistant, undefined, "a tool result must not become the last reply");
+    assert.doesNotMatch(bridge.digest({ turns: 6, chars: 900 }), /SECRET TOOL OUTPUT/);
+
+    emit("assistant", "The deploy is green.");
+    assert.deepEqual(replies, ["The deploy is green."]);
+    assert.equal(bridge.status.lastAssistant, "The deploy is green.");
+
+    emit("user", "check the deploy");
+    assert.equal(bridge.status.lastUser, "check the deploy");
+    bridge.dispose();
+});
 
 console.log(`\n${passed} checks passed`);

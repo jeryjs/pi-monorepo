@@ -32,6 +32,8 @@ export interface NativeKwsOptions {
     sensitivity?: number;
     onWake: (keyword: string) => void;
     onLog?: (message: string) => void;
+    /** Engine-level failure (a throwing spotter). Surfaces in /voice status. */
+    onError?: (message: string) => void;
 }
 
 interface KwsStream {
@@ -61,15 +63,29 @@ export class NativeKeywordSpotter {
     readonly #spotter: InstanceType<NonNullable<SherpaModule["KeywordSpotter"]>>;
     readonly #stream: KwsStream;
     readonly provider: string;
+    /** The create()-time callback: `feed()` uses it unless given its own. */
+    readonly #onWake: (keyword: string) => void;
+    readonly #onError: ((message: string) => void) | undefined;
+    #failures = 0;
+    #failed = false;
 
     private constructor(
         spotter: InstanceType<NonNullable<SherpaModule["KeywordSpotter"]>>,
         stream: KwsStream,
         provider: string,
+        onWake: (keyword: string) => void,
+        onError?: (message: string) => void,
     ) {
         this.#spotter = spotter;
         this.#stream = stream;
         this.provider = provider;
+        this.#onWake = onWake;
+        this.#onError = onError;
+    }
+
+    /** False once the spotter has thrown repeatedly: the caller falls back to VAD. */
+    get failed(): boolean {
+        return this.#failed;
     }
 
     static async create(options: NativeKwsOptions, _cwd = process.cwd()): Promise<NativeKeywordSpotter | undefined> {
@@ -144,7 +160,7 @@ export class NativeKeywordSpotter {
                     + `${keywords.lines.length} keyword(s))`,
                 );
 
-                return new NativeKeywordSpotter(spotter, stream, provider);
+                return new NativeKeywordSpotter(spotter, stream, provider, options.onWake, options.onError);
             } catch (error) {
                 options.onLog?.(`sherpa: provider ${provider} failed: ${String(error)}`);
             }
@@ -153,8 +169,19 @@ export class NativeKeywordSpotter {
         return undefined;
     }
 
-    /** Feed 16 kHz mono float audio; fires `onWake` through the callback given to create(). */
-    feed(samples: Float32Array, onWake: (keyword: string) => void): void {
+    /**
+     * Feed 16 kHz mono float audio. Fires the callback given to `create()` unless one
+     * is passed here — the create() option used to be required and then ignored, so a
+     * caller following the documented contract hit an undefined call that the empty
+     * catch swallowed.
+     */
+    feed(samples: Float32Array, onWake?: (keyword: string) => void): void {
+        if (this.#failed) {
+            return;
+        }
+
+        const fire = onWake ?? this.#onWake;
+
         try {
             this.#stream.acceptWaveform({ sampleRate: 16_000, samples });
 
@@ -163,11 +190,24 @@ export class NativeKeywordSpotter {
                 const result = this.#spotter.getResult(this.#stream);
 
                 if (result.keyword) {
-                    onWake(result.keyword);
+                    this.#failures = 0;
+                    fire(result.keyword);
                 }
             }
-        } catch {
-            // a bad frame must not kill capture
+        } catch (error) {
+            // A bad frame must not kill capture, but a spotter that keeps throwing is
+            // a dead wake word: report it and let the caller fall back to VAD. Silence
+            // here is what made "the wake word never fires" invisible with debug off.
+            this.#failures++;
+
+            if (this.#failures === 1) {
+                this.#onError?.(`sherpa wake failed: ${String(error)}`);
+            }
+
+            if (this.#failures >= 20 && !this.#failed) {
+                this.#failed = true;
+                this.#onError?.("sherpa wake stopped after repeated decode failures; falling back to energy VAD");
+            }
         }
     }
 }

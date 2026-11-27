@@ -23,6 +23,8 @@ export interface NativeAsrWakeOptions {
     phrases: readonly string[];
     provider?: string;
     onLog?: (message: string) => void;
+    /** Engine-level failure (a throwing recognizer). Surfaces in /voice status. */
+    onError?: (message: string) => void;
 }
 
 interface RecognizerStream {
@@ -48,20 +50,33 @@ export class NativeAsrWakeSpotter {
     readonly #stream: RecognizerStream;
     readonly #phrases: readonly string[];
     readonly provider: string;
-    /** Text decoded so far in the current segment, so only new words are matched. */
+    /** Text decoded in the current segment; reset at every endpoint. */
     #heard = "";
     #lastFireAt = 0;
+    /** One wake per decoded segment, so a long sentence cannot fire twice. */
+    #firedInSegment = false;
+    /** Consecutive decode failures; the engine reports once and then gives up. */
+    #failures = 0;
+    #failed = false;
+    readonly #onError: ((message: string) => void) | undefined;
 
     private constructor(
         recognizer: OnlineRecognizer,
         stream: RecognizerStream,
         phrases: readonly string[],
         provider: string,
+        onError?: (message: string) => void,
     ) {
         this.#recognizer = recognizer;
         this.#stream = stream;
         this.#phrases = phrases;
         this.provider = provider;
+        this.#onError = onError;
+    }
+
+    /** False once the recognizer has thrown repeatedly: the caller falls back to VAD. */
+    get failed(): boolean {
+        return this.#failed;
     }
 
     static async create(options: NativeAsrWakeOptions): Promise<NativeAsrWakeSpotter | undefined> {
@@ -129,7 +144,7 @@ export class NativeAsrWakeSpotter {
 
                 options.onLog?.(`asr: wake recognizer ready (${provider}, phrases: ${phrases.join(", ")})`);
 
-                return new NativeAsrWakeSpotter(recognizer, stream, phrases, provider);
+                return new NativeAsrWakeSpotter(recognizer, stream, phrases, provider, options.onError);
             } catch (error) {
                 options.onLog?.(`asr: provider ${provider} failed: ${String(error)}`);
             }
@@ -140,6 +155,10 @@ export class NativeAsrWakeSpotter {
 
     /** Feed 16 kHz mono float audio; fires `onWake` with the matched phrase. */
     feed(samples: Float32Array, onWake: (keyword: string) => void): void {
+        if (this.#failed) {
+            return;
+        }
+
         try {
             this.#stream.acceptWaveform({ sampleRate: 16_000, samples });
 
@@ -148,22 +167,35 @@ export class NativeAsrWakeSpotter {
 
                 const text = (this.#recognizer.getResult(this.#stream).text ?? "").trim();
 
-                if (!text) {
+                if (!text || text === this.#heard) {
                     continue;
                 }
 
-                // Only the words added since the last pass: re-matching the whole
-                // segment would fire again on the same phrase.
-                const fresh = text.length > this.#heard.length && text.startsWith(this.#heard)
-                    ? text.slice(this.#heard.length)
-                    : text;
+                // A decoder that rewrites instead of extending has started a new
+                // segment (or corrected itself): allow the next wake. Without this, a
+                // recognizer that never reports an endpoint would wake exactly once per
+                // process — the flag would never be cleared.
+                if (this.#firedInSegment && !text.startsWith(this.#heard)) {
+                    this.#firedInSegment = false;
+                }
 
+                // Match the whole segment, not the suffix added since the last pass.
+                // Suffix-only matching required the whole phrase to land inside one
+                // decoder update: "HEY" then "HEY PI" produced the windows "HEY" and
+                // " PI", neither containing the phrase, so the wake word was missed on
+                // exactly the slow, careful speech this engine exists for.
                 this.#heard = text;
 
-                const match = matchWakePhrase(fresh, this.#phrases);
+                if (this.#firedInSegment) {
+                    continue;
+                }
+
+                const match = matchWakePhrase(text, this.#phrases);
 
                 if (match.matched && Date.now() - this.#lastFireAt > 1200) {
+                    this.#firedInSegment = true;
                     this.#lastFireAt = Date.now();
+                    this.#failures = 0;
                     onWake(match.heard ?? match.phrase ?? "");
                 }
             }
@@ -171,9 +203,23 @@ export class NativeAsrWakeSpotter {
             if (this.#recognizer.isEndpoint?.(this.#stream)) {
                 this.#recognizer.reset?.(this.#stream);
                 this.#heard = "";
+                this.#firedInSegment = false;
             }
-        } catch {
-            // a bad frame must not kill capture
+
+            this.#failures = 0;
+        } catch (error) {
+            // A bad frame must not kill capture, but a recognizer that keeps throwing
+            // is a dead wake word: report it and let the caller fall back to VAD.
+            this.#failures++;
+
+            if (this.#failures === 1) {
+                this.#onError?.(`asr wake failed: ${String(error)}`);
+            }
+
+            if (this.#failures >= 20 && !this.#failed) {
+                this.#failed = true;
+                this.#onError?.("asr wake stopped after repeated decode failures; falling back to energy VAD");
+            }
         }
     }
 }

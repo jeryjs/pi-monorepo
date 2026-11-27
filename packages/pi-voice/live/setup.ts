@@ -16,14 +16,20 @@ import type { FunctionDeclaration } from "./protocol.ts";
 
 export interface SetupInput {
     config: VoiceConfig;
-    capabilities: ModelCapabilities;
+    /**
+     * Capabilities of the *current* model. A function is resolved on every connect,
+     * so a `/voice model` switch cannot keep declaring fields (async tools,
+     * thinking level) for the model that was configured at start-up.
+     */
+    capabilities: ModelCapabilities | (() => ModelCapabilities);
     /**
      * The persona. A function is resolved on every connect, so the session digest
      * embedded in it is the state of Pi at that moment (after a `/resume`, for
      * example) rather than whatever was true when the controller started.
      */
     systemInstruction: string | (() => string);
-    tools: FunctionDeclaration[];
+    /** Function declarations; a function is rebuilt per connect for the same reason. */
+    tools: FunctionDeclaration[] | (() => FunctionDeclaration[]);
 }
 
 type Json = Record<string, unknown>;
@@ -70,7 +76,9 @@ function transcription(config: VoiceConfig): Json {
 }
 
 function build(input: SetupInput, handle: string | undefined): Json {
-    const { config, capabilities } = input;
+    const { config } = input;
+    const capabilities = typeof input.capabilities === "function" ? input.capabilities() : input.capabilities;
+    const declarations = typeof input.tools === "function" ? input.tools() : input.tools;
 
     const generationConfig: Json = {
         responseModalities: ["AUDIO"],
@@ -92,8 +100,8 @@ function build(input: SetupInput, handle: string | undefined): Json {
 
     const tools: Json[] = [];
 
-    if (input.tools.length > 0) {
-        tools.push({ functionDeclarations: input.tools });
+    if (declarations.length > 0) {
+        tools.push({ functionDeclarations: declarations });
     }
 
     if (config.searchGrounding && capabilities.searchGrounding) {
