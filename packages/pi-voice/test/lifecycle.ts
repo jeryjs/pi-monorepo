@@ -1141,9 +1141,12 @@ ok("stopping voice closes pending prompts with a reason instead of stranding the
 
 // `/reload` keeps the socket but disposes the extension API object the answer callback
 // captured; a prompt left registered would be answerable only through that dead object.
+// The provider must also be told, not just dropped: it is blocked on the id.
+const reloaded: VoiceAnswerResult[] = [];
 const reloadCtl = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false }), {
     createAudio: (options) => new SilentAudio(options),
-    onQuestionAnswer: () => {
+    onQuestionAnswer: (result) => {
+        reloaded.push(result);
         throw new Error("the extension API object was replaced by /reload");
     },
     questionTtlMs: 60_000,
@@ -1155,13 +1158,20 @@ assert.equal(reloadCtl.presentQuestion({ id: "r-1", questions: [{ id: "a", promp
 
 reloadCtl.rebind(makePi().api, makeCtx());
 assert.equal(reloadCtl.pendingQuestions, 0, "reload does not leave a prompt answerable by the new socket");
-ok("a reload closes pending prompts instead of keeping a dead provider's id");
+assert.equal(reloaded.at(-1)?.id, "r-1", "the provider is told the reload closed its prompt");
+assert.equal(reloaded.at(-1)?.reason, "reload");
+assert.equal(reloaded.at(-1)?.cancelled, true);
+ok("a reload closes pending prompts and tells the provider, even if its old API throws");
 
+// After a reload the controller must relay through the runtime it was re-pointed at:
+// the old callback threw, so an answer arriving through it would be lost.
+const repointed: VoiceAnswerResult[] = [];
+assert.equal(reloadCtl.presentQuestion({ id: "r-2", questions: [{ id: "a", prompt: "And now?" }] }), true);
+reloadCtl.setAnswerRelay((result) => repointed.push(result));
 await reloadCtl.stop();
-
-// ---------------------------------------------------------------------------
-// done
-// ---------------------------------------------------------------------------
+assert.equal(repointed.at(-1)?.id, "r-2", "the re-pointed relay is used after a reload");
+assert.equal(repointed.at(-1)?.reason, "voice-stopped");
+ok("setAnswerRelay re-points the controller at the reloaded runtime");
 
 await live.close();
 rmSync(sandbox, { recursive: true, force: true });

@@ -91,6 +91,25 @@ function text(value: unknown, max = 400): string | undefined {
     return trimmed ? trimmed.slice(0, max) : undefined;
 }
 
+/**
+ * An identity field (request id, question id, option value) that has to survive parsing
+ * unchanged.
+ *
+ * The provider matches a spoken answer against the value it sent. Silently trimming or
+ * truncating it meant pi-voice reported a question answered while the provider dropped
+ * the answer it no longer recognised (and a headless provider waited out its timeout).
+ * No value is derived: a field that is present but unusable rejects the request.
+ */
+function identity(value: unknown, max = 120): string | undefined {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+
+    const canonical = text(value, max);
+
+    return canonical !== undefined && canonical === value ? canonical : undefined;
+}
+
 function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
     if (value === undefined || value === null) {
         return undefined;
@@ -127,7 +146,18 @@ function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
 
         const record = entry as Record<string, unknown>;
         const label = text(record.label, 120) ?? text(record.value, 120);
-        const optionValue = text(record.value, 120) ?? label;
+        const rawValue = record.value;
+        let optionValue: string | undefined;
+
+        if (rawValue === undefined || rawValue === null) {
+            optionValue = label;
+        } else {
+            optionValue = identity(rawValue, 120);
+
+            if (!optionValue) {
+                throw new Error("an option value must be a non-empty, already-trimmed string of at most 120 characters");
+            }
+        }
 
         if (!label || !optionValue) {
             throw new Error("option needs a label or a value");
@@ -158,7 +188,7 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
     }
 
     const record = value as Record<string, unknown>;
-    const id = text(record.id, 120);
+    const id = identity(record.id, 120);
 
     if (!id || !Array.isArray(record.questions)) {
         return undefined;
@@ -178,9 +208,10 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
 
         const question = entry as Record<string, unknown>;
         const prompt = text(question.prompt, 400) ?? text(question.question, 400);
-        const questionId = text(question.id, 120) ?? `q${questions.length + 1}`;
+        const namedId = question.id === undefined || question.id === null ? undefined : identity(question.id, 120);
+        const questionId = namedId ?? (question.id === undefined || question.id === null ? `q${questions.length + 1}` : undefined);
 
-        if (!prompt || seen.has(questionId)) {
+        if (!prompt || !questionId || seen.has(questionId)) {
             return undefined;
         }
 
@@ -191,6 +222,13 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
         try {
             options = parseOptions(question.options);
         } catch {
+            return undefined;
+        }
+
+        // Choices-only with nothing to choose cannot be answered at all: it used to be
+        // accepted and spoken while every answer was rejected, so a provider without a
+        // UI waited out its timeout for a question that had no valid answer.
+        if (question.allowOther === false && !options) {
             return undefined;
         }
 
@@ -272,7 +310,7 @@ const WORD_NUMBERS: Record<string, number> = {
     ninth: 9, tenth: 10, eleventh: 11, twelfth: 12,
 };
 
-const CHOICE_FILLER = new Set(["option", "number", "choice", "the", "one", "and"]);
+const CHOICE_FILLER = new Set(["option", "number", "choice", "the", "and"]);
 
 /**
  * A spoken choice by number: "2", "option 2", "the second", "the second one", "number
@@ -280,7 +318,13 @@ const CHOICE_FILLER = new Set(["option", "number", "choice", "the", "one", "and"
  * most of the load.
  */
 function choiceIndex(said: string): number | undefined {
-    const words = said.split(" ").filter(Boolean).filter((word) => !CHOICE_FILLER.has(word));
+    const tokens = said.split(" ").filter(Boolean).filter((word) => !CHOICE_FILLER.has(word));
+    // "the second one", "number one": a trailing "one" is a determiner after another
+    // number, but on its own it *is* the number. Stripping it unconditionally made
+    // "one" unanswerable without an option literally called "one".
+    const words = tokens.length === 2 && tokens[1] === "one" && WORD_NUMBERS[tokens[0]] !== undefined
+        ? [tokens[0]]
+        : tokens;
 
     if (words.length !== 1) {
         return undefined;
@@ -293,7 +337,7 @@ function choiceIndex(said: string): number | undefined {
 
 /** Affirmative/negative forms people actually say, mapped to the labels they mean. */
 const AFFIRMATIVE_WORDS = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "correct", "confirm", "affirmative", "absolutely", "go ahead", "do it", "proceed", "continue"];
-const NEGATIVE_WORDS = ["no", "nope", "nah", "negative", "deny", "cancel", "reject", "stop", "abort", "skip", "dont", "never"];
+const NEGATIVE_WORDS = ["no", "nope", "nah", "negative", "deny", "cancel", "reject", "stop", "abort", "skip", "dont", "don t", "do not", "never"];
 const YES_LABELS = new Set(["yes", "y", "true", "ok", "okay", "confirm", "allow", "approve", "accept", "continue", "proceed", "go", "agree", "enable"]);
 const NO_LABELS = new Set(["no", "n", "false", "cancel", "deny", "reject", "stop", "abort", "skip", "disallow", "disable", "never", "nope"]);
 

@@ -101,6 +101,17 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     // events), while the controller survives; the answer callback reads this.
     let livePi = pi;
 
+    // The answer relay belongs to this module instance, so it can be re-pointed at the
+    // new runtime after `/reload` without the surviving controller holding a disposed
+    // closure (see setAnswerRelay).
+    const relayAnswer = (result: unknown): void => {
+        try {
+            livePi.events.emit(VOICE_ANSWER_CHANNEL, result);
+        } catch (error) {
+            warn("extension", `could not relay an answer: ${String(error)}`);
+        }
+    };
+
     /**
      * Apply the debug switch: the config file *or* the environment.
      *
@@ -176,11 +187,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                 // the controller survives `/reload`, whose new API object rejects events
                 // emitted through the old one.
                 onQuestionAnswer: (result) => {
-                    try {
-                        livePi.events.emit(VOICE_ANSWER_CHANNEL, result);
-                    } catch (error) {
-                        warn("extension", `could not relay an answer: ${String(error)}`);
-                    }
+                    relayAnswer(result);
                 },
             });
             // `pi_stop` must really abort the running turn; the context is replaced on
@@ -339,6 +346,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             // Before rebind: it closes the pending prompts through the answer callback
             // above, which reads this variable.
             livePi = pi;
+            controller.setAnswerRelay(relayAnswer);
             controller.rebind(pi, ctx);
 
             // `/reload` deliberately keeps the running session, so transport-level
@@ -391,7 +399,13 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
     pi.on("session_shutdown", async (event) => {
         // Keep the live controller across `/reload`; the reloaded module reclaims it.
+        // The pending prompts do not survive, though: the provider that asked is being
+        // torn down too, and after this event the old event bus and tool-call registry
+        // are invalidated. Cancel here, while the old bus can still deliver, or the
+        // provider waits out its own timeout (rebind() repeats it as a safety net).
         if (event.reason === "reload") {
+            controller?.cancelQuestions("reload");
+
             return;
         }
 
@@ -415,7 +429,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
             if (typeof id === "string" && id) {
                 try {
-                    livePi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id, spoken: false, rejected: true });
+                    livePi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id, spoken: false, rejected: true, reason: "unusable" });
                 } catch {
                     // Nothing listening; the provider keeps its own UI.
                 }

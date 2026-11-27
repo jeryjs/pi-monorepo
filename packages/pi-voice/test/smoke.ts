@@ -1222,7 +1222,14 @@ test("a malformed protocol payload is rejected instead of half-applied", () => {
     assert.equal(request?.questions[0]?.allowOther, true, "free text allowed unless refused");
     assert.equal(request?.questions[1]?.id, "q2", "a missing question id gets a stable one");
     assert.equal(request?.questions[1]?.options, undefined, "no options means free-form");
-    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "x", allowOther: false }] })?.questions[0]?.allowOther, false);
+    // A choices-only question with nothing to choose can never be answered: it is
+    // rejected outright rather than accepted and then unresolvable.
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "x", allowOther: false }] }), undefined);
+    assert.equal(
+        parseQuestionRequest({ id: "a", questions: [{ prompt: "x", options: ["A"], allowOther: false }] })?.questions[0]?.allowOther,
+        false,
+        "a choices-only question with options parses",
+    );
 });
 
 test("options match by value, label, number or a single mention", () => {
@@ -1389,6 +1396,32 @@ test("a request that cannot be represented in full is rejected whole", () => {
         undefined,
         "one unusable option rejects the request rather than being dropped",
     );
+
+    // Identity fields are compared exactly by the provider: a value pi-voice trimmed,
+    // truncated or derived would be answered under a different spelling and dropped.
+    assert.equal(parseQuestionRequest({ id: " padded ", questions: [{ prompt: "p" }] }), undefined, "a request id that would be rewritten");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ id: " q ", prompt: "p" }] }), undefined, "a question id that would be rewritten");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: " x ", label: "X" }] }] }), undefined, "an option value that would be trimmed");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: "", label: "X" }] }] }), undefined, "an empty option value");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: "x".repeat(121), label: "X" }] }] }), undefined, "an over-long option value");
+    assert.equal(parseQuestionRequest({ id: "x".repeat(121), questions: [{ prompt: "p" }] }), undefined, "an over-long request id");
+});
+
+test("an answer carries the offered option, not the utterance", () => {
+    // The provider matches on the value it sent (the questionnaire compares with `===`),
+    // so the round trip has to return its own option rather than the transcribed words.
+    const request = parseQuestionRequest({
+        id: "req-9",
+        questions: [{
+            id: "db",
+            prompt: "Which database?",
+            options: [{ value: "postgres", label: "Postgres" }, { value: "sqlite", label: "SQLite" }],
+        }],
+    })!;
+    const { answers } = resolveAnswers(request.questions, [{ questionId: "db", value: "2" }]);
+
+    assert.deepEqual(answers[0]?.option, { value: "sqlite", label: "SQLite" });
+    assert.equal(answers[0]?.option?.value, request.questions[0]?.options?.[1]?.value, "exactly the value the provider sent");
 });
 
 test("matching is word-based, refuses ambiguity, and survives other scripts", () => {
@@ -1410,6 +1443,24 @@ test("matching is word-based, refuses ambiguity, and survives other scripts", ()
 
     assert.equal(matchOption("the second choice", many)?.value, "two", "'the second choice'");
     assert.equal(matchOption("the twelfth one", many)?.value, "twelve", "eleven and twelve");
+
+    // The options here are *not* named "one", so the exact pass cannot mask the bug: a
+    // filler rule that dropped "one" made the commonest spoken choice unanswerable.
+    const alpha = [{ value: "alpha", label: "Alpha" }, { value: "beta", label: "Beta" }];
+
+    assert.equal(matchOption("one", alpha)?.value, "alpha", "'one' alone is the number");
+    assert.equal(matchOption("the one", alpha)?.value, "alpha");
+    assert.equal(matchOption("number one", alpha)?.value, "alpha");
+    assert.equal(matchOption("option number one", alpha)?.value, "alpha");
+    assert.equal(matchOption("the second one", alpha)?.value, "beta", "a trailing 'one' is a determiner");
+
+    // Contractions are split by normalization ("don't" -> "don t"), which used to miss
+    // the negative list entirely.
+    const gate = [{ value: "go", label: "Go" }, { value: "no", label: "No" }];
+
+    assert.equal(matchOption("don't", gate)?.value, "no");
+    assert.equal(matchOption("do not", gate)?.value, "no");
+    assert.equal(matchOption("dont", gate)?.value, "no");
 
     const yn = [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }];
 

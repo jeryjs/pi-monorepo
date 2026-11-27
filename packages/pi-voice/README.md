@@ -400,6 +400,11 @@ A prompt that closes without an answer (it expired, voice stopped, `/reload`) ar
 "reload"`, so the provider is never left blocked on an id nobody can answer. Ids must be
 unique while live: a duplicate is refused, because answers match on the id alone.
 
+Ids and option values are identities: send them exactly as the answer should come back
+(already trimmed, at most 120 characters). A request whose identifiers would have to be
+rewritten is rejected whole rather than silently altered — the provider compares the
+answer with the value it sent, so a rewritten id is an answer it drops.
+
 A provider never blocks on voice: it shows its own UI and resolves it from whichever
 channel gets there first. If pi-voice is off, nothing happens and the keyboard still
 works. The whole integration is about ten lines:
@@ -621,7 +626,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.8.1** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.8.2** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -639,7 +644,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (97) + lifecycle (51) + sherpa (13)
+npm test   # smoke (98) + lifecycle (52) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

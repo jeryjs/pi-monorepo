@@ -158,7 +158,7 @@ export class VoiceController implements VoiceControl {
     #ctx: ExtensionContext;
     #createAudio: (options: NativeTransportOptions) => AudioSink;
     readonly #onConfigChange: ((config: VoiceConfig) => void) | undefined;
-    readonly #onQuestionAnswer: ((result: VoiceAnswerResult) => void) | undefined;
+    #onQuestionAnswer: ((result: VoiceAnswerResult) => void) | undefined;
     readonly #questionTtlMs: number;
 
     constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig, options: VoiceControllerOptions = {}) {
@@ -201,7 +201,9 @@ export class VoiceController implements VoiceControl {
 
         // A reloaded provider instance cannot resolve the old request ids, and the old
         // extension API no longer accepts events. Close the prompts instead of keeping
-        // them registered against a socket whose owner has been disposed.
+        // them registered against a socket whose owner has been disposed. The extension
+        // also cancels on `session_shutdown`, where the old bus is still valid: by the
+        // time `rebind` runs, answering through the old API can already be impossible.
         this.cancelQuestions("reload");
 
         this.#pi = pi;
@@ -946,7 +948,20 @@ export class VoiceController implements VoiceControl {
         this.#relayAnswer({ id, answers: [], cancelled: true, reason });
     }
 
-    /** Close every open prompt (teardown, restart, `/reload`). */
+    /**
+     * Point the answer relay at a new extension runtime.
+     *
+     * The controller outlives `/reload`, but the callback it holds was created by the
+     * module instance that was just disposed; relaying through the old `pi` rejects once
+     * that runtime is invalidated.
+     */
+    setAnswerRelay(relay: (result: VoiceAnswerResult) => void): void {
+        this.#onQuestionAnswer = relay;
+    }
+
+    /**
+     * Close every open prompt (teardown, restart, `/reload`).
+     */
     cancelQuestions(reason: "voice-stopped" | "reload"): void {
         for (const id of [...this.#questions.keys()]) {
             this.#expireQuestion(id, reason);
@@ -1097,9 +1112,10 @@ export class VoiceController implements VoiceControl {
 
         if (answers.length === 0) {
             // Nothing usable: keep the prompt live so the model can try again rather
-            // than silently dropping a question the user is still waiting on. The
-            // provider is told whether free text was even an option, so the retry
-            // prompt does not keep suggesting it to a choices-only question.
+            // than silently dropping a question the user is still waiting on. `freeText`
+            // is only ever true when *some* blocked question allows it, so the tool tells
+            // the model to prefer a listed option and to use free text only where the
+            // question permits it (a mixed request used to suggest it for all of them).
             const blocked = entry.request.questions.filter((question) => !entry.answers.has(question.id));
             const freeText = blocked.some((question) => question.allowOther !== false);
 

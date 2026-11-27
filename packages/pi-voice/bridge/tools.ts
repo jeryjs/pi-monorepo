@@ -283,7 +283,7 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
                 return respond({
                     error: result.freeText === false
                         ? "nothing matched an option for that question and it accepts no free text; ask the user to pick one of the listed option values"
-                        : "no answer was usable for that question; ask again using one of the option values or the user's own words as text",
+                        : "no answer was usable; ask again using one of the listed option values, and use the user's own words as text only for a question that allows it",
                     unknown: result.unknown,
                 });
             }

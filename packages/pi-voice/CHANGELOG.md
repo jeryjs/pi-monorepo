@@ -5,6 +5,42 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-12-02
+
+Follow-up re-review of 0.8.1 found that four of its claims were only partly true.
+Each is fixed here, with regression tests that use generic values so an option named
+like the bug cannot mask it.
+
+### Fixed
+
+- **A reload actually tells the provider.** `rebind()` runs on the *new* extension's
+  `session_start`, after Pi has invalidated the old runtime — the old API rejects
+  events by then, and the provider's subscription is already gone, so the promised
+  `voice:answer{reason:"reload"}` never arrived and the provider waited out its timeout.
+  Pending prompts are now cancelled in the old module's `session_shutdown`, while the
+  old bus can still deliver, and `setAnswerRelay()` re-points the controller at the
+  reloaded runtime (the callback it held belonged to the disposed module).
+- **Identity fields are parsed exactly or the request is rejected.** A request id,
+  question id or option value that would be trimmed, truncated or derived from the
+  label used to be rewritten silently; the provider compares the answer against the
+  value it sent, so it dropped a real answer while voice reported the question answered.
+  Non-canonical and over-long identifiers now reject the request whole.
+- **Plain "one" is answerable.** "one" was in the choice-filler list, so "one", "the
+  one", "number one" and "option number one" all failed unless an option was literally
+  called "one". It is now only stripped when it trails another number ("the second one").
+- **"don't" / "do not" count as no.** Normalization splits the contraction into
+  "don t", which was not in the negative list; only "dont" worked.
+- **A choices-only question with no options is rejected.** It used to be accepted and
+  read out ("no fixed options: answer with text") while the resolver rejected every
+  answer, so nothing could ever satisfy it.
+- **The retry message no longer suggests free text for a choices-only sub-question** of
+  a mixed multi-question request.
+- **The questionnaire reports a rejected request as rejected.** It used to say "voice is
+  off or the socket is down" for a request voice refused as unrepresentable (too many
+  questions/options, a bad id).
+- **The questionnaire stores the offered option's own value and label** rather than the
+  label carried by the incoming event, which another extension could set to anything.
+
 ## [0.8.1] - 2026-12-02
 
 The independent review of 0.8.0 found a credential leak and several paths that could
