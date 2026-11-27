@@ -1210,7 +1210,7 @@ test("a malformed protocol payload is rejected instead of half-applied", () => {
         toolCallId: "tc-9",
         title: "Pi needs an answer",
         questions: [
-            { id: "c1", prompt: "Which database?", options: ["Postgres", { label: "SQLite", description: "a file" }] },
+            { id: "c1", prompt: "Which database?", options: ["Postgres", { value: "sqlite", label: "SQLite", description: "a file" }] },
             { prompt: "Anything else?" },
         ],
     });
@@ -1362,6 +1362,14 @@ test("a questionnaire-shaped tool gets a read-only notice, not a fake answer pat
     assert.equal(questionsFromArgs("text"), undefined);
     assert.equal(questionsFromArgs({ questions: [{ options: ["A"] }] }), undefined, "no prompt, no guess");
 
+    // An option the strict parser rejects must not throw out of the read-only notice: the
+    // prompt is still announced, just without options it cannot represent exactly.
+    assert.deepEqual(
+        questionsFromArgs({ questions: [{ prompt: "Which db?", options: [{ label: "SQLite" }, "  padded  "] }] }),
+        ["Which db?"],
+        "a label-only or padded option does not break the fallback notice",
+    );
+
     const notice = waitingForInputNotice("ask_user_questions", ["Which db? (options: A, B)"]);
 
     assert.match(notice, /ask_user_questions/);
@@ -1402,6 +1410,12 @@ test("a request that cannot be represented in full is rejected whole", () => {
     assert.equal(parseQuestionRequest({ id: " padded ", questions: [{ prompt: "p" }] }), undefined, "a request id that would be rewritten");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ id: " q ", prompt: "p" }] }), undefined, "a question id that would be rewritten");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: " x ", label: "X" }] }] }), undefined, "an option value that would be trimmed");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: ["  padded  "] }] }), undefined, "a bare option string that would be trimmed");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: ["x".repeat(121)] }] }), undefined, "a bare option string that would be truncated");
+    // A value invented from the label is one the provider's own value-less option can
+    // never match, so a label-only option rejects the request instead.
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ label: "SQLite" }] }] }), undefined, "a label-only option");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: null, label: "SQLite" }] }] }), undefined, "a null option value");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: "", label: "X" }] }] }), undefined, "an empty option value");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: "x".repeat(121), label: "X" }] }] }), undefined, "an over-long option value");
     assert.equal(parseQuestionRequest({ id: "x".repeat(121), questions: [{ prompt: "p" }] }), undefined, "an over-long request id");

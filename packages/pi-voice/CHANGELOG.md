@@ -24,7 +24,12 @@ like the bug cannot mask it.
   question id or option value that would be trimmed, truncated or derived from the
   label used to be rewritten silently; the provider compares the answer against the
   value it sent, so it dropped a real answer while voice reported the question answered.
-  Non-canonical and over-long identifiers now reject the request whole.
+  Non-canonical and over-long identifiers now reject the request whole. That includes
+  the two shorthand paths 0.8.1 still rewrote: a bare-string option is taken verbatim
+  (a padded one is rejected, not trimmed), and an object option must carry its own
+  `value` — a value invented from the label could never match the provider's option.
+  A question with no id at all still gets a positional `q1`, `q2`, ... for providers
+  that answer by position; a supplied id is never rewritten.
 - **Plain "one" is answerable.** "one" was in the choice-filler list, so "one", "the
   one", "number one" and "option number one" all failed unless an option was literally
   called "one". It is now only stripped when it trails another number ("the second one").
@@ -40,6 +45,9 @@ like the bug cannot mask it.
   questions/options, a bad id).
 - **The questionnaire stores the offered option's own value and label** rather than the
   label carried by the incoming event, which another extension could set to anything.
+- **The read-only fallback notice no longer throws** on an option the strict parser now
+  rejects (a label-only or padded option): the prompt is still announced, without
+  options voice cannot represent exactly.
 
 ## [0.8.1] - 2026-12-02
 

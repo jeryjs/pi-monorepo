@@ -98,7 +98,10 @@ function text(value: unknown, max = 400): string | undefined {
  * The provider matches a spoken answer against the value it sent. Silently trimming or
  * truncating it meant pi-voice reported a question answered while the provider dropped
  * the answer it no longer recognised (and a headless provider waited out its timeout).
- * No value is derived: a field that is present but unusable rejects the request.
+ * No field is derived or rewritten: a request id or question id that is present but
+ * unusable rejects the request, and an option value must be sent as it should come back.
+ * (A question with no id at all gets a positional `q1`, `q2`, ... — a convention for
+ * providers that answer by position, not a rewrite of an id the provider supplied.)
  */
 function identity(value: unknown, max = 120): string | undefined {
     if (typeof value !== "string") {
@@ -129,13 +132,15 @@ function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
 
     for (const entry of value) {
         if (typeof entry === "string") {
-            const label = text(entry, 120);
+            // The string *is* the option value, so it is an identity: a padded or over-long
+            // one cannot be silently trimmed into a value the provider does not recognise.
+            const optionValue = identity(entry, 120);
 
-            if (!label) {
-                throw new Error("empty option label");
+            if (!optionValue) {
+                throw new Error("an option string must be a non-empty, already-trimmed string of at most 120 characters");
             }
 
-            options.push({ value: label, label });
+            options.push({ value: optionValue, label: optionValue });
 
             continue;
         }
@@ -145,21 +150,19 @@ function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
         }
 
         const record = entry as Record<string, unknown>;
-        const label = text(record.label, 120) ?? text(record.value, 120);
-        const rawValue = record.value;
-        let optionValue: string | undefined;
 
-        if (rawValue === undefined || rawValue === null) {
-            optionValue = label;
-        } else {
-            optionValue = identity(rawValue, 120);
+        // A value is required and never derived from the label: the label is display text
+        // that pi-voice may shorten, and a value invented from it is one the provider's
+        // own option (which had no value) can never match.
+        const optionValue = identity(record.value, 120);
 
-            if (!optionValue) {
-                throw new Error("an option value must be a non-empty, already-trimmed string of at most 120 characters");
-            }
+        if (!optionValue) {
+            throw new Error("an option needs a value: a non-empty, already-trimmed string of at most 120 characters");
         }
 
-        if (!label || !optionValue) {
+        const label = text(record.label, 120) ?? optionValue;
+
+        if (!label) {
             throw new Error("option needs a label or a value");
         }
 
@@ -629,7 +632,16 @@ export function questionsFromArgs(args: unknown): string[] | undefined {
             continue;
         }
 
-        const labels = (parseOptions(question.options) ?? []).map((option) => option.label);
+        // Best effort: a read-only announcement must never throw. An option the parser
+        // rejects (a label-only object, a padded string) is simply not announced.
+        let labels: string[] = [];
+
+        try {
+            labels = (parseOptions(question.options) ?? []).map((option) => option.label);
+        } catch {
+            labels = [];
+        }
+
         const options = labels.length > 0 ? ` (options: ${labels.join(", ")})` : "";
 
         prompts.push(`${prompt}${options}`);
