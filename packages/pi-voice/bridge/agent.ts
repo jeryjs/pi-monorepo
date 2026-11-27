@@ -239,6 +239,67 @@ export class AgentBridge {
         this.#status = { ...other.#status };
     }
 
+    /**
+     * Fill the digest from Pi's existing transcript.
+     *
+     * `message_end` only fires for messages sent while the extension is running, so
+     * after `/resume` (or a `/switch`) the bridge knew nothing and the voice model
+     * told the user it had no context yet. The transcript Pi is showing is the
+     * context; take the tail of it.
+     */
+    seedTranscript(messages: readonly unknown[]): number {
+        const seeded: RecentMessage[] = [];
+
+        for (const message of messages) {
+            const text = textOf(message);
+
+            if (!text) {
+                continue;
+            }
+
+            const role = (message as { role?: unknown })?.role;
+
+            // Only the conversation itself: tool results and system messages would
+            // drown the digest in noise the voice model cannot act on anyway.
+            if (role !== "user" && role !== "assistant") {
+                continue;
+            }
+
+            seeded.push({ role, text, at: Date.now() });
+        }
+
+        if (seeded.length === 0) {
+            return 0;
+        }
+
+        // Merge, don't duplicate: `/reload` adopts the previous digest and then
+        // seeds from the same transcript.
+        const known = new Set(this.#recent.map((entry) => `${entry.role}\u0000${entry.text}`));
+        const fresh = seeded.filter((entry) => !known.has(`${entry.role}\u0000${entry.text}`));
+
+        if (fresh.length === 0) {
+            return 0;
+        }
+
+        this.#recent.push(...fresh);
+
+        if (this.#recent.length > this.keepMessages) {
+            this.#recent.splice(0, this.#recent.length - this.keepMessages);
+        }
+
+        const lastUser = [...fresh].reverse().find((entry) => entry.role === "user");
+        const lastAssistant = [...fresh].reverse().find((entry) => entry.role === "assistant");
+
+        this.#status = {
+            ...this.#status,
+            messagesSeen: this.#status.messagesSeen + fresh.length,
+            lastUser: lastUser?.text ?? this.#status.lastUser,
+            lastAssistant: lastAssistant?.text ?? this.#status.lastAssistant,
+        };
+
+        return fresh.length;
+    }
+
     /** Resolve every pending approval with `undefined` (caller decides how to treat it). */
     cancelPending(): void {
         const pending = [...this.#pending.values()];
@@ -263,7 +324,17 @@ export class AgentBridge {
                 + ` | cwd ${this.cwd}`,
         );
 
+        // The one thing the voice model must never be vague about: what the user
+        // actually asked for in the session it is attached to.
+        if (status.lastUser) {
+            lines.push(`the user's last request in this session: ${clip(status.lastUser, opts.chars)}`);
+        }
+
         const recent = this.#recent.slice(-Math.max(2, opts.turns * 2));
+
+        if (recent.length === 0) {
+            lines.push("no messages in this session yet");
+        }
 
         for (const message of recent) {
             const who = message.role === "user" ? "user" : "pi";
@@ -281,7 +352,7 @@ export class AgentBridge {
     }
 
     /** Send a spoken request into Pi. `steer` injects mid-run; `queue` waits for the turn to end. */
-    ask(message: string, mode: "queue" | "steer" = "queue"): boolean {
+    ask(message: string, mode: "queue" | "steer" = "steer"): boolean {
         // Both names on purpose. The extension API documents `deliverAs`, but the
         // session validates `streamingBehavior` and throws when neither is present:
         // "Agent is already processing. Specify streamingBehavior...". Because the
@@ -289,7 +360,7 @@ export class AgentBridge {
         // an extension error, `pi_ask` used to answer "sent" for a message that never
         // reached Pi — every voice request made while Pi was busy was silently lost.
         // `queue` is `followUp` (deliver when the current turn ends), `steer` is steer.
-        const behavior = mode === "steer" ? "steer" : "followUp";
+        const behavior = mode === "queue" ? "followUp" : "steer";
         const options = { deliverAs: behavior, streamingBehavior: behavior };
 
         try {

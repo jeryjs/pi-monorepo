@@ -12,6 +12,12 @@ export interface PromptInput {
     cwd: string;
     sessionName?: string;
     alwaysOn: boolean;
+    /**
+     * Compact digest of the Pi session this voice is attached to (last turns plus
+     * the user's current request). Built per connect, so a `/resume` between two
+     * sockets is reflected instead of the model describing the old session.
+     */
+    context?: string;
 }
 
 export function buildSystemInstruction(input: PromptInput): string {
@@ -97,6 +103,28 @@ export function buildSystemInstruction(input: PromptInput): string {
         lines.push(`- Pi session: ${input.sessionName}`);
     }
 
+    const context = input.context?.trim();
+    // A digest with actual turns in it is knowledge; the empty case must stay honest.
+    const hasContext = Boolean(context) && /^(user|pi): /m.test(context ?? "");
+
+    lines.push("", "The Pi session you are attached to right now:", context || "(could not read it)");
+
+    if (hasContext) {
+        lines.push(
+            "- That is your context: you are attached to this session and you can see it, including a session",
+            "  the user just resumed. If they ask what has happened, what they asked for, or what Pi is doing,",
+            "  answer from those lines.",
+            "- Never say you have no context, that you only remember from here on, or that you cannot see the",
+            "  session, while those lines have content. For anything newer or more detailed, call pi_status or",
+            "  pi_recent instead of guessing or apologising.",
+        );
+    } else {
+        lines.push(
+            "- Nothing has happened in this session yet, so do not pretend otherwise; it is fine to say it is",
+            "  a fresh session.",
+        );
+    }
+
     if (config.persona.trim()) {
         lines.push("", "Extra instructions from the user (follow these):", config.persona.trim());
     }
@@ -126,9 +154,4 @@ export function agentReplyNotice(text: string, interrupted = false): string {
 export function approvalNotice(id: string, toolName: string, summary: string): string {
     return `[Pi needs approval] id=${id} tool=${toolName}: ${summary.slice(0, 400)}\n\n`
         + "Ask the user to allow or deny in one short question, then call voice_approve with this id.";
-}
-
-/** Greeting/context seed injected after (re)connecting so the session is aware of Pi. */
-export function contextSeed(digest: string): string {
-    return `[Pi session so far]\n${digest}`;
 }

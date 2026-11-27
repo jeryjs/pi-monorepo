@@ -17,7 +17,12 @@ import type { FunctionDeclaration } from "./protocol.ts";
 export interface SetupInput {
     config: VoiceConfig;
     capabilities: ModelCapabilities;
-    systemInstruction: string;
+    /**
+     * The persona. A function is resolved on every connect, so the session digest
+     * embedded in it is the state of Pi at that moment (after a `/resume`, for
+     * example) rather than whatever was true when the controller started.
+     */
+    systemInstruction: string | (() => string);
     tools: FunctionDeclaration[];
 }
 
@@ -98,7 +103,13 @@ function build(input: SetupInput, handle: string | undefined): Json {
     const setup: Json = {
         model: "models/" + normalizeModelId(config.model),
         generationConfig,
-        systemInstruction: { parts: [{ text: input.systemInstruction }] },
+        systemInstruction: {
+            parts: [{
+                text: typeof input.systemInstruction === "function"
+                    ? input.systemInstruction()
+                    : input.systemInstruction,
+            }],
+        },
         // Sliding-window compression removes the 15-minute audio-session cap.
         contextWindowCompression: { slidingWindow: {} },
         realtimeInputConfig: {

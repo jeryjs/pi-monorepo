@@ -59,6 +59,7 @@ interface FakeLive {
     connections: FakeConnection[];
     toolResponses(connection: FakeConnection): Record<string, unknown>[];
     send(connection: FakeConnection, message: unknown): void;
+    closeConnection(connection: FakeConnection, code: number, reason: string): void;
     close(): Promise<void>;
 }
 
@@ -133,6 +134,16 @@ function startFakeLive(): Promise<FakeLive> {
 
                     peer.send(JSON.stringify(message));
                 },
+                // Server-side close, exactly how Gemini ends an idle session.
+                closeConnection: (connection, code, reason) => {
+                    const peer = peers.get(connection.id);
+
+                    if (!peer) {
+                        throw new Error(`fake live: connection ${connection.id} is not open`);
+                    }
+
+                    peer.close(code, reason);
+                },
                 close: () => new Promise<void>((done) => {
                     for (const peer of peers.values()) {
                         try {
@@ -168,6 +179,8 @@ async function until(check: () => boolean, label: string, timeoutMs = 10_000): P
 interface StubPi {
     api: ExtensionAPI;
     activeHandlers(): number;
+    /** Fire a Pi event at whatever the extension subscribed to. */
+    emit(event: string, ...args: unknown[]): number;
     sent: string[];
     sentOptions: unknown[];
     entries: { type: string; data: unknown }[];
@@ -176,8 +189,19 @@ interface StubPi {
 
 function makePi(): StubPi {
     const active = new Set<() => void>();
+    const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
     const stub: StubPi = {
         activeHandlers: () => active.size,
+        emit: (event, ...args) => {
+            let fired = 0;
+
+            for (const handler of [...(handlers.get(event) ?? [])]) {
+                fired++;
+                handler(...args);
+            }
+
+            return fired;
+        },
         sent: [],
         sentOptions: [],
         entries: [],
@@ -186,12 +210,18 @@ function makePi(): StubPi {
     };
 
     stub.api = {
-        on: (_event: string, _handler: (...args: unknown[]) => void) => {
+        on: (event: string, handler: (...args: unknown[]) => void) => {
             let live = true;
+            const bucket = handlers.get(event) ?? new Set<(...args: unknown[]) => void>();
+
+            handlers.set(event, bucket);
+            bucket.add(handler);
+
             const off = () => {
                 if (live) {
                     live = false;
                     active.delete(off);
+                    bucket.delete(handler);
                 }
             };
 
@@ -216,12 +246,16 @@ function makePi(): StubPi {
     return stub;
 }
 
-function makeCtx(): ExtensionContext {
+function makeCtx(history?: unknown[]): ExtensionContext {
     return {
         cwd,
         mode: "cli",
         ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
-        sessionManager: { getBranch: () => [] },
+        sessionManager: {
+            getBranch: () => [],
+            // What a `/resume` hands the extension: the messages Pi is already showing.
+            buildSessionContext: () => ({ messages: history ?? [], thinkingLevel: "low", model: null }),
+        },
         modelRegistry: {},
         abort: () => {},
         isIdle: () => true,
@@ -516,20 +550,25 @@ ok("pi_ask delivers the spoken request to Pi");
 // processing. Specify streamingBehavior..." when neither name is present, and the
 // extension API swallows that rejection into an extension error — so pi_ask said
 // "sent" for messages that never arrived while Pi was busy.
+//
+// Default is steer: speech is about the run happening *now*, and sending every
+// request as a follow-up meant "stop that, do this" waited for the run it was
+// supposed to redirect.
 assert.deepEqual(
     reloadedPi.sentOptions[0],
+    { deliverAs: "steer", streamingBehavior: "steer" },
+    "pi_ask must default to steering",
+);
+ok("pi_ask defaults to steering the running turn");
+
+send({ toolCall: { functionCalls: [{ id: "t3b", name: "pi_ask", args: { message: "one for later", mode: "queue" } }] } });
+await until(() => reloadedPi.sent.length > 1, "queue delivery");
+assert.deepEqual(
+    reloadedPi.sentOptions[1],
     { deliverAs: "followUp", streamingBehavior: "followUp" },
     "queue mode must carry followUp for a busy Pi",
 );
-
-send({ toolCall: { functionCalls: [{ id: "t3b", name: "pi_ask", args: { message: "interrupt the build", mode: "steer" } }] } });
-await until(() => reloadedPi.sent.length > 1, "steer delivery");
-assert.deepEqual(
-    reloadedPi.sentOptions[1],
-    { deliverAs: "steer", streamingBehavior: "steer" },
-    "steer mode must carry steer",
-);
-ok("pi_ask always states a streaming behaviour (busy Pi no longer rejects it)");
+ok("pi_ask queue mode states the follow-up behaviour explicitly");
 
 // pi_stop must abort the running turn, not just queue text
 let aborts = 0;
@@ -548,6 +587,160 @@ ok("pi_stop performs a real abort (ctx.abort) plus a steering instruction");
 await controller2.stop();
 assert.equal(reloadedPi.activeHandlers(), 0, "all bridge subscriptions removed on final stop");
 ok("no Pi event subscriptions leak across restarts");
+
+// ---------------------------------------------------------------------------
+// 5d. context on resume: the voice knows what Pi is already showing
+// ---------------------------------------------------------------------------
+
+const history = [
+    { role: "system", content: [{ type: "text", text: "you are Pi" }] },
+    { role: "user", content: [{ type: "text", text: "fix the flaky deploy script" }] },
+    { role: "assistant", content: [{ type: "text", text: "I changed retries to 3 in deploy.sh" }] },
+    { role: "toolResult", content: [{ type: "text", text: "noisy tool output that must not reach the prompt" }] },
+    { role: "user", content: [{ type: "text", text: "also add a timeout" }] },
+    { role: "assistant", content: [{ type: "text", text: "Added a 30s timeout to deploy.sh" }] },
+];
+
+const resumed = new VoiceController(makePi().api, makeCtx(history), makeConfig());
+const resumedIndex = live.connections.length;
+
+await resumed.start();
+await until(() => Boolean(live.connections[resumedIndex]?.setup), "resumed session setup");
+
+const resumedInstruction = (live.connections[resumedIndex]!.setup as {
+    systemInstruction: { parts: { text: string }[] };
+}).systemInstruction.parts[0]!.text;
+
+assert.ok(
+    resumedInstruction.includes("fix the flaky deploy script"),
+    "the resumed transcript reaches the system instruction",
+);
+assert.ok(
+    resumedInstruction.includes("also add a timeout"),
+    "the user's latest request is in the prompt",
+);
+assert.ok(
+    !resumedInstruction.includes("noisy tool output"),
+    "tool results stay out of the voice prompt",
+);
+assert.ok(
+    /never say you have no context/i.test(resumedInstruction),
+    "the prompt forbids the 'no context yet' answer",
+);
+ok("a resumed Pi session is seeded into the voice prompt (last turns + latest request)");
+
+await resumed.stop();
+
+// A brand new session must not pretend to have history.
+const blank = new VoiceController(makePi().api, makeCtx([]), makeConfig());
+const blankIndex = live.connections.length;
+
+await blank.start();
+await until(() => Boolean(live.connections[blankIndex]?.setup), "blank session setup");
+
+const blankInstruction = (live.connections[blankIndex]!.setup as {
+    systemInstruction: { parts: { text: string }[] };
+}).systemInstruction.parts[0]!.text;
+
+assert.ok(/nothing has happened in this session yet/i.test(blankInstruction), "empty session stays honest");
+ok("an empty session is described as empty instead of inventing context");
+await blank.stop();
+
+// ---------------------------------------------------------------------------
+// 5e. a dead socket parks the voice instead of killing it
+// ---------------------------------------------------------------------------
+
+const revivable = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
+const beforeDrop = live.connections.length;
+
+await revivable.start();
+await until(() => Boolean(live.connections[beforeDrop]?.setup), "revivable session setup");
+
+live.closeConnection(live.connections[beforeDrop]!, 1008, "Session closed");
+await until(() => revivable.liveState === "asleep", "controller parks after 1008");
+ok("1008 'Session closed' parks the session instead of leaving voice dead");
+
+// No retry storm: the socket count must not grow on its own.
+const afterDrop = live.connections.length;
+await new Promise((resolve) => setTimeout(resolve, 500));
+assert.equal(live.connections.length, afterDrop, "a dormant session does not reconnect on its own");
+ok("a parked session does not burn quota reconnecting by itself");
+
+// The wake phrase has to bring it back without restarting Pi.
+revivable.wake();
+await until(() => Boolean(live.connections[afterDrop]?.setup), "reconnect on wake");
+await until(() => revivable.liveState === "live", "live again after wake");
+ok("the wake phrase opens a fresh session after the close (no restart needed)");
+await revivable.stop();
+
+// With no wake phrase there is nothing to re-arm, so the old behaviour stands.
+const noWake = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false, connectOnWake: false }));
+const beforeNoWake = live.connections.length;
+
+await noWake.start();
+await until(() => Boolean(live.connections[beforeNoWake]?.setup), "no-wake session setup");
+
+live.closeConnection(live.connections[beforeNoWake]!, 1008, "Session closed");
+await until(() => live.connections.length > beforeNoWake + 1, "automatic retry without a wake word");
+ok("without always-on listening the session retries itself as before");
+await noWake.stop();
+
+// A genuine setup error must still be an error, not a silent park.
+const broken = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
+const beforeBroken = live.connections.length;
+
+await broken.start();
+await until(() => Boolean(live.connections[beforeBroken]?.setup), "broken session setup");
+
+live.closeConnection(live.connections[beforeBroken]!, 1008, "You are not permitted to use this model");
+await until(() => /not permitted/i.test(String(broken.lastError ?? "")), "policy error surfaced");
+assert.equal(broken.liveState, "asleep", "policy close parks too, so the wake phrase can retry");
+ok("a policy refusal is reported and still leaves a way back in");
+await broken.stop();
+
+// ---------------------------------------------------------------------------
+// 5f. one voice at a time: notices never stack on an open turn
+// ---------------------------------------------------------------------------
+
+const answererPi = makePi();
+const answerer = new VoiceController(answererPi.api, makeCtx(), makeConfig({ announce: true }));
+const answererIndex = live.connections.length;
+
+await answerer.start();
+await until(() => Boolean(live.connections[answererIndex]?.setup), "answerer session setup");
+
+const answerConnection = live.connections[answererIndex]!;
+const replyNotices = (): Record<string, unknown>[] => answerConnection.messages.filter((message) => {
+    const content = message.clientContent as { turns?: { parts?: { text?: string }[] }[] } | undefined;
+
+    // Interrupted notices open with "[Pi's answer arrived..." instead.
+    return Boolean(content?.turns?.some((turn) => /\[Pi replied\]|\[Pi's answer arrived/.test(turn.parts?.[0]?.text ?? "")));
+});
+
+// Model started a turn: audio is arriving and the server has not ended it.
+live.send(answerConnection, {
+    serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } }] } },
+});
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+// Pi finishes while that turn is open: the notice must be held, not pushed.
+answererPi.emit("agent_start");
+answererPi.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "The deploy is green now." }] } });
+answererPi.emit("agent_settled");
+
+await new Promise((resolve) => setTimeout(resolve, 300));
+assert.equal(replyNotices().length, 0, "no notice is pushed into an open turn");
+ok("a Pi answer arriving mid-turn is held back instead of talking over the model");
+
+live.send(answerConnection, { serverContent: { turnComplete: true } });
+await until(() => replyNotices().length > 0, "notice delivered after the turn ends");
+const heldText = (replyNotices()[0]!.clientContent as { turns: { parts: { text: string }[] }[] })
+    .turns[0]!.parts[0]!.text;
+assert.ok(/cut off mid-sentence/i.test(heldText), "the held notice explains the cut");
+assert.ok(/deploy is green/i.test(heldText), "the held notice carries Pi's answer");
+ok("the held notice is delivered the moment the turn completes");
+
+await answerer.stop();
 
 // ---------------------------------------------------------------------------
 // 7. one instance per workspace, across processes

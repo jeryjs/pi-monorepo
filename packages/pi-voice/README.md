@@ -380,13 +380,13 @@ back" and then never speak again.
 
 ### Delivery modes
 
-`pi_ask` has two modes and both always state one, because a busy Pi rejects a
-message that does not carry it:
+`pi_ask` has two modes, `steer` by default (speech is about the run happening now),
+and both always state one — a busy Pi rejects a message that does not carry it:
 
 | Mode | Wire options | Behaviour |
 |---|---|---|
-| `queue` (default) | `deliverAs` + `streamingBehavior` = `followUp` | delivered when Pi's current turn ends |
-| `steer` | `deliverAs` + `streamingBehavior` = `steer` | injected into the running turn |
+| `steer` (default) | `deliverAs` + `streamingBehavior` = `steer` | injected into the running turn |
+| `queue` | `deliverAs` + `streamingBehavior` = `followUp` | delivered when Pi's current turn ends |
 
 The name is set twice on purpose: the extension API documents `deliverAs`, the
 session validates `streamingBehavior`, and the extension API reports a rejection
@@ -395,15 +395,44 @@ only as a background extension error — which is how `pi_ask` used to answer
 
 ### Talking over the model
 
-When Pi's answer lands while the voice is mid-sentence, the old behaviour played
-both at once. Now the playback is cut, the rest of the interrupted sentence (still
-streaming down) is discarded until the server ends that turn, and the model is
-told it was cut off: it says a short "oh" and then the answer, instead of
-finishing the sentence it was told to abandon.
+Two rules, because two voices came from breaking them:
+
+1. **Never inject a notice into an open turn.** Pi's answer is held until the server
+   reports the model's turn complete (2.5 s cap), then delivered — otherwise the old
+   sentence and the new answer are both generated and both play.
+2. **Cut what is audible, not what is recent.** Local playback is flushed whenever
+   the model could still be heard: queued frames included, which is why the player
+   exposes `playingUntil` (frames handed over plus the acoustic tail). Only the part
+   of a *still-generating* turn is muted afterwards, so the flush cannot swallow the
+   incoming answer.
+
+The held notice is framed as an interruption, so the model says a short "oh" and
+then the answer instead of finishing the sentence it was told to abandon.
 
 A notice delivered while the session was idle-gated re-opens the mic first, so the
 reply to it is heard. Model audio also counts as conversation activity now, so the
 idle window starts when it stops talking rather than when the user last spoke.
+
+### Context: what the voice knows about your Pi session
+
+The digest is part of the **system instruction**, rebuilt on every connect: Pi's
+state, the user's current request, and the last `digestTurns` (6) turns with
+`digestChars` (900) per message. When the bridge is created — including after
+`/resume`, `/switch` or `/tree` — it seeds itself from Pi's own transcript
+(`buildSessionContext()`), skipping tool results, which never reach a `message_end`
+event.
+
+So "what has the agent done in this session?" is answerable immediately after a
+resume, and a genuinely empty session is described as empty rather than invented.
+
+### When the socket dies
+
+A close that cannot be retried usefully — the server's own `1008: Session closed`,
+or a retry budget that ran out — parks the controller in the same state as
+`connectOnWake`: **asleep, spotter armed, no socket**. Nothing reconnects on its
+own, so an idle close cannot burn quota, and the next wake phrase opens a fresh
+session. Policy refusals (bad key, quota, rejected setup) are still reported — they
+just no longer leave voice dead until a restart.
 
 The Pi side also gets a `voice` tool:
 
@@ -508,7 +537,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.5.2** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.6.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -527,7 +556,7 @@ test/                     smoke + endpoint + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (66) + endpoint (19) + lifecycle (25) + sherpa (13)
+npm test   # smoke (70) + endpoint (19) + lifecycle (35) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

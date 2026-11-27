@@ -109,6 +109,15 @@ export class VoiceController implements VoiceControl {
      */
     #dropAudio = false;
     #dropAudioTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * The server is (or was, a moment ago) generating a turn. A notice pushed while
+     * this is true is spoken *in addition* to the sentence that is still being
+     * generated, which is how two voices ended up talking at once.
+     */
+    #modelTurnOpen = false;
+    /** Notices held back until the model's turn ends, so they never overlap. */
+    #deferredNotices: string[] = [];
+    #deferredNoticesTimer: ReturnType<typeof setTimeout> | undefined;
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
@@ -119,6 +128,7 @@ export class VoiceController implements VoiceControl {
         this.#config = config;
         this.#capabilities = capabilitiesFor(config.model);
         this.#bridge = new AgentBridge(pi, ctx.cwd);
+        this.#seedBridgeFromSession();
     }
 
     private get pi(): ExtensionAPI {
@@ -143,6 +153,7 @@ export class VoiceController implements VoiceControl {
         // Keep the digest across the reload so the voice model does not lose its
         // view of the conversation just because the extension was re-created.
         this.#bridge.adoptFrom(previous);
+        this.#seedBridgeFromSession();
         this.#wiredBridge = undefined;
 
         // Drop the old subscriptions immediately: after a reload the discarded
@@ -350,12 +361,19 @@ export class VoiceController implements VoiceControl {
         this.#capabilities = capabilitiesFor(this.#config.model);
         this.#setupConfig = { ...this.#config };
 
-        const instruction = buildSystemInstruction({
+        const instruction = () => buildSystemInstruction({
             config: this.#config,
             capabilities: this.#capabilities,
             cwd: this.ctx.cwd,
             sessionName: this.#sessionName(),
             alwaysOn: this.#config.alwaysOn,
+            // Rebuilt per connect (see createSetupBuilder): a `/resume` between two
+            // connections must not leave the voice model describing a session that
+            // is no longer the one Pi is showing the user.
+            context: this.#bridge.digest({
+                turns: this.#config.digestTurns,
+                chars: this.#config.digestChars,
+            }),
         });
 
         const token = PROCESS_TOKEN;
@@ -403,6 +421,9 @@ export class VoiceController implements VoiceControl {
             apiKey,
             buildSetup,
             startSleeping: this.#config.alwaysOn,
+            // With a wake phrase armed, a socket that died goes back to sleep instead
+            // of becoming an error the user has to restart Pi to clear.
+            wakeAvailable: this.#config.alwaysOn,
         });
 
         const previous = readVoiceState(this.ctx);
@@ -836,24 +857,15 @@ export class VoiceController implements VoiceControl {
 
     /** Make the voice model say something (used by Pi's `voice` tool). */
     speak(text: string): boolean {
-        const state = this.#session?.state;
-
-        if (state !== "live" && state !== "sleeping") {
-            return false;
-        }
-
         // Same treatment as Pi's replies: cut the current sentence instead of
-        // talking over it.
-        const cut = this.#prepareForNotice(true);
-        const lead = cut
-            ? "[You were cut off mid-sentence; start with a brief \"oh\" and do not finish the old sentence]\n\n"
-            : "";
+        // talking over it, and never stack a second turn on top of an open one.
+        return this.#notice((interrupted) => {
+            const lead = interrupted
+                ? "[You were cut off mid-sentence; start with a brief \"oh\" and do not finish the old sentence]\n\n"
+                : "";
 
-        this.#session?.sendText(
-            `${lead}Say this to the user now, close to verbatim, in your normal spoken voice: "${text.slice(0, 800)}"`,
-        );
-
-        return true;
+            return `${lead}Say this to the user now, close to verbatim, in your normal spoken voice: "${text.slice(0, 800)}"`;
+        }, true);
     }
 
     answerApproval(id: string, allow: boolean): boolean {
@@ -885,6 +897,8 @@ export class VoiceController implements VoiceControl {
             }
 
             this.#lastAudioOutAt = Date.now();
+            // A turn is open from its first audio frame until the server ends it.
+            this.#modelTurnOpen = true;
             // The model speaking counts as conversation activity, so the idle gate
             // counts from the end of its sentence rather than from the last thing we
             // said.
@@ -893,7 +907,12 @@ export class VoiceController implements VoiceControl {
             this.#broadcastBinary(bytes);
         });
 
-        session.on("turnComplete", () => this.#endDroppedAudio());
+        session.on("turnComplete", () => {
+            this.#modelTurnOpen = false;
+            this.#endDroppedAudio();
+            // The old turn is finished: a notice held back for that reason can go now.
+            this.#flushDeferredNotices();
+        });
 
         session.on("transcript", (entry) => {
             this.#broadcast({ t: "transcript", side: entry.side, text: entry.text, final: entry.final });
@@ -925,7 +944,9 @@ export class VoiceController implements VoiceControl {
         });
 
         session.on("interrupted", () => {
+            this.#modelTurnOpen = false;
             this.#endDroppedAudio();
+            this.#flushDeferredNotices();
             this.#broadcast({ t: "interrupt" });
         });
 
@@ -965,6 +986,18 @@ export class VoiceController implements VoiceControl {
             log("controller", `server will rotate the connection in ${Math.round(ms)}ms`);
         });
 
+        // The socket is gone and will not be retried: back to wake-word listening
+        // with an honest status, so the next "hey pi" opens a fresh session instead
+        // of the user having to restart Pi.
+        session.on("dormant", ({ reason }) => {
+            this.#modelTurnOpen = false;
+            this.#endDroppedAudio();
+            this.#deferredNotices = [];
+            this.#lastError = undefined;
+            warn("live", `session closed (${reason}); listening for the wake phrase again`);
+            this.#armDormant(`Gemini closed the voice session (${reason}). Say the wake phrase to start a new one.`);
+        });
+
         session.on("error", (error) => {
             warn("live", error.message);
             this.#lastError = error.message;
@@ -988,8 +1021,36 @@ export class VoiceController implements VoiceControl {
                 return;
             }
 
+            // Whatever killed the session, do not leave the voice unusable: arm the
+            // wake path so the phrase can bring it back without a restart.
+            this.#armDormant(error.message);
             this.#broadcast({ t: "notice", text: error.message });
         });
+    }
+
+    /**
+     * Park the controller in the "started asleep" state after a session death.
+     *
+     * Everything keeps running except the Gemini socket: the mic, the wake spotter
+     * and the idle loop. Only possible with a wake phrase — without always-on
+     * listening there is nothing to reconnect it, so the error stands.
+     */
+    #armDormant(reason: string): void {
+        if (!this.#config.alwaysOn || this.#dormant) {
+            if (this.#config.alwaysOn) {
+                this.#renderStatus(true);
+            }
+
+            return;
+        }
+
+        this.#dormant = true;
+        this.#wakePending = false;
+        this.#pendingAudio = [];
+        this.#pendingBytes = 0;
+        log("controller", `asleep after session end (${reason})`);
+        this.#broadcast({ t: "dormant", reason });
+        this.#renderStatus(true);
     }
 
     // -----------------------------------------------------------------------
@@ -997,16 +1058,33 @@ export class VoiceController implements VoiceControl {
     // -----------------------------------------------------------------------
 
     /**
-     * Prepare the live conversation for a notice the user must hear.
+     * Is the model still talking — generating, or still audible?
      *
-     * Returns true when the model was mid-sentence and was cut off. Two failures this
-     * fixes:
-     *  - two voices at once: Pi's answer was pushed while the model was still speaking,
-     *    so the old sentence and the new answer played together;
-     *  - a reply into the void: if the session was idle-gated, the model spoke and the
-     *    user's answer went to the wake detector instead of the conversation.
+     * Three signals, because each one alone left a gap: the server is mid-turn
+     * (`#modelTurnOpen`), we are deliberately muting the rest of a cut sentence
+     * (`#dropAudio`), or frames have been handed to the player and it is still
+     * draining them (`native.playingUntil`, which already includes the speaker tail).
      */
-    #prepareForNotice(interrupt: boolean): boolean {
+    #modelSpeaking(): boolean {
+        if (this.#modelTurnOpen || this.#dropAudio) {
+            return true;
+        }
+
+        const until = Math.max(this.#lastAudioOutAt, this.#native?.playingUntil ?? 0);
+
+        return Date.now() < until;
+    }
+
+    /**
+     * Deliver a notice into the live conversation without ever talking over it.
+     *
+     * `interrupt` cuts the current sentence (right for an answer the user is waiting
+     * for); the alternative waits for the sentence to end, but a notice that arrives
+     * while the server is still generating is now *held* until that turn completes.
+     * Pushing it early is what produced two voices: the old sentence and the new
+     * answer were generated and played on top of each other.
+     */
+    #notice(build: (interrupted: boolean) => string, interrupt = true): boolean {
         const session = this.#session;
         const state = session?.state;
 
@@ -1014,20 +1092,46 @@ export class VoiceController implements VoiceControl {
             return false;
         }
 
+        // A reply delivered into an idle-gated session was heard but its answer was
+        // not: the mic has to be open before the model speaks. This includes a
+        // session that died and went dormant — the notice is held in the session's
+        // outbox and delivered once the wake reconnects it.
         if (state === "sleeping") {
             log("controller", "notice while asleep: re-opening the mic so the answer is heard");
             this.wake();
         }
 
-        const midSentence = Date.now() - this.#lastAudioOutAt < 2000;
+        const interrupted = interrupt && this.#cutPlayback();
+        const text = build(interrupted);
 
-        if (!interrupt || !midSentence) {
+        if (this.#modelTurnOpen) {
+            this.#deferNotice(text);
+
+            return true;
+        }
+
+        session.sendText(text);
+
+        return true;
+    }
+
+    /** Cut local playback and mute the rest of the sentence that is streaming down. */
+    #cutPlayback(): boolean {
+        if (!this.#modelSpeaking()) {
             return false;
         }
 
         log("controller", "cutting playback: the notice arrived mid-sentence");
         this.#native?.flush();
         this.#broadcast({ t: "interrupt" });
+
+        // Only a turn the server is still generating keeps sending frames. When the
+        // tail of an already-finished turn is simply draining from the player, the
+        // flush is enough — muting here would swallow the *new* answer instead.
+        if (!this.#modelTurnOpen) {
+            return true;
+        }
+
         this.#dropAudio = true;
 
         if (this.#dropAudioTimer) {
@@ -1041,12 +1145,72 @@ export class VoiceController implements VoiceControl {
         return true;
     }
 
+    /** Hold a notice until the model's turn ends (see #notice). */
+    #deferNotice(text: string): void {
+        log("controller", "model mid-turn: holding the notice until that turn ends");
+        this.#deferredNotices.push(text);
+
+        if (this.#deferredNoticesTimer) {
+            return;
+        }
+
+        // Cap: a server that never ends the turn must not silence the answer.
+        this.#deferredNoticesTimer = setTimeout(() => {
+            log("controller", "held notice timed out; delivering it now");
+            this.#flushDeferredNotices();
+        }, 2500);
+        (this.#deferredNoticesTimer as { unref?: () => void }).unref?.();
+    }
+
+    #flushDeferredNotices(): void {
+        if (this.#deferredNoticesTimer) {
+            clearTimeout(this.#deferredNoticesTimer);
+            this.#deferredNoticesTimer = undefined;
+        }
+
+        const pending = this.#deferredNotices.splice(0, this.#deferredNotices.length);
+        const session = this.#session;
+
+        if (!session) {
+            return;
+        }
+
+        for (const text of pending) {
+            log("controller", "delivering a held notice");
+            session.sendText(text);
+        }
+    }
+
     #endDroppedAudio(): void {
         this.#dropAudio = false;
 
         if (this.#dropAudioTimer) {
             clearTimeout(this.#dropAudioTimer);
             this.#dropAudioTimer = undefined;
+        }
+    }
+
+    /**
+     * Seed the digest from the Pi session Pi is *already* showing the user.
+     *
+     * Without this, `/resume` produced a voice assistant that answered "what did the
+     * agent do in this session?" with "I have no context yet": message events only
+     * ever arrive for messages sent *after* the extension started, and a resumed
+     * session's history never replays.
+     */
+    #seedBridgeFromSession(): void {
+        try {
+            const manager = this.ctx.sessionManager as unknown as {
+                buildSessionContext?: () => { messages?: unknown[] };
+            } | undefined;
+            const messages = manager?.buildSessionContext?.()?.messages;
+
+            if (messages && messages.length > 0) {
+                this.#bridge.seedTranscript(messages);
+                log("controller", `seeded voice context with ${messages.length} session message(s)`);
+            }
+        } catch (error) {
+            warn("controller", `could not read the session transcript: ${String(error)}`);
         }
     }
 
@@ -1068,9 +1232,8 @@ export class VoiceController implements VoiceControl {
                 const approval = (payload as { approval: { toolCallId: string; toolName: string; summary: string } }).approval;
 
                 // Not an interruption: an approval prompt can wait for the sentence to
-                // finish. But if the session was asleep it has to wake up first.
-                this.#prepareForNotice(false);
-                this.#session?.sendText(approvalNotice(approval.toolCallId, approval.toolName, approval.summary));
+                // finish, but it still must not be pushed into an open turn.
+                this.#notice(() => approvalNotice(approval.toolCallId, approval.toolName, approval.summary), false);
                 this.#broadcast({ t: "approval", id: approval.toolCallId, tool: approval.toolName, summary: approval.summary });
 
                 return;
@@ -1105,8 +1268,7 @@ export class VoiceController implements VoiceControl {
                 this.#lastAnnounce = now;
                 this.#lastAnnounceText = activity.text;
                 this.#awaitingReplyUntil = 0;
-                const cut = this.#prepareForNotice(true);
-                this.#session?.sendText(agentReplyNotice(activity.text, cut));
+                this.#notice((interrupted) => agentReplyNotice(activity.text, interrupted), true);
             }
         });
     }

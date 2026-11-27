@@ -5,6 +5,55 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-12-01
+
+Four reports from real use, all of them about the voice being confidently wrong
+about the state of the world.
+
+### Fixed
+
+- **"I have no context yet" after `/resume`.** The bridge only ever saw messages
+  sent while the extension was running: `message_end` does not replay a transcript,
+  so a resumed session started empty and the model told the user it would "remember
+  from now on". The bridge now seeds itself from `buildSessionContext()` (user and
+  assistant turns only, tool output excluded) and the digest — last six turns plus
+  the user's current request — is built **into the system instruction on every
+  connect**, so a socket opened after `/resume` describes the session Pi is actually
+  showing. The prompt states explicitly that the voice is attached to that session
+  and must not claim otherwise, and stays honest when the session is genuinely empty.
+- **Two voices, still.** The old fix only cut playback when the last audio frame was
+  less than two seconds old, and it still *injected* the notice while the server was
+  generating the previous turn — so the old sentence and the new answer were both
+  generated and both played. Notices are now held until that turn completes (2.5 s
+  cap), local playback is flushed whenever the model is audible at all (queued frames
+  included, via the player's own `playingUntil`), and only then is the answer
+  injected, framed as a cut so the model reacts with "oh" instead of finishing the
+  sentence it was told to abandon.
+- **Every steer went out as a follow-up.** `ask()` defaulted to steer but the tool
+  schema defaulted `mode` to `queue`, and the tool coerced anything that was not
+  exactly `"steer"` into `queue` — so "stop that and do this instead" waited for the
+  run it was meant to redirect. `steer` is now the default in the schema, in the
+  coercion, and in the description.
+- **`1008: Session closed` killed the voice until Pi restarted.** Every 1008 was
+  treated as fatal, which is right for a policy refusal and wrong for the server's
+  plain "Session closed". That close (and an exhausted retry budget) now parks the
+  controller in the asleep state with the wake spotter still armed: no retry storm, no
+  error state to escape, and the wake phrase opens a fresh socket. Status says asleep,
+  the companion page shows it, and any error message still explains the reason.
+
+### Changed
+
+- `createSetupBuilder` accepts a `systemInstruction` *function*, resolved per connect.
+- The dead `contextSeed()` export is gone; the digest travels in the system
+  instruction instead of being injected as a fake conversational turn.
+
+### Tests
+
+70 smoke + 19 endpoint + 35 lifecycle + 13 sherpa = 137 checks. New lifecycle
+coverage: seeded context on resume, empty-session honesty, 1008 parking, no
+self-reconnect while parked, wake recovery, and a notice held back mid-turn then
+delivered on `turnComplete`.
+
 ## [0.5.2] - 2026-12-01
 
 Three things that only show up while actually talking to it.

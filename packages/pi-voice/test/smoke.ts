@@ -14,7 +14,7 @@ import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "..
 import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
 import { micVerdict, playbackArgs } from "../audio/native.ts";
-import { friendlyCloseError, isFatalClose, isStaleHandleClose } from "../live/session.ts";
+import { friendlyCloseError, isDormantClose, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
 import {
@@ -256,6 +256,62 @@ test("the voice model is told never to refuse on Pi's behalf", () => {
     assert.ok(/must not say[\s\S]{0,80}I can't/i.test(text), "lists the forbidden refusal sentences");
 });
 
+test("pi_ask defaults to steering, not queueing", () => {
+    const declaration = functionDeclarations(caps).find((entry) => entry.name === "pi_ask");
+    const mode = (declaration?.parameters as { properties?: { mode?: { description?: string } } })
+        ?.properties?.mode?.description ?? "";
+
+    assert.ok(/steer \(default\)/i.test(mode), "the schema says steer is the default");
+    assert.ok(!/queue \(default\)/i.test(mode), "queue is no longer advertised as the default");
+});
+
+test("the session digest is in the prompt, and only claimed when real", () => {
+    const digest = [
+        "Pi: idle | turn 3 | cwd C:/proj",
+        "the user's last request in this session: fix deploy",
+        "user: fix the deploy",
+        "pi: done",
+    ].join("\n");
+    const withContext = buildSystemInstruction({
+        config: DEFAULT_VOICE_CONFIG,
+        capabilities: caps,
+        cwd: "C:/proj",
+        alwaysOn: true,
+        context: digest,
+    });
+
+    assert.ok(withContext.includes("fix the deploy"), "the digest text reaches the prompt");
+    // The failure: after /resume the model said it had no context yet.
+    assert.ok(/never say you have no context/i.test(withContext), "forbids the 'no context' answer");
+
+    const empty = buildSystemInstruction({
+        config: DEFAULT_VOICE_CONFIG,
+        capabilities: caps,
+        cwd: "C:/proj",
+        alwaysOn: true,
+        context: ["Pi: idle | turn 0 | cwd C:/proj", "no messages in this session yet"].join("\n"),
+    });
+
+    assert.ok(/nothing has happened in this session yet/i.test(empty), "a fresh session is described honestly");
+    assert.ok(!/never say you have no context/i.test(empty), "no prohibition without content to point at");
+});
+
+test("the system instruction is rebuilt per connect", () => {
+    // The function form is what lets a `/resume` between two sockets reach the prompt.
+    let calls = 0;
+    const build = createSetupBuilder({
+        config: DEFAULT_VOICE_CONFIG,
+        capabilities: caps,
+        systemInstruction: () => `call ${++calls}`,
+        tools: [],
+    });
+    const first = build(undefined) as Record<string, any>;
+    const second = build(undefined) as Record<string, any>;
+
+    assert.equal(first.systemInstruction.parts[0].text, "call 1");
+    assert.equal(second.systemInstruction.parts[0].text, "call 2");
+});
+
 test("pi_ask is described as a general agent hand-off, not a coding tool", () => {
     const declaration = functionDeclarations(caps).find((entry) => entry.name === "pi_ask");
     const description = String(declaration?.description ?? "");
@@ -415,10 +471,23 @@ console.log("failure classification");
 test("quota and config closes are fatal (no retry storm)", () => {
     assert.equal(isFatalClose(1011, "You exceeded your current quota, please check your plan and billing details."), true);
     assert.equal(isFatalClose(1007, "Thinking level must be specified for this model."), true);
-    assert.equal(isFatalClose(1008, "policy"), true);
+    assert.equal(isFatalClose(1008, "You are not permitted to use this model"), true);
     assert.equal(isFatalClose(1011, "internal server error"), false);
     assert.equal(isFatalClose(1000, "rotation"), false);
     assert.equal(isFatalClose(undefined, ""), false);
+});
+
+test("the server's own \"Session closed\" is recoverable, not fatal", () => {
+    // This exact close used to mark the session permanently broken: voice stayed
+    // dead until Pi was restarted.
+    assert.equal(isDormantClose(1008, "Session closed"), true);
+    assert.equal(isDormantClose(1008, ""), true);
+    assert.equal(isDormantClose(1008, "session expired"), true);
+    assert.equal(isDormantClose(1008, "policy violation"), false);
+    assert.equal(isDormantClose(1007, "Session closed"), false);
+
+    assert.equal(isFatalClose(1008, "Session closed"), false, "no longer fatal");
+    assert.equal(isFatalClose(1008, "You exceeded your current quota"), true, "quota stays fatal");
 });
 
 test("friendly message points at diagnose", () => {

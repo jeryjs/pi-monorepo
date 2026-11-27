@@ -399,6 +399,15 @@ export class NativeTransport {
         return Date.now() < this.#playingUntil;
     }
 
+    /**
+     * Timestamp until which the speakers are still busy (queued frames plus the
+     * acoustic tail). The controller uses it to know whether a notice would land on
+     * top of a sentence that has already stopped generating but is still audible.
+     */
+    get playingUntil(): number {
+        return this.#playingUntil;
+    }
+
     static available(config: VoiceConfig): boolean {
         return hasBinary(config.ffmpegPath) && hasBinary(config.ffplayPath);
     }

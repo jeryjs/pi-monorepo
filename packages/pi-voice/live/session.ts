@@ -40,6 +40,12 @@ export interface LiveSessionEvents {
     idle: undefined;
     /** Retry with a fresh session: the stored resumption handle was rejected. */
     handleInvalid: undefined;
+    /**
+     * The socket is gone and will not be retried automatically: the caller should
+     * go back to wake-word listening, where the wake phrase reconnects. Sent for a
+     * bare "Session closed" and after the retry budget is spent.
+     */
+    dormant: { reason: string };
     state: LiveState;
     resumption: string;
     goAway: number;
@@ -54,6 +60,12 @@ export interface LiveSessionOptions {
     buildSetup: (resumptionHandle: string | undefined) => Record<string, unknown>;
     /** Start with the mic gated (always-on wake-word mode). */
     startSleeping?: boolean;
+    /**
+     * A wake word can reconnect on demand. When true, closes that are pointless to
+     * retry (the server's own "Session closed", retries exhausted) go *dormant*
+     * instead of fatal, so saying the wake phrase opens a fresh socket.
+     */
+    wakeAvailable?: boolean;
 }
 
 interface WebSocketLike {
@@ -85,14 +97,38 @@ const FATAL_REASONS = [
 ];
 
 export function isFatalClose(code: number | undefined, reason: string | undefined): boolean {
-    // 1007 = invalid argument (bad setup), 1008 = policy violation.
-    if (code === 1007 || code === 1008) {
+    // 1007 = invalid argument: the setup itself is wrong, retrying cannot help.
+    if (code === 1007) {
         return true;
+    }
+
+    // 1008 = policy violation, but the same code carries the server's plain
+    // "Session closed" when it ends an idle session. That one is recoverable, and
+    // treating it as fatal is what left voice dead until Pi was restarted.
+    if (code === 1008) {
+        return !isDormantClose(code, reason);
     }
 
     const detail = reason ?? "";
 
     return FATAL_REASONS.some((pattern) => pattern.test(detail));
+}
+
+/**
+ * A close that means "this socket is finished" rather than "this setup is broken".
+ *
+ * Gemini ends an idle or long-lived session with `1008: Session closed`; the right
+ * response is to stop talking to a socket that is gone and wait to be woken, not to
+ * mark the voice unusable.
+ */
+export function isDormantClose(code: number | undefined, reason: string | undefined): boolean {
+    if (code !== 1008) {
+        return false;
+    }
+
+    const detail = (reason ?? "").trim();
+
+    return detail === "" || /session\s+(is\s+)?closed|^closed$|expired|goaway/i.test(detail);
 }
 
 /** A rejected resumption handle: recoverable by starting a fresh session. */
@@ -473,6 +509,16 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
             this.#fatal = true;
             this.#setState("error");
             this.emit("error", new Error(friendlyCloseError(code, reason)));
+
+            return;
+        }
+
+        // Nothing here is worth retrying on a loop when a wake word can open a
+        // fresh socket on demand: the user is not left with a dead voice, and an
+        // idle session that the server closed does not burn quota reconnecting.
+        if (this.options.wakeAvailable && (isDormantClose(code, reason) || this.#attempt >= MAX_RECONNECT_ATTEMPTS)) {
+            this.#setState("sleeping");
+            this.emit("dormant", { reason: (reason ?? "").trim() || `closed ${code ?? "?"}` });
 
             return;
         }

@@ -48,8 +48,11 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
                 message: { type: "string", description: "What Pi should do, phrased as the user would phrase it." },
                 mode: {
                     type: "string",
-                    enum: ["queue", "steer"],
-                    description: "queue (default) sends it as the next message; steer interrupts Pi's current run.",
+                    enum: ["steer", "queue"],
+                    description:
+                        "steer (default) puts it into the run Pi is already doing, so it is picked up now; "
+                        + "queue waits until the current turn ends. Use queue only for something that must not "
+                        + "disturb the work in progress.",
                 },
             },
             ["message"],
@@ -159,7 +162,10 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
                 return respond({ error: "message is required" });
             }
 
-            const mode = stringArg(call.args, "mode") === "steer" ? "steer" : "queue";
+            // Default is steer: the user is talking to Pi *now*, and routing every
+            // spoken request to `followUp` meant "stop doing that, do this instead"
+            // landed only after the run it was meant to redirect had finished.
+            const mode = stringArg(call.args, "mode") === "queue" ? "queue" : "steer";
 
             if (!bridge.ask(message, mode)) {
                 return respond({ error: "could not deliver the message to Pi; tell the user it did not go through" });

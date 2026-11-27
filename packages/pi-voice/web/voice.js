@@ -217,6 +217,14 @@ function onControl(message) {
             // explicit interrupt should cut playback.
             break;
 
+        case "dormant":
+            // The socket is gone (server closed it, or it kept failing). The voice is
+            // asleep with the wake spotter armed: the next wake phrase reconnects.
+            state.awake = false;
+            setChip("wake: asleep");
+            setDot("wake", message.reason ? `asleep: ${message.reason}` : "asleep");
+            break;
+
         case "wake":
             state.awake = true;
             setChip("wake: awake");
