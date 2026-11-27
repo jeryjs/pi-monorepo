@@ -254,9 +254,9 @@ export class VoiceController implements VoiceControl {
             return "not running";
         }
 
-        const provider = this.#native.spotterProvider;
+        const provider = this.#native.wakeEngine;
 
-        return provider ? `sherpa (${provider})` : "energy VAD";
+        return provider ? `${provider.kind} (${provider.provider})` : "energy VAD";
     }
 
     refreshStatus(force = true): void {
@@ -311,8 +311,8 @@ export class VoiceController implements VoiceControl {
         try {
             return await this.#startInner(generation);
         } catch (error) {
-            // A failed or cancelled start must not leak a socket, HTTP server,
-            // microphone or the workspace lock.
+            // A failed or cancelled start must not leak a socket, microphone,
+            // player or the workspace lock.
             await this.#teardown(false);
 
             throw error;
@@ -557,7 +557,7 @@ export class VoiceController implements VoiceControl {
         // Transport-level settings can only be applied by rebuilding the process
         // side (mic capture, player, wake spotter).
         const restartKeys: (keyof VoiceConfig)[] = [
-            "nativeInput", "nativeOutput", "ffmpegPath", "ffplayPath", "nativeAec",
+            "nativeInput", "ffmpegPath", "ffplayPath", "nativeAec",
             "kwsModelDir", "asrModelDir", "kwsKeywords", "sherpaProvider", "wakeEngine",
             "connectOnWake", "inputGain", "outputGain",
         ];

@@ -44,6 +44,15 @@ export interface NativeTransportOptions {
 }
 
 /**
+ * Which wake engine is really running, as opposed to what the config asks for.
+ * `provider` is what the runtime reports (`cpu`, `directml`, ...).
+ */
+export interface WakeEngineStatus {
+    kind: "asr" | "sherpa";
+    provider: string;
+}
+
+/**
  * What VoiceController needs from an audio sink.
  *
  * NativeTransport is the product implementation; the interface exists so the
@@ -58,8 +67,8 @@ export interface AudioSink {
     setStreaming(streaming: boolean): void;
     /** Epoch ms until which playback is still audible (queued frames + speaker tail). */
     readonly playingUntil: number;
-    /** Wake engine that actually started, e.g. "asr cpu"; undefined = energy VAD. */
-    readonly spotterProvider: string | undefined;
+    /** Wake engine that actually started; undefined = energy VAD. */
+    readonly wakeEngine: WakeEngineStatus | undefined;
 }
 
 function hasBinary(command: string): boolean {
@@ -394,9 +403,13 @@ export class NativeTransport implements AudioSink {
     /** Restart the capture process at most this many times before reporting failure. */
     static readonly CAPTURE_ATTEMPTS = 5;
 
-    /** Which engine actually got constructed ("sherpa cpu", "asr cpu"; nothing = energy VAD). */
-    get spotterProvider(): string | undefined {
-        return this.#asr ? `asr ${this.#asr.provider}` : this.#kws?.provider;
+    /** Which engine actually got constructed (nothing = energy VAD). */
+    get wakeEngine(): WakeEngineStatus | undefined {
+        if (this.#asr) {
+            return { kind: "asr", provider: this.#asr.provider };
+        }
+
+        return this.#kws ? { kind: "sherpa", provider: this.#kws.provider } : undefined;
     }
     /** Drop queued playback beyond this many bytes (~2 s of 24 kHz mono). */
     static readonly MAX_PLAYBACK_BYTES = 24_000 * 2 * 2;

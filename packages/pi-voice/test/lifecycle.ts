@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AudioSink, NativeTransportOptions } from "../audio/native.ts";
+import type { AudioSink, NativeTransportOptions, WakeEngineStatus } from "../audio/native.ts";
 import { acceptWebSocket } from "./ws-server.ts";
 import type { WebSocketPeer } from "./ws-server.ts";
 import { VoiceController } from "../controller.ts";
@@ -272,6 +272,7 @@ function makeCtx(history?: unknown[]): ExtensionContext {
  */
 class SilentAudio implements AudioSink {
     #streaming = true;
+    #wakeEngine: WakeEngineStatus | undefined = undefined;
     started = 0;
     stopped = 0;
     played = 0;
@@ -305,8 +306,13 @@ class SilentAudio implements AudioSink {
         return 0;
     }
 
-    get spotterProvider(): undefined {
-        return undefined;
+    get wakeEngine(): WakeEngineStatus | undefined {
+        return this.#wakeEngine;
+    }
+
+    /** Tests set this to check how a live wake engine is reported in status. */
+    set wakeEngine(value: WakeEngineStatus | undefined) {
+        this.#wakeEngine = value;
     }
 
     get streaming(): boolean {
@@ -359,6 +365,17 @@ for (let cycle = 1; cycle <= 5; cycle++) {
     const result = await controller.start();
 
     assert.equal(controller.running, true, `cycle ${cycle}: running after start`);
+
+    if (cycle === 1) {
+        // Status must name the engine that really started. It used to wrap every
+        // provider in "sherpa (...)", so an ASR session was reported as sherpa.
+        sinks[0]!.wakeEngine = { kind: "asr", provider: "cpu" };
+        assert.equal(controller.wakeEngineActive, "asr (cpu)", "status names the ASR engine");
+        sinks[0]!.wakeEngine = { kind: "sherpa", provider: "directml" };
+        assert.equal(controller.wakeEngineActive, "sherpa (directml)", "status names the KWS engine");
+        sinks[0]!.wakeEngine = undefined;
+        assert.equal(controller.wakeEngineActive, "energy VAD", "status falls back to the energy VAD");
+    }
     assert.equal(result.model, DEFAULT_VOICE_CONFIG.model, `cycle ${cycle}: model reported`);
     assert.equal(readLock(cwd)?.pid, process.pid, `cycle ${cycle}: lock held while running`);
 
@@ -408,9 +425,15 @@ ok("restart passes the previous resumption handle back to the server");
 const beforeConcurrent = live.connections.length;
 const [a, b] = await Promise.all([controller.start(), controller.start()]);
 
-assert.equal(a.url, b.url, "both callers got the same endpoint");
+// In-flight callers share one start promise, so they must get the same object:
+// distinct results would mean a second session was built for the same request.
+assert.strictEqual(a, b, "concurrent callers got the same start result");
 await until(() => Boolean(live.connections[beforeConcurrent]?.setup), "concurrent start setup");
-assert.equal(live.connections.length - beforeConcurrent, 1, "concurrent start opened one socket");
+assert.equal(
+    live.connections.length - beforeConcurrent,
+    1,
+    "concurrent start opened one socket",
+);
 await controller.stop();
 ok("double start / autoStart race opens a single Live session");
 

@@ -564,7 +564,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (76) + lifecycle (35) + sherpa (13)
+npm test   # smoke (77) + lifecycle (35) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
@@ -572,18 +572,20 @@ normalization, argument completions, key resolution order (auth.json → env →
 registry), lock ownership/release/staleness, resumption-handle sequencing and the
 NLMS echo canceller.
 
-`test/server.ts` drives the local endpoint: static serving, the token gate, path
-traversal, the hand-rolled WebSocket server (handshake, masked frames, binary),
-crash probes (malformed escape, invalid `Host`, bad upgrade), an oversized-frame
-`1009` close and repeated start/stop cycles.
+`test/ws-server.ts` is the test-side RFC 6455 server (handshake, masked frames,
+binary, oversized-frame `1009` close) that the lifecycle harness uses to stand in
+for Gemini Live. It is test support, not shipped code: the npm package excludes
+`test/`.
 
 `test/lifecycle.ts` drives the real `VoiceController` against a fake Gemini Live
-endpoint: five start/stop cycles, double start, stop during start, restart
+endpoint (that file's WebSocket server): five start/stop cycles, double start, stop
+during start, concurrent start collapsing to one result and one socket, restart
 resumption, `/reload` rebind, the idle gate (engages on silence, voice keeps it
 awake), **start-asleep (`connectOnWake`: no socket until wake, then live, and no
 connection from a config change either)**, honest `pi_ask`/`pi_stop` results,
-cross-process locking and stale-lock takeover; plus the microphone-probe verdicts
-(silent / quiet / signal / capture failure) in the smoke suite.
+wake-engine status reporting (asr / sherpa / energy VAD), cross-process locking and
+stale-lock takeover; plus the microphone-probe verdicts (silent / quiet / signal /
+capture failure) in the smoke suite.
 
 `test/sherpa.ts` covers the wake-word installer offline: BPE keyword
 spotting/tokenisation (including the uncoverable-phrase error and the digest-named

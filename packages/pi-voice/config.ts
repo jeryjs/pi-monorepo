@@ -93,8 +93,6 @@ export interface VoiceConfig {
     // ---- endpoint (native ffmpeg capture/playback) ----
     /** ffmpeg input device (Windows: `audio=<name>`, macOS: `:0`, Linux: `default`). */
     nativeInput: string;
-    /** ffplay output device hint (usually empty). */
-    nativeOutput: string;
     ffmpegPath: string;
     ffplayPath: string;
     /** Echo mitigation: NLMS AEC (full duplex), half-duplex mute, or off. */
@@ -158,7 +156,6 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     maxSessionMs: 9 * 60_000,
 
     nativeInput: "",
-    nativeOutput: "",
     ffmpegPath: "ffmpeg",
     ffplayPath: "ffplay",
     nativeAec: "nlms",
@@ -253,7 +250,6 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     idleSleepMs: num("idleSleepMs", 5_000, 60 * 60_000),
     maxSessionMs: num("maxSessionMs", 60_000, 60 * 60_000),
     nativeInput: str("nativeInput"),
-    nativeOutput: str("nativeOutput"),
     ffmpegPath: str("ffmpegPath"),
     ffplayPath: str("ffplayPath"),
     nativeAec: oneOf("nativeAec", ["nlms", "half-duplex", "off"] as const),

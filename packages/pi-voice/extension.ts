@@ -17,10 +17,10 @@ import { liveModelIds } from "./capabilities.ts";
 import { buildSystemInstruction } from "./bridge/prompt.ts";
 import { functionDeclarations } from "./bridge/tools.ts";
 import { createSetupBuilder } from "./live/setup.ts";
+import { NativeTransport } from "./audio/native.ts";
 import { setDebug, warn } from "./util.ts";
 
-/** Commands that should never run without a human saying yes. */
-const RISKY: { pattern: RegExp; label: string }[] = [
+/** Commands that should never run without a human saying yes. */const RISKY: { pattern: RegExp; label: string }[] = [
     { pattern: /\brm\s+-[a-z]*[rf]/i, label: "recursive delete" },
     { pattern: /\bgit\s+push\b/i, label: "push to a remote" },
     { pattern: /\bgit\s+reset\s+--hard\b/i, label: "hard reset" },
@@ -34,6 +34,25 @@ const RISKY: { pattern: RegExp; label: string }[] = [
     { pattern: /\bformat\s+[a-z]:/i, label: "format a drive" },
     { pattern: /\|\s*(ba)?sh\b/, label: "pipe into a shell" },
 ];
+
+/**
+ * Native audio preflight for `/voice diagnose`.
+ *
+ * The ffmpeg failure path points the user here, and ffmpeg/ffplay are exactly what
+ * goes missing on a fresh machine — a diagnose that only reported the Gemini key
+ * sent people to the wrong place.
+ */
+function nativeDiagnosis(config: VoiceConfig): string {
+    if (NativeTransport.available(config)) {
+        const input = config.nativeInput.trim() || "auto-detected";
+
+        return `audio: ffmpeg + ffplay ok · input: ${input} · echo: ${config.nativeAec}`;
+    }
+
+    const missing = NativeTransport.describeMissing(config);
+
+    return `audio: MISSING ${missing.join(", ")} — install ffmpeg (it ships ffplay)`;
+}
 
 function commandOf(input: unknown): string {
     if (!input || typeof input !== "object") {
@@ -172,10 +191,10 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         const result = controller?.updateConfig(config);
         refreshStatus();
 
-        // Transport-level settings (input device, port, AEC mode, wake engine) only
-        // exist inside the rebuilt process side: server, ffmpeg capture, player. That
-        // result used to be discarded, so those settings silently did nothing until
-        // the next manual restart.
+        // Transport-level settings (input device, AEC mode, wake engine) only exist
+        // inside the rebuilt process side: ffmpeg capture, player, wake spotter.
+        // That result used to be discarded, so those settings silently did nothing
+        // until the next manual restart.
         if (result?.restart && controller?.running && !rebuilding) {
             rebuilding = (async () => {
                 try {
@@ -205,8 +224,10 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                 registry: context?.modelRegistry as unknown as KeyRegistry,
             });
 
+            const native = nativeDiagnosis(config);
+
             if (!resolved) {
-                return "no Gemini key found (pi-voice.json → auth.json → env → Pi provider)";
+                return `no Gemini key found (pi-voice.json → auth.json → env → Pi provider)\n\n${native}`;
             }
 
             const configured = config.model;
@@ -233,7 +254,6 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             });
 
             const lines = [`key: ${resolved.source} (${resolved.key.length} chars)`, ""];
-
             for (const result of results) {
                 lines.push(`${result.ok ? "ok  " : "FAIL"} ${result.model.padEnd(42)} ${result.detail} (${result.ms}ms)`);
             }
@@ -242,7 +262,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                 lines.push("", "Quota/billing refusal: check this project's billing in AI Studio, or wait for the rate window.");
             }
 
-            return lines.join("\n");
+            return [`${lines.join("\n")}`, "", native].join("\n");
         },
     };
 

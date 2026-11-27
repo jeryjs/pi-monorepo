@@ -22,13 +22,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Config surface shrank from 57 fields to 44.** Gone: `audio` (no second transport),
+- **Config surface shrank from 55 fields to 43.** Gone: `audio` (no second transport),
   `host`/`port`/`openBrowser` (no page), `compute` (WebNN/WebGPU/WASM backend
   selector — there is no WASM build to select), `aec`/`noiseSuppression`/`autoGain`
   (getUserMedia constraints), `micDeviceId`/`outputDeviceId` (browser device ids),
   `wakeModelUrl` (the page imported a KWS module through it). Old `pi-voice.json`
   files keep loading: unknown keys are ignored, and a test asserts they cannot come
   back. `inputGain`/`outputGain` stay — the native transport applies them.
+- **`nativeOutput` is gone too, and it was never a real setting.** `ffplay` has no
+  output-device option (SDL picks the system default), so the field was persisted,
+  shown as "Playback device hint" and treated as restart-worthy while changing it
+  did nothing at all. That is why the count above ends at 43, not 44.
 - `wakeEngine` lost `webspeech`; `WakeEngine` is `auto | asr | sherpa | energy`.
 - `/voice` lost `url` and `compute`; the settings screen lost the transport picker,
   the browser device fields and Ctrl-O. `/Voice status` lost the page/peer lines and
@@ -46,7 +50,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Native audio failure used to fall back to the browser transport, which meant a
   missing ffmpeg produced a page instead of an explanation. It now fails with the
-  actual reason and a pointer to `/voice diagnose`.
+  actual reason and a pointer to `/voice diagnose`, and `/voice diagnose` grew a
+  native preflight line (`ffmpeg + ffplay ok · input: … · echo: …`) so that pointer
+  leads somewhere useful instead of only reporting the Gemini key.
+- `/voice status` reported any live wake engine as `sherpa (…)`, so an ASR session
+  read `sherpa (asr cpu)`. The status now names the engine: `asr (cpu)` or
+  `sherpa (cpu)`.
 
 ## [0.6.2] - 2026-12-01
 

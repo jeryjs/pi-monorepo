@@ -487,7 +487,6 @@ function buildItems(
         textItem("digestChars", "Digest chars", "Characters kept per message", String(config.digestChars), theme, tui),
 
         textItem("nativeInput", "Native input device", "ffmpeg device: audio=<name> (Win), :0 (mac), default (Linux); empty = auto-detect", config.nativeInput, theme, tui),
-        textItem("nativeOutput", "Native output device", "Playback device hint", config.nativeOutput, theme, tui),
         enumItem("nativeAec", "Native echo", "nlms = full-duplex AEC; half-duplex mutes the mic; off", config.nativeAec, ["nlms", "half-duplex", "off"]),
         textItem("ffmpegPath", "ffmpeg path", "Binary used for native capture", config.ffmpegPath, theme, tui),
         textItem("ffplayPath", "ffplay path", "Binary used for native playback", config.ffplayPath, theme, tui),

@@ -2,9 +2,10 @@
  * A tiny RFC 6455 WebSocket *server* (handshake + frames) built only on
  * `node:crypto` and `node:stream`.
  *
- * Test support, not shipped code: the lifecycle harness stands up a fake Gemini
+ * Test support, not shipped: the lifecycle harness stands up a fake Gemini
  * Live endpoint and needs the server side of the protocol to do it. Node has no
- * WebSocket server, and adding a dependency for tests is not worth it.
+ * WebSocket server, and adding a dependency for tests is not worth it. The npm
+ * package excludes `test/`, so this file never reaches a consumer.
  */
 
 import { createHash } from "node:crypto";
@@ -19,8 +20,6 @@ const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 export interface WebSocketPeer {
     send(data: string | Uint8Array): void;
     close(code?: number, reason?: string): void;
-    readonly open: boolean;
-    readonly remote: string;
 }
 
 export interface PeerHandlers {
@@ -80,13 +79,7 @@ export function acceptWebSocket(req: IncomingMessage, socket: Duplex, head: Buff
     let fragmentOpcode = 0;
     let fragments: Buffer[] = [];
 
-    const remote = `${req.socket.remoteAddress ?? "?"}:${req.socket.remotePort ?? 0}`;
-
     const peer: WebSocketPeer = {
-        get open() {
-            return open;
-        },
-        remote,
         send(data) {
             if (!open) {
                 return;

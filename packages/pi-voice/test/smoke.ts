@@ -246,6 +246,28 @@ test("there is exactly one transport: no browser keys survive in the config", ()
     assert.equal(((legacy as unknown) as Record<string, unknown>).port, undefined);
 });
 
+test("the playback device is not a setting: ffplay has no output-device option", () => {
+    // `nativeOutput` used to be persisted, shown in the TUI as "Playback device
+    // hint" and treated as restart-worthy, but no ffplay argument was ever built
+    // from it, so changing it did nothing. Removed rather than keep a control that
+    // lies; SDL picks the system default and exposes no device selection.
+    assert.equal(
+        Object.keys(DEFAULT_VOICE_CONFIG).includes("nativeOutput"),
+        false,
+        "nativeOutput must not be a voice setting",
+    );
+
+    // The retry path proves the point: an unknown option makes ffplay refuse to
+    // start, so a device flag must never be smuggled into the argv.
+    for (const args of [playbackArgs(), playbackArgs(true)]) {
+        assert.equal(
+            args.some((arg) => /device|\-ac\b/i.test(arg)),
+            false,
+            "ffplay args must not carry device or channel options",
+        );
+    }
+});
+
 test("persona encodes bridge role and autonomy", () => {
     const text = buildSystemInstruction({
         config: patchVoiceConfig(DEFAULT_VOICE_CONFIG, { persona: "Call me boss." }),
