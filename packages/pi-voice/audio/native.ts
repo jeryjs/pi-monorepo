@@ -10,7 +10,7 @@
  * else is Node built-ins.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { VoiceConfig } from "../config.ts";
 import { log, warn, RingBuffer, float32ToPcm16 } from "../util.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "./aec.ts";
+import { killTree, spawnManaged } from "./process.ts";
 import { NativeAsrWakeSpotter } from "./asr-wake.ts";
 import { NativeKeywordSpotter } from "./kws.ts";
 import { asrModelStatus, resolvedAsrModelDir, resolvedModelDir, sherpaStatus } from "../sherpa.ts";
@@ -268,7 +269,7 @@ export async function probeMic(config: VoiceConfig, seconds = 3): Promise<MicPro
         let child: ChildProcessWithoutNullStreams;
 
         try {
-            child = spawn(config.ffmpegPath, args, {
+            child = spawnManaged(config.ffmpegPath, args, {
                 stdio: ["ignore", "pipe", "pipe"],
                 windowsHide: true,
             }) as ChildProcessWithoutNullStreams;
@@ -295,12 +296,7 @@ export async function probeMic(config: VoiceConfig, seconds = 3): Promise<MicPro
 
             settled = true;
             clearTimeout(timer);
-
-            try {
-                child.kill();
-            } catch {
-                // ignore
-            }
+            killTree(child);
 
             if (windows > 0) {
                 result.voicedRatio = voicedWindows / windows;
@@ -621,19 +617,30 @@ export class NativeTransport implements AudioSink {
             };
 
             const timer = setTimeout(() => {
-                try {
-                    child.kill("SIGKILL");
-                } catch {
-                    // already gone
-                }
+                // The child is still up after the grace period: take the whole tree,
+                // the real ffmpeg/ffplay included (see audio/process.ts).
+                killTree(child);
 
                 // Do not hang the caller on a process the OS refuses to reap.
                 setTimeout(finish, 500).unref?.();
             }, graceMs);
             (timer as { unref?: () => void }).unref?.();
 
+            // Already reaped before stop() ran: its "close" fired into an earlier
+            // listener, so waiting the grace period here would stall every restart.
+            if (child.exitCode !== null || child.signalCode !== null) {
+                finish();
+
+                return;
+            }
+
             child.once("close", finish);
             child.once("error", finish);
+
+            // Tree first, then the child itself: killing the shim alone used to
+            // orphan the real binary with the microphone still open. SIGTERM gives
+            // ffmpeg a chance to release the dshow device cleanly.
+            killTree(child, "SIGTERM");
 
             try {
                 child.kill();
@@ -709,13 +716,15 @@ export class NativeTransport implements AudioSink {
             return;
         }
 
-        try {
-            this.#player?.kill();
-        } catch {
-            // ignore
+        // Barge-in: the respawn must not happen when the transport is stopping, and
+        // the old child must be forgotten so its exit handler cannot double-spawn.
+        if (this.#player) {
+            const previous = this.#player;
+
+            this.#player = undefined;
+            killTree(previous);
         }
 
-        this.#player = undefined;
         this.#playingUntil = 0;
         this.#spawnPlayer();
     }
@@ -725,7 +734,7 @@ export class NativeTransport implements AudioSink {
     #spawnPlayer(): void {
         const { config } = this.options;
 
-        const child = spawn(config.ffplayPath, playbackArgs(this.#playerMinimal), {
+        const child = spawnManaged(config.ffplayPath, playbackArgs(this.#playerMinimal), {
             stdio: ["pipe", "ignore", "pipe"],
             windowsHide: true,
         }) as ChildProcessWithoutNullStreams;
@@ -748,14 +757,13 @@ export class NativeTransport implements AudioSink {
                 this.#playerMinimal = true;
                 this.#error(`ffplay rejected a playback option (${text}); retrying with a minimal argument set`);
 
-                try {
-                    child.kill();
-                } catch {
-                    // ignore
+                // Only retry if this is still the live player: a stale stderr line
+                // used to spawn a second ffplay and orphan the one we were tracking.
+                if (this.#player === child && this.#started) {
+                    this.#player = undefined;
+                    killTree(child);
+                    this.#spawnPlayer();
                 }
-
-                this.#player = undefined;
-                this.#spawnPlayer();
             }
         });
         child.on("exit", (code) => {
@@ -799,7 +807,7 @@ export class NativeTransport implements AudioSink {
             "-",
         ];
 
-        const child = spawn(config.ffmpegPath, args, {
+        const child = spawnManaged(config.ffmpegPath, args, {
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
         }) as ChildProcessWithoutNullStreams;
@@ -831,7 +839,13 @@ export class NativeTransport implements AudioSink {
                 this.#onCaptureExit(null);
             }
         });
-        child.on("exit", (code) => this.#onCaptureExit(code));
+        child.on("exit", (code) => {
+            // A shim can exit while the binary it launched is still holding the
+            // device; make sure the tree is gone before the restart attempt so it
+            // does not fail with "device busy".
+            killTree(child);
+            this.#onCaptureExit(code);
+        });
 
         this.#capture = child;
     }

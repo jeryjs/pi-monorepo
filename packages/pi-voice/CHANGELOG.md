@@ -5,6 +5,33 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-12-02
+
+`/voice off` left the microphone open. This is the fix for the processes that
+kept piling up after every stop, restart and settings change.
+
+### Fixed
+
+- **Killing the transport now takes the whole process tree.** `child.kill()` only
+  signals the process Node spawned — and on Windows that is usually a shim
+  (chocolatey's `ffmpeg.exe` launches the real `ffmpeg.exe` as its own child), so
+  the real ffmpeg survived with the dshow device still open. Every `/voice off`,
+  `/voice restart` and settings-driven rebuild leaked another ffmpeg/ffplay pair,
+  which is both the CPU the user saw burning and the reason a restart could fail
+  with "device busy". Children are now spawned in their own process group on POSIX
+  and killed with `taskkill /T /F` on Windows, and a registered `exit` hook reaps
+  them if the process dies unexpectedly.
+- **Capture and playback restarts can no longer double-spawn.** A stale ffplay
+  stderr line (the "option rejected" retry) spawned a second player and orphaned
+  the one being tracked, and the barge-in `flush()` respawned unconditionally.
+  Both now check that the child they are replacing is still the live one.
+- **`/voice mic` no longer leaves a probe ffmpeg behind** on the timeout path.
+
+### Added
+
+- `test/process.ts`: spawns a real parent → grandchild chain and asserts both are
+  gone after a kill, so this cannot regress silently. 167 checks total.
+
 ## [0.8.3] - 2026-12-02
 
 Two field fixes from a live session.
