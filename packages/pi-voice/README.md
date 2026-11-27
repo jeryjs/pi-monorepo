@@ -16,18 +16,16 @@ work is needed. It is not a second coding agent — it is the go-between.
 
 - **Gemini Live is the only genuinely free realtime voice API with function
   calling** (AI Studio free tier: audio in *and* out at no charge).
-- The Gemini socket lives **inside the Pi process**. The API key never reaches the
-  browser, tool calls execute natively, and the extra loopback hop costs ~0.2 ms
-  against a 20–100 ms network RTT.
-- Audio I/O is pluggable and **native by default** (ffmpeg, headless, no tab).
-  The **browser companion page** (WebRTC echo cancellation) is opt-in via
-  `audio: "browser"` (or `"both"`).
+- The Gemini socket lives **inside the Pi process**: the API key never leaves it,
+  tool calls execute natively, and audio never leaves the machine.
+- Audio I/O *is* `ffmpeg`/`ffplay`. No browser, no HTTP server, no tab, nothing to
+  open — one transport, no switching.
 
-## Wake word: two engines, because one of them will not fit every voice
+## Wake word: three engines, because one of them will not fit every voice
 
 | engine | what it is | cost |
 |---|---|---|
-| `asr` | streaming recognizer + fuzzy phrase match on the transcript | ~40 MB model, 20M params |
+| `asr` | streaming recognizer + fuzzy phrase match on the transcript | ~122 MB model, 20M params |
 | `sherpa` | sherpa-onnx keyword spotter (3.3M params, acoustic match) | ~17 MB model, very cheap |
 | `energy` | loud-speech VAD, no phrase model at all | free, fires on any speech |
 
@@ -59,21 +57,9 @@ work is needed. It is not a second coding agent — it is the go-between.
 /voice on       # start the voice session
 ```
 
-By default audio is **native**: the extension drives `ffmpeg`/`ffplay` directly,
-so there is no browser, no HTTP server and no tab. Install ffmpeg (it ships
-`ffplay`); on Windows the capture device is auto-detected.
-
-### Opting into the browser transport
-
-Set **Transport** to `browser` (or `both`) in `/voice`. The extension then starts
-the local companion page and prints its URL. Open it from that URL
-(`http://127.0.0.1:...`, a secure context), allow the microphone, and press
-**Start listening** or enable **Always-on wake word** — one click is required
-before any browser starts audio. This path gives WebRTC AEC and the offline
-phrase engines (sherpa / Web Speech).
-
-Either way the TUI status bar shows a live mic waveform, so you can see whether
-Pi is hearing you.
+Audio is `ffmpeg`/`ffplay` driven directly: install ffmpeg (it ships `ffplay`);
+on Windows the capture device is auto-detected. The TUI status bar shows a live
+mic waveform, so you can see whether Pi is hearing you.
 
 ### Start with voice
 
@@ -83,9 +69,8 @@ pi --voice
 
 Registers `--voice`: starts enabled, turns on always-on wake listening, and
 **starts asleep** — the wake spotter runs locally and no Gemini session exists
-until you say the phrase (see `connectOnWake` below). With the default native
-transport there is no page; with `audio: "browser"` it opens the page and one
-click is required before audio starts.
+until you say the phrase (see `connectOnWake` below). Nothing to open and no
+click to give: the first phrase is all it takes.
 
 ### Key
 
@@ -100,21 +85,18 @@ OAuth credentials (`google-gemini-cli`, `google-antigravity`) are skipped — th
 `/voice key` with no argument shows **which source is in use**, never the key itself.
 Set one explicitly with `/voice key AIza...`, or `/voice key clear` to go back to auth.json/env.
 
-## Audio transports
+## Audio devices
 
-| | `audio: "native"` (default) | `audio: "browser"` (opt-in) |
-|---|---|---|
-| Echo cancellation | **NLMS AEC** (full duplex) | **WebRTC AEC3** |
-| Extra RAM | ~30–60 MB | ~15–40 MB (shared tab) |
-| Needs | `ffmpeg` + `ffplay` on PATH | a browser tab open |
-| Wake word | sherpa KWS / energy VAD | sherpa WASM / Web Speech / VAD |
-| NPU | sherpa provider (`directml`) | **WebNN → Intel AI Boost** |
+Two processes per session: `ffmpeg` reading the input, `ffplay` writing the
+output. Leaving `nativeInput` empty auto-detects the first Windows dshow capture
+device; macOS and Linux default to `:0` / `default`.
 
-`audio: "both"` starts both and lets either side drive the session. Leaving
-`nativeInput` empty auto-detects the first Windows dshow capture device; macOS
-and Linux default to `:0` / `default`.
+Echo: `nativeAec` is `nlms` by default — a real adaptive canceller in front of the
+mic, so the model does not hear itself and barge-in works on speakers.
+`half-duplex` mutes the mic while the model speaks; `off` disables it (use
+headphones).
 
-### Native device strings
+### Device strings
 
 ```jsonc
 // Windows (list with: ffmpeg -list_devices true -f dshow -i dummy)
@@ -127,11 +109,10 @@ and Linux default to `:0` / `default`.
 
 ## Wake word
 
-`alwaysOn` is **off by default**. Enable it with `/voice always-on on` or the
-toggle in the page. The native transport wakes on an offline sherpa-onnx phrase
-spotter, which Pi can install for you; without it the energy VAD is used, which
-wakes on any loud-enough speech rather than a phrase. The browser transport uses
-the sherpa WASM module or Web Speech. The status bar carries a live waveform:
+`alwaysOn` is **off by default**. Enable it with `/voice always-on on`. Wake
+happens locally, on this machine, in one of three engines; without an installed
+phrase model the energy VAD is used, which wakes on any loud-enough speech rather
+than a phrase. The status bar carries a live waveform:
 
 ```
 voice live ▁▂▄▆▄▂ ·wake         # hearing you, always-on
@@ -157,9 +138,9 @@ Engines (`wakeEngine`):
 
 | Value | What it does |
 |---|---|
-| `auto` | sherpa once installed, otherwise energy VAD |
-| `sherpa` | offline phrase spotting; prompts to install what is missing |
-| `webspeech` | Chrome/Edge SpeechRecognition phrase spotter (browser transport) |
+| `auto` | `asr` when its model is installed, else `sherpa` when installed, else `energy` |
+| `asr` | streaming recognizer + fuzzy phrase match on the transcript (`/voice asr`) |
+| `sherpa` | offline keyword spotting; prompts to install what is missing |
 | `energy` | local VAD — speech onset, not phrase-aware |
 
 ### Installing the offline phrase wake word (native)
@@ -184,28 +165,19 @@ model's `tokens.txt` — sherpa wants BPE pieces (`▁HE Y ▁PI`), not raw text
 unspellable phrase fails with a clear message and the `text2token` fallback.
 `wakeSensitivity` maps to the spotter's threshold (0.25 at the 0.5 default).
 
-### Offline KWS (sherpa)
+### The ASR engine (when the phrase spotter cannot hear you)
 
-Point `wakeModelUrl` at a module that exports:
+`/voice asr` installs a streaming recognizer (about 122 MB, into
+`~/.pi/agent/pi-voice-models`) and sets `wakeEngine: "asr"`. Instead of comparing
+acoustics to one tokenised phrase, it decodes continuously and matches the
+*words*: one edit allowed per word of three or more letters, none for short ones,
+plus a length-guarded joined form, so `HAYPE`, `HEY P` and `HEYPI` fire while
+"hey bud", "the pie is ready" and "okay pi" do not.
 
-```js
-export async function createKeywordSpotter({ sampleRate, phrases, sensitivity, compute }) {
-  return {
-    acceptWaveform(float32) { /* true when the phrase fires */ },
-    reset() {},
-  };
-}
-```
-
-It is imported **only when always-on is enabled**. Until you supply one, `auto`
-falls back to Web Speech (in Chrome/Edge) or energy VAD, so the feature works
-out of the box.
-
-### NPU
-
-`compute` selects the local wake-word backend and defaults to **`cpu`** (WASM).
-The value `auto` prefers WebNN (Intel AI Boost NPU) then WebGPU. It does not
-select the audio transport — that is `audio`. The page shows the chosen backend.
+That matters because keyword spotting is unforgiving: on one real user's six
+recordings of "hey pi" the 3.3M spotter fired at no threshold, while a general ASR
+heard "HAYPE" in one of them. If `/voice mic` shows signal and the wake phrase
+still never fires, this is the engine to switch to.
 
 ## Troubleshooting
 
@@ -327,7 +299,7 @@ the socket is filtered through `capabilities.ts`, so sync-only models never get
 /voice model g<TAB>    → model gemini-3.8-live   (current one annotated)
 /voice always-on o<TAB>→ always-on on
 /voice autonomy st<TAB>→ autonomy steer
-/voice compute web<TAB>→ compute webgpu / webnn (NPU)
+/voice wake-engine a<TAB>→ wake-engine asr / auto
 /voice voice-name ko<TAB> → voice-name Kore
 /voice set {"al<TAB>   → set {"alwaysOn":true}
 ```
@@ -340,7 +312,7 @@ Details that make it behave like a real completer:
   descriptions shown for each item.
 - `model` and `voice-name` mark the active value; commands are ordered by how
   likely you are to need them.
-- `set` offers typed JSON snippets (`{"audio":"native"}`, `{"bargeIn":false}`, …).
+- `set` offers typed JSON snippets (`{"connectOnWake":true}`, `{"bargeIn":false}`, …).
 - Unknown input returns nothing, so Pi falls back cleanly.
 
 ## Settings
@@ -351,7 +323,7 @@ fields opened as submenus, changes saved as you go.
 
 ```
 ↑↓ move · Enter change · type to search
-Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Ctrl-O open page · Esc close
+Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Esc close
 ```
 
 ## Commands
@@ -361,17 +333,15 @@ Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Ctrl-O open page · Esc clos
 /voice status              print status without the TUI
 /voice diagnose            open a real Live socket per model and report the server's answer
 /voice on | off | restart
-/voice url
 /voice listen | sleep
 /voice always-on [on|off]
 /voice model <id>          gemini-3.8-live (default) · 3.8-live-extended-thinking
                            · 3.1-flash-live-preview · 2.5-flash-native-audio-preview-12-2025
 /voice voice-name <name>   prebuilt Gemini voice (default Zephyr)
 /voice autonomy <concierge|steer|approvals>
-/voice wake-engine <auto|asr|sherpa|webspeech|energy>
+/voice wake-engine <auto|asr|sherpa|energy>
 /voice asr                 install the ASR wake model and switch to it
 /voice mic [seconds]       record the input and report peak/rms; says plainly when the mic is silent
-/voice compute <auto|cpu|webgpu|webnn>
 /voice key <key>
 /voice announce [on|off]
 /voice debug [on|off]
@@ -487,11 +457,11 @@ until the wake phrase brings it back. Pi itself keeps working.
 
 ### Barge-in
 
-`bargeIn` is **on**: speech interrupts the model. That needs echo control, which
-both transports provide — native runs an NLMS acoustic echo canceller in front of
-the mic (full duplex, double-talk aware), and the browser uses WebRTC AEC3. If the
-model still gets cut off, turn barge-in off in `/voice`; the page then goes
-half-duplex while it speaks and playback prebuffers ~90 ms.
+`bargeIn` is **on**: speech interrupts the model. That needs echo control — an
+NLMS acoustic echo canceller runs in front of the mic (full duplex, double-talk
+aware). If the model still gets cut off on speakers, turn barge-in off in
+`/voice`: the transport then goes half-duplex while it speaks and playback
+prebuffers ~90 ms.
 
 ## Autonomy and approvals
 
@@ -503,8 +473,8 @@ half-duplex while it speaks and playback prebuffers ~90 ms.
 
 With `voiceApprovals`, `bash`/`powershell` calls matching dangerous patterns
 (recursive delete, `git push`, `sudo`, `| sh`, ...) block while the voice model
-asks you out loud. Denial returns `{ block: true }`. If nobody answers — page
-closed, mic asleep, no connected listener — the call proceeds after a warning
+asks you out loud. Denial returns `{ block: true }`. If nobody answers — voice not
+running, mic asleep, prompt undeliverable — the call proceeds after a warning
 instead of hanging: voice approval is a convenience here, never a hard gate.
 Setup details, like the resumption handle and the workspace lock, live in
 `~/.pi/agent`: `pi-voice-state.json` and `pi-voice-<workspace>.lock`.
@@ -541,18 +511,17 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Security
 
-- HTTP + WebSocket bind to `127.0.0.1` only.
-- A random per-run token is required for the page, assets, config and socket.
+- No network listener at all: there is no HTTP server and no local endpoint to
+  authenticate, because no other process needs one.
 - The API key never leaves the Pi process.
-- The page can drive your microphone; treat the printed URL as private.
+- Everything the extension runs is `ffmpeg`/`ffplay` with fixed arguments.
 
 ## Limitations
 
-- The browser transport needs that tab open while voice is active.
-- Native transport echo cancellation is half-duplex, not AEC3.
-- Native wake defaults to energy VAD (any loud speech). Install the offline
-  spotter with `/voice sherpa` for phrase spotting, and remember it is a 3.3M
-  English model — non-English wake phrases need a matching KWS model.
+- Wake needs a model to be phrase-specific: energy VAD (the fallback) wakes on any
+  loud speech. `/voice asr` or `/voice sherpa` installs one; both are English.
+- Echo cancellation is NLMS, not WebRTC AEC3: on loud speakers with `bargeIn` on
+  the model can still cut itself off. `nativeAec: "half-duplex"` is the safe choice.
 - Live API is preview: model ids, limits and fields can change.
 - Free-tier traffic may be used to improve Google's products — don't route
   private audio through it.
@@ -577,26 +546,25 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.6.1** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.7.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
 
 ```
 index.ts / extension.ts   registration, `voice` tool, approval gate
-controller.ts             session <-> audio server <-> bridge
+controller.ts             session <-> audio <-> bridge
 live/                     protocol, setup shaping, socket supervisor
 bridge/                   Pi digest, function declarations, dispatch, persona
-audio/                    local HTTP+WS server, minimal RFC6455, ffmpeg transport
-sherpa.ts                 on-demand wake-word installer (runtime + model + keywords)
-web/                      companion page, audio worklets, wake engines
-test/                     smoke + endpoint + lifecycle + installer suites
+audio/                    ffmpeg transport, NLMS AEC, wake engines (asr/kws/match)
+sherpa.ts                 on-demand wake-model installer (runtime + models + keywords)
+test/                     smoke + lifecycle + installer suites
 ```
 
 ## Tests
 
 ```bash
-npm test   # smoke (74) + endpoint (19) + lifecycle (35) + sherpa (13)
+npm test   # smoke (76) + lifecycle (35) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

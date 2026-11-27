@@ -5,6 +5,49 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-12-01
+
+### Removed
+
+- **The browser transport, entirely.** Audio is `ffmpeg`/`ffplay` and nothing else.
+  This is a deletion, not a deprecation: the code is gone, not disabled.
+  - `web/` — the companion page, its styles, `voice.js` (send/receive state machine),
+    `wake.js` (Web Speech) and both audio worklets. ~1.3k lines.
+  - `audio/server.ts` — the loopback HTTP + WebSocket endpoint, its per-run token,
+    static asset serving, and the peer/backoff machinery behind it.
+  - `audio/ws.ts` — the RFC 6455 server. The lifecycle harness still needs the
+    *server* side to stand in for Gemini Live, so it lives on as test/ws-server.ts:
+    test support, not shipped code.
+  - `test/server.ts` — the endpoint suite (19 checks): there is no endpoint.
+
+### Changed
+
+- **Config surface shrank from 57 fields to 44.** Gone: `audio` (no second transport),
+  `host`/`port`/`openBrowser` (no page), `compute` (WebNN/WebGPU/WASM backend
+  selector — there is no WASM build to select), `aec`/`noiseSuppression`/`autoGain`
+  (getUserMedia constraints), `micDeviceId`/`outputDeviceId` (browser device ids),
+  `wakeModelUrl` (the page imported a KWS module through it). Old `pi-voice.json`
+  files keep loading: unknown keys are ignored, and a test asserts they cannot come
+  back. `inputGain`/`outputGain` stay — the native transport applies them.
+- `wakeEngine` lost `webspeech`; `WakeEngine` is `auto | asr | sherpa | energy`.
+- `/voice` lost `url` and `compute`; the settings screen lost the transport picker,
+  the browser device fields and Ctrl-O. `/Voice status` lost the page/peer lines and
+  now reports the wake engine instead.
+- The controller no longer knows what a peer, a page or a broadcast is: it drives one
+  audio sink. Failures that used to be broadcast to the page (session expired,
+  grounding dropped, session error) now go through `ui.notify`.
+- `VoiceController` takes an optional `createAudio` factory (`VoiceControllerOptions`).
+  The product always builds `NativeTransport`; the lifecycle harness injects a silent
+  sink so it can run the real controller, sockets, tools and locks on a machine with
+  no microphone — previously it relied on the browser transport to avoid spawning
+  ffmpeg, which is no longer an option.
+
+### Fixed
+
+- Native audio failure used to fall back to the browser transport, which meant a
+  missing ffmpeg produced a page instead of an explanation. It now fails with the
+  actual reason and a pointer to `/voice diagnose`.
+
 ## [0.6.2] - 2026-12-01
 
 ### Fixed

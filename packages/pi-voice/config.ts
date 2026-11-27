@@ -8,11 +8,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export type WakeEngine = "auto" | "asr" | "sherpa" | "webspeech" | "energy";
-export type ComputeBackend = "auto" | "cpu" | "webgpu" | "webnn";
+export type WakeEngine = "auto" | "asr" | "sherpa" | "energy";
 export type Autonomy = "concierge" | "steer" | "approvals";
 export type ThinkingLevelOption = "" | "minimal" | "low" | "medium" | "high";
-export type AudioTransport = "browser" | "native" | "both";
 
 export interface VoiceConfig {
     /** Master switch: when false the extension loads but never opens a socket. */
@@ -56,21 +54,14 @@ export interface VoiceConfig {
      * no accelerator provider, so anything but cpu only works with a self-built sherpa.
      */
     sherpaProvider: string;
-    /** sherpa-onnx keyword-spotter asset base URL (lazy-loaded, cached). */
-    wakeModelUrl: string;
     /** 0..1, higher = easier to trigger. */
     wakeSensitivity: number;
-    /** Local model compute: auto prefers WebNN (NPU) then WebGPU then CPU. */
-    compute: ComputeBackend;
 
     // ---- audio ----
-    aec: boolean;
-    noiseSuppression: boolean;
-    autoGain: boolean;
+    /** 0..8 scale applied to captured PCM before it is sent to the model. */
     inputGain: number;
+    /** 0..8 scale applied to model PCM before it is played. */
     outputGain: number;
-    micDeviceId: string;
-    outputDeviceId: string;
 
     // ---- live features ----
     searchGrounding: boolean;
@@ -99,20 +90,15 @@ export interface VoiceConfig {
     /** Soft cap on a single Live session before a proactive resume. */
     maxSessionMs: number;
 
-    // ---- endpoint ----
-    /** browser = companion page (best AEC); native = headless ffmpeg; both = either. */
-    audio: AudioTransport;
+    // ---- endpoint (native ffmpeg capture/playback) ----
     /** ffmpeg input device (Windows: `audio=<name>`, macOS: `:0`, Linux: `default`). */
     nativeInput: string;
     /** ffplay output device hint (usually empty). */
     nativeOutput: string;
     ffmpegPath: string;
     ffplayPath: string;
-    /** Native echo mitigation: NLMS AEC (full duplex), half-duplex mute, or off. */
+    /** Echo mitigation: NLMS AEC (full duplex), half-duplex mute, or off. */
     nativeAec: "nlms" | "half-duplex" | "off";
-    host: string;
-    port: number;
-    openBrowser: boolean;
 
     // ---- behavior ----
     autonomy: Autonomy;
@@ -146,19 +132,10 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     asrModelDir: "",
     kwsKeywords: "HEY PI :2.0",
     sherpaProvider: "auto",
-    wakeModelUrl: "",
     wakeSensitivity: 0.5,
-    // CPU is the safe default for the local wake-word model; "auto" prefers
-    // WebNN (NPU) then WebGPU, which can be slower to start or unsupported.
-    compute: "cpu",
 
-    aec: true,
-    noiseSuppression: true,
-    autoGain: true,
     inputGain: 1,
     outputGain: 1,
-    micDeviceId: "",
-    outputDeviceId: "",
 
     // Live API grounding refuses free-tier projects with a 1011 quota close,
     // so it is opt-in. With billing, set it true or /voice set {"searchGrounding":true}.
@@ -180,11 +157,6 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     idleSleepMs: 45_000,
     maxSessionMs: 9 * 60_000,
 
-    host: "127.0.0.1",
-    port: 8722,
-    openBrowser: true,
-
-    audio: "native",
     nativeInput: "",
     nativeOutput: "",
     ffmpegPath: "ffmpeg",
@@ -256,21 +228,14 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     alwaysOn: bool("alwaysOn"),
     connectOnWake: bool("connectOnWake"),
     wakePhrases: stringList("wakePhrases"),
-    wakeEngine: oneOf("wakeEngine", ["auto", "asr", "sherpa", "webspeech", "energy"] as const),
+    wakeEngine: oneOf("wakeEngine", ["auto", "asr", "sherpa", "energy"] as const),
     kwsModelDir: str("kwsModelDir"),
     asrModelDir: str("asrModelDir"),
     kwsKeywords: str("kwsKeywords"),
     sherpaProvider: str("sherpaProvider"),
-    wakeModelUrl: str("wakeModelUrl"),
     wakeSensitivity: num("wakeSensitivity", 0, 1),
-    compute: oneOf("compute", ["auto", "cpu", "webgpu", "webnn"] as const),
-    aec: bool("aec"),
-    noiseSuppression: bool("noiseSuppression"),
-    autoGain: bool("autoGain"),
     inputGain: num("inputGain", 0, 8),
     outputGain: num("outputGain", 0, 8),
-    micDeviceId: str("micDeviceId"),
-    outputDeviceId: str("outputDeviceId"),
     searchGrounding: bool("searchGrounding"),
     inputTranscription: bool("inputTranscription"),
     outputTranscription: bool("outputTranscription"),
@@ -287,10 +252,6 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     digestChars: num("digestChars", 200, 8000),
     idleSleepMs: num("idleSleepMs", 5_000, 60 * 60_000),
     maxSessionMs: num("maxSessionMs", 60_000, 60 * 60_000),
-    host: str("host"),
-    port: num("port", 0, 65_535),
-    openBrowser: bool("openBrowser"),
-    audio: oneOf("audio", ["browser", "native", "both"] as const),
     nativeInput: str("nativeInput"),
     nativeOutput: str("nativeOutput"),
     ffmpegPath: str("ffmpegPath"),

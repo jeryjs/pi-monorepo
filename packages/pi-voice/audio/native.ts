@@ -1,11 +1,10 @@
 /**
- * Native (headless) audio transport: no browser, no tab.
+ * The audio transport: ffmpeg in, ffplay out. No tab, no page, no loopback server.
  *
- *   capture : ffmpeg reading the default input device -> 16 kHz s16le on stdout
+ *   capture : ffmpeg reading the input device -> 16 kHz s16le on stdout
  *   playback: ffplay reading 24 kHz s16le on stdin
- *   echo    : half-duplex gating (mic upstream is muted while the model speaks,
- *             with a barge-in energy threshold) — weaker than WebRTC AEC3, which
- *             is why the browser transport is the default.
+ *   echo    : NLMS adaptive canceller (full duplex), half-duplex gating, or off
+ *   wake    : ASR phrase match → keyword spotter → energy VAD
  *
  * External dependency: ffmpeg/ffplay on PATH (or configured paths). Everything
  * else is Node built-ins.
@@ -42,6 +41,25 @@ export interface NativeTransportOptions {
     onLevel?: (value: number) => void;
     onLog?: (message: string) => void;
     onError?: (message: string) => void;
+}
+
+/**
+ * What VoiceController needs from an audio sink.
+ *
+ * NativeTransport is the product implementation; the interface exists so the
+ * lifecycle harness can run the real controller, sockets, tools and locks without
+ * a microphone or ffmpeg on the machine.
+ */
+export interface AudioSink {
+    start(): Promise<void>;
+    stop(): void;
+    play(bytes: Uint8Array): void;
+    flush(): void;
+    setStreaming(streaming: boolean): void;
+    /** Epoch ms until which playback is still audible (queued frames + speaker tail). */
+    readonly playingUntil: number;
+    /** Wake engine that actually started, e.g. "asr cpu"; undefined = energy VAD. */
+    readonly spotterProvider: string | undefined;
 }
 
 function hasBinary(command: string): boolean {
@@ -347,7 +365,7 @@ function scalePcm16(bytes: Uint8Array, gain: number): Uint8Array {
     return out;
 }
 
-export class NativeTransport {
+export class NativeTransport implements AudioSink {
     #capture: ChildProcessWithoutNullStreams | undefined;
     #player: ChildProcessWithoutNullStreams | undefined;
     #streaming = true;
@@ -440,8 +458,7 @@ export class NativeTransport {
         if (!hasBinary(config.ffmpegPath)) {
             this.#starting = false;
             throw new Error(
-                `ffmpeg not found (${config.ffmpegPath}). Install ffmpeg or set ffmpegPath in pi-voice.json, `
-                + "or use the browser transport.",
+                `ffmpeg not found (${config.ffmpegPath}). Install ffmpeg or set ffmpegPath in pi-voice.json.`,
             );
         }
 

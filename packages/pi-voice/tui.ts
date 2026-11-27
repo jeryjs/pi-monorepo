@@ -2,7 +2,7 @@
  * `/voice` settings screen.
  *
  * A themed, searchable `SettingsList` (Pi's own `/settings` pattern) covering
- * every option, with text/number fields opened as submenus and transport
+ * every option, with text/number fields opened as submenus and audio
  * actions on control keys. Changes persist immediately.
  */
 
@@ -31,7 +31,7 @@ import type { VoiceRuntime } from "./runtime.ts";
 import { KWS_MODEL, managedDepsDir, sherpaStatus, setupSherpaWake } from "./sherpa.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
 
-export type VoiceTuiAction = "close" | "restart" | "stop" | "diagnose" | "open";
+export type VoiceTuiAction = "close" | "restart" | "stop" | "diagnose";
 
 const VERSION: string = (() => {
     try {
@@ -44,15 +44,15 @@ const VERSION: string = (() => {
 })();
 
 const BOOLEAN_IDS = new Set<string>([
-    "enabled", "autoStart", "alwaysOn", "connectOnWake", "aec", "noiseSuppression", "autoGain",
+    "enabled", "autoStart", "alwaysOn", "connectOnWake",
     "searchGrounding", "inputTranscription", "outputTranscription", "proactiveAudio",
-    "proactiveVideo", "affectiveDialog", "bargeIn", "openBrowser", "voiceApprovals",
+    "proactiveVideo", "affectiveDialog", "bargeIn", "voiceApprovals",
     "announce", "debug",
 ]);
 
 const NUMBER_IDS = new Set<string>([
     "temperature", "wakeSensitivity", "thinkingBudget", "vadSilenceMs", "vadPrefixMs",
-    "idleSleepMs", "maxSessionMs", "digestTurns", "digestChars", "port",
+    "idleSleepMs", "maxSessionMs", "digestTurns", "digestChars",
     "inputGain", "outputGain",
 ]);
 
@@ -78,7 +78,7 @@ function enumItem(id: string, label: string, description: string, current: strin
     };
 }
 
-const WAKE_ENGINES = ["auto", "sherpa", "webspeech", "energy"] as const;
+const WAKE_ENGINES = ["auto", "asr", "sherpa", "energy"] as const;
 
 /**
  * Wake-engine picker that installs what the offline phrase spotter needs.
@@ -153,10 +153,10 @@ class WakeEngineSubmenu extends Container {
                 label: engine,
                 description: engine === "sherpa"
                     ? (status.ready ? "offline keyword spotter (ready)" : "offline keyword spotter (needs a one-time install)")
-                    : engine === "auto"
-                        ? "sherpa when installed, otherwise energy VAD"
-                        : engine === "webspeech"
-                            ? "browser transport only"
+                    : engine === "asr"
+                        ? "streaming recognizer + phrase match (install with /voice asr)"
+                        : engine === "auto"
+                            ? "asr when installed, else sherpa, else energy VAD"
                             : "wake on any loud-enough speech",
             })),
             6,
@@ -452,7 +452,6 @@ function buildItems(
         boolItem("alwaysOn", "Always-on wake word", "Listen for the wake phrase without pressing to talk", config.alwaysOn),
         boolItem("connectOnWake", "Start asleep", "Open the Gemini session on the wake phrase instead of at startup", config.connectOnWake),
 
-        enumItem("audio", "Audio transport", "native = headless ffmpeg (no tab); browser = companion page with AEC", config.audio, ["native", "browser", "both"]),
         enumItem("model", "Live model", "Gemini Live model (restart to apply)", config.model, liveModelIds()),
         enumItem("voice", "Voice", "Prebuilt Gemini voice", config.voice, [...PREBUILT_VOICES]),
         enumItem("autonomy", "Autonomy", "concierge = talk/queue; steer = +interrupt; approvals = +voice approvals", config.autonomy, ["concierge", "steer", "approvals"]),
@@ -462,8 +461,7 @@ function buildItems(
         wakeEngineItem(config, runtime, theme, tui, onSubmenu),
         textItem("wakePhrases", "Wake phrases", "Comma-separated (default: hey pi)", config.wakePhrases.join(", "), theme, tui),
         textItem("wakeSensitivity", "Wake sensitivity", "0-1; higher = easier to trigger (native energy + sherpa threshold)", String(config.wakeSensitivity), theme, tui),
-        enumItem("compute", "Compute", "Browser wake model backend: cpu, auto (NPU/GPU), webgpu, webnn", config.compute, ["cpu", "auto", "webgpu", "webnn"]),
-        textItem("wakeModelUrl", "Wake model URL", "Browser: module exporting createKeywordSpotter", config.wakeModelUrl, theme, tui),
+        textItem("asrModelDir", "ASR model dir", "Empty = managed install (/voice asr)", config.asrModelDir, theme, tui),
         textItem("kwsModelDir", "Sherpa model dir", "Empty = managed install; set to use your own KWS model directory", config.kwsModelDir, theme, tui),
         textItem("kwsKeywords", "Sherpa keywords", "Phrase(s) to spot, e.g. 'HEY PI :2.0'; ';' separates several", config.kwsKeywords, theme, tui),
         enumItem("sherpaProvider", "Sherpa provider", "Inference backend; the prebuilt runtime is CPU-only (auto = cpu)", config.sherpaProvider, ["auto", "cpu", "directml", "cuda", "nnapi", "xnnpack", "trt"]),
@@ -494,14 +492,8 @@ function buildItems(
         textItem("ffmpegPath", "ffmpeg path", "Binary used for native capture", config.ffmpegPath, theme, tui),
         textItem("ffplayPath", "ffplay path", "Binary used for native playback", config.ffplayPath, theme, tui),
 
-        textItem("host", "Browser host", "Loopback address for the companion page", config.host, theme, tui),
-        textItem("port", "Browser port", "0 = random; falls back to random if busy", String(config.port), theme, tui),
-        boolItem("openBrowser", "Open page", "Browser transport: open the companion page on start", config.openBrowser),
-        boolItem("aec", "Browser AEC", "WebRTC echo cancellation", config.aec),
-        boolItem("noiseSuppression", "Noise suppression", "Browser microphone processing", config.noiseSuppression),
-        boolItem("autoGain", "Auto gain", "Browser microphone processing", config.autoGain),
-        textItem("micDeviceId", "Mic device id", "Browser: exact deviceId (empty = default)", config.micDeviceId, theme, tui),
-        textItem("outputDeviceId", "Output device id", "Browser: exact output device (empty = default)", config.outputDeviceId, theme, tui),
+        textItem("inputGain", "Input gain", "0-8 scale applied to the microphone before sending", String(config.inputGain), theme, tui),
+        textItem("outputGain", "Output gain", "0-8 scale applied to the model's voice", String(config.outputGain), theme, tui),
 
         textItem("persona", "Persona", "Extra instructions appended to the voice system prompt", config.persona, theme, tui),
         boolItem("debug", "Debug logging", "PI_VOICE_DEBUG output", config.debug),
@@ -536,7 +528,6 @@ function headerText(runtime: VoiceRuntime, theme: Theme): string {
     const controller = runtime.controller();
     const state = controller?.running ? controller.liveState : "off";
     const key = controller?.keySource ?? "not resolved";
-    const pages = controller?.peerCount ?? 0;
     const sherpa = sherpaStatus(config.kwsModelDir);
     const wake = config.alwaysOn
         ? sherpa.ready
@@ -546,19 +537,15 @@ function headerText(runtime: VoiceRuntime, theme: Theme): string {
 
     return [
         theme.style(`Pi Voice ${VERSION}`, { fg: "accent", bold: true }),
-        theme.fg("muted", `state ${state} · transport ${config.audio} · model ${config.model} · wake ${wake}`),
-        theme.fg("dim", `key ${key} · pages ${pages} · voice ${config.voice}`),
+        theme.fg("muted", `state ${state} · model ${config.model} · wake ${wake}`),
+        theme.fg("dim", `key ${key} · voice ${config.voice}`),
     ].join("\n");
 }
 
-function hintText(runtime: VoiceRuntime, theme: Theme): string {
-    const browser = runtime.getConfig().audio !== "native";
-
+function hintText(_runtime: VoiceRuntime, theme: Theme): string {
     return theme.fg(
         "dim",
-        "↑↓ move · Enter change · type to search · Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose"
-        + (browser ? " · Ctrl-O page" : "")
-        + " · Esc close",
+        "↑↓ move · Enter change · type to search · Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Esc close",
     );
 }
 
@@ -624,11 +611,6 @@ class VoiceSettingsComponent extends Container {
 
         if (matchesKey(data, "ctrl+d")) {
             this.#finish("diagnose");
-            return;
-        }
-
-        if (matchesKey(data, "ctrl+o")) {
-            this.#finish("open");
             return;
         }
 

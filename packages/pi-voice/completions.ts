@@ -53,8 +53,7 @@ const SET_SNIPPETS: { json: string; description: string }[] = [
     { json: '{"announce":false}', description: "stop speaking Pi's completion notices" },
     { json: '{"proactiveAudio":true}', description: "let the model ignore speech not aimed at it" },
     { json: '{"bargeIn":false}', description: "never interrupt the model with speech" },
-    { json: '{"audio":"native"}', description: "headless ffmpeg audio (no browser tab)" },
-    { json: '{"audio":"browser"}', description: "companion page with WebRTC AEC" },
+    { json: '{"nativeAec":"off"}', description: "disable echo cancellation (headphones)" },
     { json: '{"autonomy":"concierge"}', description: "talk and queue requests only" },
     { json: '{"voiceApprovals":false}', description: "no spoken approval prompts" },
     { json: '{"idleSleepMs":120000}', description: "sleep after 2 minutes of silence" },
@@ -67,7 +66,7 @@ const SET_SNIPPETS: { json: string; description: string }[] = [
 const SUBCOMMANDS: SubcommandSpec[] = [
     {
         name: "status",
-        description: "show session, model, audio and key state",
+        description: "show session, model, wake and key state",
         weight: 100,
         values: () => [],
     },
@@ -81,7 +80,7 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     {
         name: "on",
         aliases: ["start"],
-        description: "start the voice session and open the page",
+        description: "start the voice session",
         weight: 95,
         values: () => [],
     },
@@ -96,12 +95,6 @@ const SUBCOMMANDS: SubcommandSpec[] = [
         name: "restart",
         description: "stop then start again",
         weight: 60,
-        values: () => [],
-    },
-    {
-        name: "url",
-        description: "print the companion page URL",
-        weight: 55,
         values: () => [],
     },
     {
@@ -160,13 +153,12 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     {
         name: "wake-engine",
         aliases: ["wakeengine"],
-        description: "auto | asr | sherpa | webspeech | energy",
+        description: "auto | asr | sherpa | energy",
         weight: 65,
         values: () => [
             { token: "auto", label: "auto", description: "asr when installed, else sherpa, else energy VAD" },
             { token: "asr", label: "asr", description: "speech recognition + fuzzy phrase match (more voices)" },
             { token: "sherpa", label: "sherpa", description: "offline phrase spotter (installs on demand)" },
-            { token: "webspeech", label: "webspeech", description: "Chrome/Edge recognizer (browser transport)" },
             { token: "energy", label: "energy", description: "local VAD, any loud speech wakes" },
         ],
     },
@@ -193,17 +185,6 @@ const SUBCOMMANDS: SubcommandSpec[] = [
         values: () => [
             { token: "2", label: "2s", description: "shorter window" },
             { token: "5", label: "5s", description: "longer window" },
-        ],
-    },
-    {
-        name: "compute",
-        description: "auto | cpu | webgpu | webnn",
-        weight: 50,
-        values: () => [
-            { token: "auto", label: "auto", description: "WebNN (NPU) > WebGPU > WASM" },
-            { token: "cpu", label: "cpu", description: "WASM on the CPU" },
-            { token: "webgpu", label: "webgpu", description: "GPU via WebGPU" },
-            { token: "webnn", label: "webnn", description: "NPU via WebNN (Intel AI Boost)" },
         ],
     },
     {

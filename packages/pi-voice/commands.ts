@@ -33,13 +33,12 @@ function statusText(runtime: VoiceRuntime): string {
         `model: ${config.model} (${capabilities.label})`,
         `voice name: ${config.voice}${config.language ? ` · lang ${config.language}` : ""}`,
         `key: ${config.apiKey ? "config" : controller?.keySource ?? "not resolved"}`,
-        `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine} · compute ${config.compute}`,
+        `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine}`,
         `wake: ${sherpaStatus(config.kwsModelDir).detail}`
             + `${asrModelStatus(resolvedAsrModelDir(config.asrModelDir)).ok ? " · asr model installed" : ""}`,
         `start: ${config.alwaysOn && config.connectOnWake
             ? "asleep — connects on the wake phrase (connectOnWake)"
             : "connects at startup (connectOnWake off)"}`,
-        `audio: ${config.audio}`,
         `autonomy: ${config.autonomy}${config.voiceApprovals ? " (voice approvals)" : ""}`,
         `tools: ${capabilities.asyncTools ? "async" : "sync"} function calling · search ${config.searchGrounding ? "on" : "off"}`,
         `VAD: ${config.vadSilenceMs}ms silence, ${config.vadPrefixMs}ms prefix · barge-in ${config.bargeIn ? "on" : "off"}`,
@@ -49,12 +48,7 @@ function statusText(runtime: VoiceRuntime): string {
         `logging: ${debugState().enabled ? "debug on" : "quiet (warnings still recorded)"}`,
     ];
 
-    if (controller?.running) {
-        lines.push(controller.url ? `page: ${controller.url}` : "page: none (native transport)");
-        lines.push(`pages connected: ${controller.peerCount}`);
-    }
-
-    lines.push(`wake: ${config.alwaysOn ? "on" : "off (enable with /voice always-on on or the page toggle)"}`);
+    lines.push(`wake: ${config.alwaysOn ? "on" : "off (enable with /voice always-on on)"}`);
 
     if (controller?.running) {
         const stats = controller.wakeStats;
@@ -90,7 +84,7 @@ function statusText(runtime: VoiceRuntime): string {
 
 export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): void {
     pi.registerCommand("voice", {
-        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, asr, mic, compute, key, debug)",
+        description: "Control the Gemini Live voice assistant (status, on, off, listen, sleep, always-on, model, voice, wake, sherpa, asr, mic, key, debug)",
         getArgumentCompletions: (prefix: string) => {
             try {
                 return completeVoiceArguments(prefix, {
@@ -139,19 +133,6 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                             } catch (error) {
                                 say(ctx, `diagnose failed: ${String(error)}`, "error");
                             }
-                            return;
-                        }
-
-                        case "open": {
-                            const controller = runtime.controller();
-
-                            if (!controller?.running || !controller.url) {
-                                say(ctx, "browser transport is off: set Transport to browser", "warning");
-                                return;
-                            }
-
-                            controller.openPage();
-                            say(ctx, controller.url, "info");
                             return;
                         }
 
@@ -207,8 +188,7 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                 case "start": {
                     try {
                         await runtime.start();
-                        const controller = runtime.controller();
-                        say(ctx, `voice on\npage: ${controller?.url ?? "starting"}`, "info");
+                        say(ctx, "voice on", "info");
                     } catch (error) {
                         say(ctx, `voice failed to start: ${String(error)}`, "error");
                     }
@@ -231,18 +211,6 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     } catch (error) {
                         say(ctx, `voice failed to restart: ${String(error)}`, "error");
                     }
-                    return;
-                }
-
-                case "url": {
-                    const controller = runtime.controller();
-
-                    if (!controller?.running) {
-                        say(ctx, "voice is off: /voice on", "warning");
-                        return;
-                    }
-
-                    say(ctx, controller.url ?? "", "info");
                     return;
                 }
 
@@ -309,8 +277,8 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                 case "wakeengine": {
                     const engine = value.toLowerCase();
 
-                    if (!["auto", "asr", "sherpa", "webspeech", "energy"].includes(engine)) {
-                        say(ctx, "wake engine: auto | asr | sherpa | webspeech | energy", "warning");
+                    if (!["auto", "asr", "sherpa", "energy"].includes(engine)) {
+                        say(ctx, "wake engine: auto | asr | sherpa | energy", "warning");
                         return;
                     }
 
@@ -426,19 +394,6 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     return;
                 }
 
-                case "compute": {
-                    const backend = value.toLowerCase();
-
-                    if (!["auto", "cpu", "webgpu", "webnn"].includes(backend)) {
-                        say(ctx, "compute: auto | cpu | webgpu | webnn", "warning");
-                        return;
-                    }
-
-                    runtime.patch({ compute: backend as VoiceConfig["compute"] });
-                    say(ctx, `compute: ${backend} (webnn can use the NPU)`, "info");
-                    return;
-                }
-
                 case "key":
                     if (!value) {
                         const controller = runtime.controller();
@@ -491,10 +446,10 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     say(
                         ctx,
                         "subcommands:\n"
-                        + "  status · diagnose · on · off · restart · url · listen · sleep\n"
+                        + "  status · diagnose · on · off · restart · listen · sleep\n"
                         + "  always-on [on|off] · announce [on|off] · debug [on|off]\n"
                         + "  model <id> · voice-name <name> · autonomy <level>\n"
-                        + "  wake-engine <engine> · sherpa · asr · mic [seconds] · compute <backend>\n"
+                        + "  wake-engine <engine> · sherpa · asr · mic [seconds]\n"
                         + "  key [<key>|clear] · set <json>",
                         "info",
                     );

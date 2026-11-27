@@ -359,7 +359,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
 
         if (allow === undefined) {
-            // No answer (nobody listening, page closed, prompt could not be
+            // No answer (nobody listening, voice not running, prompt could not be
             // delivered). Proceed, but say so: voice approval is a convenience
             // here, never a hard gate.
             warn("extension", `no voice answer for ${toolName}; proceeding`);
@@ -403,7 +403,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     `running: ${controller?.running ?? false}`,
                     `state: ${controller?.liveState ?? "idle"}`,
                     `model: ${config.model}`,
-                    `pages: ${controller?.peerCount ?? 0}`,
+                    `wake engine: ${controller?.wakeEngineActive ?? "off"}`,
                     `always-on: ${config.alwaysOn}`,
                     `start: ${config.alwaysOn && config.connectOnWake ? "asleep until the wake phrase" : "connected"}`,
                 ];

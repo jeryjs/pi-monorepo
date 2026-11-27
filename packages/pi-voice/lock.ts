@@ -1,7 +1,7 @@
 /**
  * One voice session per workspace, across processes.
  *
- * A lock file records the owning PID (and page URL in browser mode). A second Pi
+ * A lock file records the owning PID. A second Pi
  * process in the same project refuses to start a duplicate Live session instead
  * of opening a second microphone/socket. Stale locks (dead PID) are taken over.
  */
@@ -15,7 +15,6 @@ export interface VoiceLock {
     pid: number;
     cwd: string;
     startedAt: string;
-    url?: string;
     /** Random per-run id: PID alone is not proof of ownership (PIDs get reused). */
     token?: string;
 }
@@ -94,7 +93,7 @@ export function acquireLock(cwd: string): AcquireResult {
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
             // Cannot inspect or create (permissions); treat as available.
-            writeLock(cwd, undefined);
+            writeLock(cwd);
 
             return { ok: true };
         }
@@ -112,19 +111,18 @@ export function acquireLock(cwd: string): AcquireResult {
         return { ok: false, lock: existing };
     }
 
-    writeLock(cwd, existing);
+    writeLock(cwd);
 
     return { ok: true };
 }
 
-function writeLock(cwd: string, previous?: VoiceLock): void {
+function writeLock(cwd: string): void {
     const path = lockPath(cwd);
     const lock: VoiceLock = {
         pid: process.pid,
         cwd,
         startedAt: new Date().toISOString(),
         token: PROCESS_LOCK_TOKEN,
-        ...(isOurs(previous) && previous?.url ? { url: previous.url } : {}),
     };
 
     try {
@@ -134,24 +132,6 @@ function writeLock(cwd: string, previous?: VoiceLock): void {
         renameSync(temporary, path);
     } catch {
         // The lock is advisory; a read-only directory should not block voice.
-    }
-}
-
-/** Record the page URL (browser transport) so a second process can point at it. */
-export function updateLockUrl(cwd: string, url: string | undefined): void {
-    const existing = readLock(cwd);
-
-    if (!isOurs(existing)) {
-        return;
-    }
-
-    try {
-        const path = lockPath(cwd);
-        const temporary = `${path}.tmp`;
-        writeFileSync(temporary, `${JSON.stringify({ ...existing, url }, null, 2)}\n`, "utf8");
-        renameSync(temporary, path);
-    } catch {
-        // ignore
     }
 }
 

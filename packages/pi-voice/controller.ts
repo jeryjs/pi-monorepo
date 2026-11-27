@@ -1,47 +1,44 @@
 /**
  * VoiceController: the conductor.
  *
- *   browser page  <-- Pcm/JSON -->  this  <-- WebSocket -->  Gemini Live
- *                                    |
- *                                    +--> Pi session (tools, approvals, digest)
+ *   ffmpeg (mic/speaker)  <-->  this  <-->  WebSocket  <-->  Gemini Live
+ *                                 |
+ *                                 +--> Pi session (tools, approvals, digest)
  *
- * Keeping the Gemini socket in the Pi process means the API key never reaches
- * the browser, tool calls execute natively, and the loopback hop costs ~0.2 ms
- * against a 20-100 ms network RTT.
+ * Keeping the Gemini socket in the Pi process means the API key never leaves it,
+ * tool calls execute natively, and audio never leaves the machine.
  */
 
-import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { capabilitiesFor, type ModelCapabilities } from "./capabilities.ts";
 import type { VoiceConfig } from "./config.ts";
 import { AgentBridge } from "./bridge/agent.ts";
 import { agentReplyNotice, approvalNotice, buildSystemInstruction } from "./bridge/prompt.ts";
 import { dispatchTool, functionDeclarations, type VoiceControl } from "./bridge/tools.ts";
-import { startAudioServer, type AudioServer } from "./audio/server.ts";
-import { NativeTransport } from "./audio/native.ts";
-import type { WebSocketPeer } from "./audio/ws.ts";
+import { NativeTransport, type AudioSink, type NativeTransportOptions } from "./audio/native.ts";
 import { LiveSession } from "./live/session.ts";
 import { createSetupBuilder } from "./live/setup.ts";
 import { persistVoiceState, readVoiceState } from "./state.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
-import { acquireLock, releaseLock, updateLockUrl } from "./lock.ts";
+import { acquireLock, releaseLock } from "./lock.ts";
 import { clearPersistedHandle, loadPersistedHandle, persistedSeq, savePersistedHandle } from "./persist.ts";
 import { setVoiceStatus, voiceStatusText } from "./ui.ts";
 import { log, warn } from "./util.ts";
 
+/**
+ * Injection point for the audio side. The product always uses ffmpeg; the
+ * lifecycle harness passes a silent sink so it can drive the real controller (and
+ * the real sockets, tools and locks) on a machine with no microphone.
+ */
+export interface VoiceControllerOptions {
+    createAudio?: (options: NativeTransportOptions) => AudioSink;
+}
+
 export interface StartResult {
-    url: string;
     model: string;
     voice: string;
     resumed: boolean;
 }
-
-/**
- * One token per Pi process. Reusing it means `/voice restart` keeps an already
- * open page working instead of leaving it to reconnect forever against a new token.
- */
-const PROCESS_TOKEN = randomBytes(16).toString("hex");
 
 export class VoiceController implements VoiceControl {
     #config: VoiceConfig;
@@ -51,11 +48,8 @@ export class VoiceController implements VoiceControl {
     #bridge: AgentBridge;
     #capabilities: ModelCapabilities;
     #session: LiveSession | undefined;
-    #native: NativeTransport | undefined;
-    #server: AudioServer | undefined;
-    #peers = new Set<WebSocketPeer>();
+    #native: AudioSink | undefined;
     #idleTimer: ReturnType<typeof setInterval> | undefined;
-    #statsTimer: ReturnType<typeof setInterval> | undefined;
     #running = false;
     /** In-flight start, so `autoStart` + `/voice on` cannot open two sessions. */
     #startPromise: Promise<StartResult> | undefined;
@@ -79,7 +73,6 @@ export class VoiceController implements VoiceControl {
     #voiceFloor = 0.006;
     /** Monotonic counter for resumption-handle writes (see persist.savePersistedHandle). */
     #persistSeq = 0;
-    #tokens = 0;
     #keySource: string | undefined;
     #levels: number[] = [];
     #lastStatusAt = 0;
@@ -121,11 +114,13 @@ export class VoiceController implements VoiceControl {
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
+    #createAudio: (options: NativeTransportOptions) => AudioSink;
 
-    constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig) {
+    constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig, options: VoiceControllerOptions = {}) {
         this.#pi = pi;
         this.#ctx = ctx;
         this.#config = config;
+        this.#createAudio = options.createAudio ?? ((transportOptions) => new NativeTransport(transportOptions));
         this.#capabilities = capabilitiesFor(config.model);
         this.#bridge = new AgentBridge(pi, ctx.cwd);
         this.#seedBridgeFromSession();
@@ -137,6 +132,15 @@ export class VoiceController implements VoiceControl {
 
     private get ctx(): ExtensionContext {
         return this.#ctx;
+    }
+
+    /** Tell the user something that has no other way of reaching them. */
+    #tellUser(message: string, kind: "info" | "warning" | "error" = "info"): void {
+        try {
+            this.ctx.ui.notify(message, kind);
+        } catch {
+            // No UI in this mode; the status bar and /voice status still carry it.
+        }
     }
 
     /**
@@ -172,31 +176,12 @@ export class VoiceController implements VoiceControl {
         return this.#running;
     }
 
-    get url(): string | undefined {
-        return this.#server?.url;
-    }
-
-    /** Open the companion page (no-op when the browser transport is off). */
-    openPage(): boolean {
-        if (!this.#server) {
-            return false;
-        }
-
-        this.#open(this.#server.url);
-
-        return true;
-    }
-
     get model(): string {
         return this.#config.model;
     }
 
     get capabilities(): ModelCapabilities {
         return this.#capabilities;
-    }
-
-    get peerCount(): number {
-        return this.#peers.size;
     }
 
     get liveState(): string {
@@ -227,9 +212,9 @@ export class VoiceController implements VoiceControl {
             this.#levels.shift();
         }
 
-        // Both transports report the mic level here (native frames, the page's
-        // `level` message), which makes this the one place that knows whether
-        // anybody is actually talking. The idle gate keys on that.
+        // The native transport reports the mic level here, which makes this the one
+        // place that knows whether anybody is actually talking. The idle gate keys
+        // on that.
         const threshold = Math.max(0.006, this.#voiceFloor * 2.2);
 
         if (level > threshold) {
@@ -266,7 +251,7 @@ export class VoiceController implements VoiceControl {
     /** Which wake engine is really running, not just what the config asks for. */
     get wakeEngineActive(): string {
         if (!this.#native) {
-            return this.#config.audio === "browser" ? "browser page" : "not running";
+            return "not running";
         }
 
         const provider = this.#native.spotterProvider;
@@ -309,7 +294,6 @@ export class VoiceController implements VoiceControl {
 
     #statusResult(resumed = false): StartResult {
         return {
-            url: this.#server?.url ?? "",
             model: this.#config.model,
             voice: this.#config.voice,
             resumed: resumed || Boolean(this.#session?.resumptionHandle),
@@ -353,7 +337,6 @@ export class VoiceController implements VoiceControl {
         if (!lock.ok) {
             throw new Error(
                 `voice is already running in this workspace (pid ${lock.lock.pid})`
-                + (lock.lock.url ? ` at ${lock.lock.url}` : "")
                 + ". Use that instance, or stop it first.",
             );
         }
@@ -375,40 +358,6 @@ export class VoiceController implements VoiceControl {
                 chars: this.#config.digestChars,
             }),
         });
-
-        const token = PROCESS_TOKEN;
-
-        // Browser transport is opt-in: native (ffmpeg) is the default, so no HTTP
-        // server, no page, no tab unless `audio` is `browser`/`both`.
-        const wantsBrowser = this.#config.audio !== "native";
-        const wantsNative = this.#config.audio !== "browser";
-
-        if (wantsBrowser) {
-            this.#server = await startAudioServer({
-                host: this.#config.host,
-                port: this.#config.port,
-                token,
-                clientConfig: () => this.#clientConfig(),
-                onPeer: (peer, attach) => {
-                    // A peer from a previous run must never be routed into the new one.
-                    if (generation !== this.#generation) {
-                        try {
-                            peer.close(1001, "stale session");
-                        } catch {
-                            // ignore
-                        }
-
-                        return;
-                    }
-
-                    this.#peers.add(peer);
-                    attach((data, isBinary) => this.#onPeerData(peer, data, isBinary));
-                    this.#sendHello(peer);
-                },
-                onLog: (message) => log("audio", message),
-            });
-            this.#assertCurrent(generation);
-        }
 
         const buildSetup = createSetupBuilder({
             config: this.#setupConfig,
@@ -457,50 +406,40 @@ export class VoiceController implements VoiceControl {
             session.connect();
         }
 
-        if (wantsNative) {
-            const native = new NativeTransport({
-                config: this.#config,
-                cwd: this.ctx.cwd,
-                onMic: (bytes) => this.#feedMic(bytes),
-                onWake: (source) => {
-                    this.wake();
-                    this.#broadcast({ t: "wake", source });
-                },
-                onLog: (message) => log("native", message),
-                onLevel: (value) => this.pushLevel(value),
-                onError: (message) => warn("native", message),
-            });
+        const native = this.#createAudio({
+            config: this.#config,
+            cwd: this.ctx.cwd,
+            onMic: (bytes) => this.#feedMic(bytes),
+            onWake: (source) => {
+                this.#lastWakeSource = source;
+                this.wake();
+            },
+            onLog: (message) => log("native", message),
+            onLevel: (value) => this.pushLevel(value),
+            onError: (message) => warn("native", message),
+        });
 
-            try {
-                await native.start();
-                this.#assertCurrent(generation);
-                this.#native = native;
-                this.#native.setStreaming(!this.#config.alwaysOn);
-            } catch (error) {
-                native.stop();
+        try {
+            await native.start();
+            this.#assertCurrent(generation);
+            this.#native = native;
+            this.#native.setStreaming(!this.#config.alwaysOn);
+        } catch (error) {
+            native.stop();
 
-                if (generation !== this.#generation) {
-                    throw new Error("voice start cancelled");
-                }
-
-                if (!wantsBrowser) {
-                    session.close();
-                    await this.#server?.close();
-                    this.#server = undefined;
-
-                    throw new Error(
-                        `native audio unavailable: ${String(error)}. `
-                        + "Install ffmpeg, set the input device in /voice → Audio, or switch transport to browser.",
-                    );
-                }
-
-                warn("controller", `native audio unavailable: ${String(error)} (continuing with browser)`);
-                this.#broadcast({
-                    t: "notice",
-                    text: `Native audio unavailable (${String(error)}); using the browser transport.`,
-                });
+            if (generation !== this.#generation) {
+                throw new Error("voice start cancelled");
             }
+
+            session.close();
+
+            throw new Error(
+                `voice needs ffmpeg for microphone and speaker: ${String(error)}. `
+                + "Install ffmpeg and check the input/output device in /voice → Audio "
+                + "(/voice diagnose reports what is missing).",
+            );
         }
+
         this.#assertCurrent(generation);
         this.#running = true;
         this.#startedAt = Date.now();
@@ -508,9 +447,7 @@ export class VoiceController implements VoiceControl {
         this.#renderStatus(true);
 
         this.#idleTimer = setInterval(() => this.#tickIdle(), 2000);
-        this.#statsTimer = setInterval(() => this.#broadcastStats(), 10_000);
         (this.#idleTimer as { unref?: () => void }).unref?.();
-        (this.#statsTimer as { unref?: () => void }).unref?.();
 
         if (!this.#dormant) {
             this.#scheduleMaxSession();
@@ -526,12 +463,6 @@ export class VoiceController implements VoiceControl {
             });
         }
 
-        if (this.#server && this.#config.openBrowser) {
-            this.#open(this.#server.url);
-        }
-
-        updateLockUrl(this.ctx.cwd, this.#server?.url);
-
         return this.#statusResult(Boolean(previous.handle));
     }
 
@@ -543,11 +474,6 @@ export class VoiceController implements VoiceControl {
         if (this.#idleTimer) {
             clearInterval(this.#idleTimer);
             this.#idleTimer = undefined;
-        }
-
-        if (this.#statsTimer) {
-            clearInterval(this.#statsTimer);
-            this.#statsTimer = undefined;
         }
 
         if (this.#maxSessionTimer) {
@@ -585,25 +511,6 @@ export class VoiceController implements VoiceControl {
             native?.stop();
         } catch (error) {
             log("controller", "native stop failed", error);
-        }
-
-        for (const peer of [...this.#peers]) {
-            try {
-                peer.close(1001, "voice stopped");
-            } catch {
-                // ignore
-            }
-        }
-
-        this.#peers.clear();
-
-        const server = this.#server;
-        this.#server = undefined;
-
-        try {
-            await server?.close();
-        } catch (error) {
-            log("controller", "audio server close failed", error);
         }
 
         this.#levels = [];
@@ -645,15 +552,14 @@ export class VoiceController implements VoiceControl {
             Object.assign(this.#setupConfig, config);
         }
 
-        this.#broadcast({ t: "config", ...this.#clientConfig() });
         this.#renderStatus(true);
 
         // Transport-level settings can only be applied by rebuilding the process
-        // side (server, mic, player).
+        // side (mic capture, player, wake spotter).
         const restartKeys: (keyof VoiceConfig)[] = [
-            "audio", "host", "port", "nativeInput", "nativeOutput", "ffmpegPath", "ffplayPath",
-            "nativeAec", "kwsModelDir", "kwsKeywords", "sherpaProvider", "wakeEngine", "compute",
-            "connectOnWake",
+            "nativeInput", "nativeOutput", "ffmpegPath", "ffplayPath", "nativeAec",
+            "kwsModelDir", "asrModelDir", "kwsKeywords", "sherpaProvider", "wakeEngine",
+            "connectOnWake", "inputGain", "outputGain",
         ];
         const restart = restartKeys.some((key) => previous[key] !== config[key]);
 
@@ -755,7 +661,6 @@ export class VoiceController implements VoiceControl {
     sleep(reason?: string): void {
         this.#session?.setStreaming(false);
         this.#native?.setStreaming(false);
-        this.#broadcast({ t: "sleep", reason });
     }
 
     wake(): void {
@@ -775,20 +680,18 @@ export class VoiceController implements VoiceControl {
             session.connect();
             this.#renderStatus(true);
             this.#native?.setStreaming(true);
-            this.#broadcast({ t: "wake" });
 
             return;
         }
 
         session?.setStreaming(true);
         this.#native?.setStreaming(true);
-        this.#broadcast({ t: "wake" });
     }
 
     /**
-     * Mic audio from either transport. While dormant it is dropped unless the wake
-     * phrase has just fired, in which case it is held until the socket is live so
-     * "hey pi, check my messages" is not cut down to its last syllable.
+     * Mic audio. While dormant it is dropped unless the wake phrase has just fired,
+     * in which case it is held until the socket is live so "hey pi, check my
+     * messages" is not cut down to its last syllable.
      */
     #feedMic(bytes: Uint8Array): void {
         const session = this.#session;
@@ -856,7 +759,6 @@ export class VoiceController implements VoiceControl {
 
     setAlwaysOn(value: boolean): void {
         this.#config = { ...this.#config, alwaysOn: value };
-        this.#broadcast({ t: "config", ...this.#clientConfig() });
     }
 
     /** Make the voice model say something (used by Pi's `voice` tool). */
@@ -873,10 +775,7 @@ export class VoiceController implements VoiceControl {
     }
 
     answerApproval(id: string, allow: boolean): boolean {
-        const known = this.#bridge.answerApproval(id, allow);
-        this.#broadcast({ t: "approval-done", id });
-
-        return known;
+        return this.#bridge.answerApproval(id, allow);
     }
 
     /** Called by the Pi-side tool gate. */
@@ -908,7 +807,6 @@ export class VoiceController implements VoiceControl {
             // said.
             this.#lastVoiceAt = Date.now();
             this.#native?.play(bytes);
-            this.#broadcastBinary(bytes);
         });
 
         session.on("turnComplete", () => {
@@ -916,10 +814,6 @@ export class VoiceController implements VoiceControl {
             this.#endDroppedAudio();
             // The old turn is finished: a notice held back for that reason can go now.
             this.#flushDeferredNotices();
-        });
-
-        session.on("transcript", (entry) => {
-            this.#broadcast({ t: "transcript", side: entry.side, text: entry.text, final: entry.final });
         });
 
         session.on("toolCall", (call) => {
@@ -951,7 +845,6 @@ export class VoiceController implements VoiceControl {
             this.#modelTurnOpen = false;
             this.#endDroppedAudio();
             this.#flushDeferredNotices();
-            this.#broadcast({ t: "interrupt" });
         });
 
         session.on("state", (state) => {
@@ -961,19 +854,14 @@ export class VoiceController implements VoiceControl {
                 this.#flushWakeAudio();
             }
 
-            this.#broadcast({ t: "state", state: this.liveState, detail: `${this.#config.model} · ${this.liveState}` });
             this.#renderStatus(true);
-        });
-
-        session.on("usage", (usage) => {
-            this.#tokens = usage.total || this.#tokens;
         });
 
         session.on("handleInvalid", () => {
             // The persisted handle was rejected; make sure a restart does not reuse it.
             persistVoiceState(this.pi, { handle: undefined, model: this.#config.model, voice: this.#config.voice });
             clearPersistedHandle(this.ctx.cwd);
-            this.#broadcast({ t: "notice", text: "Saved voice session expired; starting a fresh one." });
+            this.#tellUser("Saved voice session expired; starting a fresh one.");
         });
 
         session.on("resumption", (handle) => {
@@ -1016,10 +904,7 @@ export class VoiceController implements VoiceControl {
                 this.#setupConfig.searchGrounding = false;
                 this.#config = { ...this.#config, searchGrounding: false };
                 log("controller", "quota refused: retrying without Google Search grounding");
-                this.#broadcast({
-                    t: "notice",
-                    text: "Google Search grounding needs a billed project; reconnecting without it.",
-                });
+                this.#tellUser("Google Search grounding needs a billed project; reconnecting without it.", "warning");
                 setTimeout(() => session.reconnectNow(), 200).unref?.();
 
                 return;
@@ -1028,7 +913,7 @@ export class VoiceController implements VoiceControl {
             // Whatever killed the session, do not leave the voice unusable: arm the
             // wake path so the phrase can bring it back without a restart.
             this.#armDormant(error.message);
-            this.#broadcast({ t: "notice", text: error.message });
+            this.#tellUser(error.message, "error");
         });
     }
 
@@ -1053,7 +938,6 @@ export class VoiceController implements VoiceControl {
         this.#pendingAudio = [];
         this.#pendingBytes = 0;
         log("controller", `asleep after session end (${reason})`);
-        this.#broadcast({ t: "dormant", reason });
         this.#renderStatus(true);
     }
 
@@ -1127,7 +1011,6 @@ export class VoiceController implements VoiceControl {
 
         log("controller", "cutting playback: the notice arrived mid-sentence");
         this.#native?.flush();
-        this.#broadcast({ t: "interrupt" });
 
         // Only a turn the server is still generating keeps sending frames. When the
         // tail of an already-finished turn is simply draining from the player, the
@@ -1238,7 +1121,6 @@ export class VoiceController implements VoiceControl {
                 // Not an interruption: an approval prompt can wait for the sentence to
                 // finish, but it still must not be pushed into an open turn.
                 this.#notice(() => approvalNotice(approval.toolCallId, approval.toolName, approval.summary), false);
-                this.#broadcast({ t: "approval", id: approval.toolCallId, tool: approval.toolName, summary: approval.summary });
 
                 return;
             }
@@ -1275,148 +1157,6 @@ export class VoiceController implements VoiceControl {
                 this.#notice((interrupted) => agentReplyNotice(activity.text, interrupted), true);
             }
         });
-    }
-
-    // -----------------------------------------------------------------------
-    // Peers
-    // -----------------------------------------------------------------------
-
-    #clientConfig(): Record<string, unknown> {
-        const config = this.#config;
-
-        return {
-            model: config.model,
-            voice: config.voice,
-            language: config.language,
-            aec: config.aec,
-            noiseSuppression: config.noiseSuppression,
-            autoGain: config.autoGain,
-            micDeviceId: config.micDeviceId,
-            outputDeviceId: config.outputDeviceId,
-            alwaysOn: config.alwaysOn,
-            bargeIn: config.bargeIn,
-            wakePhrases: config.wakePhrases,
-            wakeEngine: config.wakeEngine,
-            wakeSensitivity: config.wakeSensitivity,
-            wakeModelUrl: config.wakeModelUrl,
-            compute: config.compute,
-            inputRate: 16000,
-            outputRate: 24000,
-        };
-    }
-
-    #sendHello(peer: WebSocketPeer): void {
-        peer.send(JSON.stringify({ t: "hello", ...this.#clientConfig() }));
-        peer.send(JSON.stringify({ t: "config", ...this.#clientConfig() }));
-        peer.send(JSON.stringify({ t: "state", state: this.liveState, detail: this.#config.model }));
-    }
-
-    #onPeerData(peer: WebSocketPeer, data: string | Uint8Array, isBinary: boolean): void {
-        if (isBinary) {
-            const bytes = data instanceof Uint8Array ? data : new Uint8Array();
-
-            if (bytes.length === 0) {
-                return;
-            }
-
-            this.#feedMic(bytes);
-
-            return;
-        }
-
-        const text = typeof data === "string" ? data : Buffer.from(data).toString("utf8");
-        let message: Record<string, unknown>;
-
-        try {
-            message = JSON.parse(text) as Record<string, unknown>;
-        } catch {
-            return;
-        }
-
-        void this.#onControl(peer, message);
-    }
-
-    async #onControl(peer: WebSocketPeer, message: Record<string, unknown>): Promise<void> {
-        const session = this.#session;
-        const type = message.t;
-
-        switch (type) {
-            case "hello":
-                this.#sendHello(peer);
-                break;
-
-            case "wake":
-                this.wake();
-                break;
-
-            case "sleep":
-                this.sleep();
-                break;
-
-            case "interrupt":
-                session?.interrupt();
-                this.#native?.flush();
-                this.#bridge.interrupt();
-                break;
-
-            case "text":
-                if (typeof message.value === "string" && message.value.trim()) {
-                    session?.sendText(message.value.trim());
-                }
-                break;
-
-            case "alwaysOn":
-                if (typeof message.value === "boolean") {
-                    this.setAlwaysOn(message.value);
-                }
-                break;
-
-            case "approval":
-                if (typeof message.id === "string" && typeof message.allow === "boolean") {
-                    this.answerApproval(message.id, message.allow);
-                }
-                break;
-
-            case "level":
-                if (typeof message.value === "number") {
-                    this.pushLevel(message.value);
-                }
-                break;
-
-            case "mic":
-                // The page reports its own mic state; nothing to do server-side.
-                break;
-
-            case "end":
-                await this.stop();
-                break;
-
-            default:
-                log("controller", `unknown control: ${String(type)}`);
-                break;
-        }
-    }
-
-    #broadcast(message: Record<string, unknown>): void {
-        const payload = JSON.stringify(message);
-
-        for (const peer of this.#peers) {
-            if (peer.open) {
-                peer.send(payload);
-            }
-        }
-    }
-
-    #broadcastBinary(bytes: Uint8Array): void {
-        for (const peer of this.#peers) {
-            if (peer.open) {
-                peer.send(bytes);
-            }
-        }
-    }
-
-    #broadcastStats(): void {
-        this.#broadcast({ t: "stats", tokens: this.#tokens, peers: this.#peers.size });
     }
 
     #renderStatus(force = false): void {
@@ -1463,7 +1203,6 @@ export class VoiceController implements VoiceControl {
         // alone let the next frame reopen it.
         this.#native?.setStreaming(false);
         session.setStreaming(false);
-        this.#broadcast({ t: "sleep" });
     }
 
     // -----------------------------------------------------------------------
@@ -1503,15 +1242,4 @@ export class VoiceController implements VoiceControl {
         });
     }
 
-    #open(url: string): void {
-        try {
-            const platform = process.platform;
-            const command = platform === "win32" ? "cmd" : platform === "darwin" ? "open" : "xdg-open";
-            const args = platform === "win32" ? ["/c", "start", "", url] : [url];
-            const child = spawn(command, args, { detached: true, stdio: "ignore" });
-            child.unref();
-        } catch (error) {
-            log("controller", "could not open the browser", error);
-        }
-    }
 }

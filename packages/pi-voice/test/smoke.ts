@@ -208,13 +208,13 @@ test("garbage normalizes to defaults", () => {
     assert.equal(config.model, DEFAULT_VOICE_CONFIG.model);
     assert.equal(config.alwaysOn, false);
     assert.equal(config.vadSilenceMs, 4000);
-    assert.equal(config.audio, "native");
+    assert.equal(config.connectOnWake, true);
 });
 
 test("patch applies and re-normalizes", () => {
-    const config = patchVoiceConfig(DEFAULT_VOICE_CONFIG, { alwaysOn: true, audio: "native", autonomy: "steer" });
+    const config = patchVoiceConfig(DEFAULT_VOICE_CONFIG, { alwaysOn: true, nativeAec: "off", autonomy: "steer" });
     assert.equal(config.alwaysOn, true);
-    assert.equal(config.audio, "native");
+    assert.equal(config.nativeAec, "off");
     assert.equal(config.autonomy, "steer");
 });
 
@@ -226,8 +226,24 @@ test("voice starts asleep by default (no Live session until the wake phrase)", (
 });
 
 console.log("prompt");
-test("native is the default transport; browser is opt-in", () => {
-    assert.equal(DEFAULT_VOICE_CONFIG.audio, "native");
+test("there is exactly one transport: no browser keys survive in the config", () => {
+    // Dropping browser support must not leave a config surface that pretends
+    // otherwise: old files may still carry these keys and they are ignored.
+    const keys = Object.keys(DEFAULT_VOICE_CONFIG);
+
+    for (const gone of ["audio", "host", "port", "openBrowser", "compute", "aec", "noiseSuppression", "autoGain", "micDeviceId", "outputDeviceId", "wakeModelUrl"]) {
+        assert.equal(keys.includes(gone), false, `${gone} must not be a voice setting`);
+        assert.equal(
+            (DEFAULT_VOICE_CONFIG as unknown as Record<string, unknown>)[gone],
+            undefined,
+            `${gone} must not exist at runtime`,
+        );
+    }
+
+    const legacy = normalizeVoiceConfig({ audio: "browser", port: 8722, openBrowser: true, compute: "webgpu" });
+
+    assert.equal(((legacy as unknown) as Record<string, unknown>).audio, undefined);
+    assert.equal(((legacy as unknown) as Record<string, unknown>).port, undefined);
 });
 
 test("persona encodes bridge role and autonomy", () => {
@@ -379,9 +395,14 @@ test("current model is annotated", () => {
 test("enum values complete with the subcommand prefix", () => {
     assert.ok(completeVoiceArguments("always-on o", completionContext).some((item) => item.value === "always-on on"));
     assert.equal(completeVoiceArguments("autonomy st", completionContext)[0]?.value, "autonomy steer");
-    const compute = completeVoiceArguments("compute web", completionContext).map((item) => item.value);
-    assert.ok(compute.includes("compute webgpu"));
-    assert.ok(compute.includes("compute webnn"));
+    const engines = completeVoiceArguments("wake-engine a", completionContext).map((item) => item.value);
+    assert.ok(engines.includes("wake-engine asr"));
+    assert.ok(!engines.includes("wake-engine webspeech"), "browser recognizer is gone");
+    assert.deepEqual(
+        completeVoiceArguments("compute ", completionContext),
+        [],
+        "the browser compute backend picker is gone",
+    );
 });
 
 test("voice names complete", () => {
@@ -685,7 +706,7 @@ process.env.PI_VOICE_STATE = join(continuityDir, "voice-state.json");
 
 const workspace = join(continuityDir, "ws");
 
-const { acquireLock, readLock, releaseLock, updateLockUrl } = await import("../lock.ts");
+const { acquireLock, readLock, releaseLock } = await import("../lock.ts");
 const { loadPersistedHandle, persistedSeq, savePersistedHandle } = await import("../persist.ts");
 
 function lockFileFor(cwd: string): string {
@@ -699,9 +720,6 @@ test("the lock records this process and is released cleanly", () => {
     assert.equal(first.ok, true);
     assert.equal(readLock(workspace)?.pid, process.pid);
     assert.ok(readLock(workspace)?.token, "the lock carries an ownership token");
-
-    updateLockUrl(workspace, "http://127.0.0.1:9/?t=x");
-    assert.equal(readLock(workspace)?.url, "http://127.0.0.1:9/?t=x");
 
     releaseLock(workspace);
     assert.equal(readLock(workspace), undefined);

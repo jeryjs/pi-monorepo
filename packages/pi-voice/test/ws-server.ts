@@ -1,9 +1,10 @@
 /**
  * A tiny RFC 6455 WebSocket *server* (handshake + frames) built only on
- * `node:crypto` and `node:stream`, so pi-voice needs no runtime dependencies.
+ * `node:crypto` and `node:stream`.
  *
- * Scope is deliberately small: text + binary frames, ping/pong, close, and
- * fragmentation of small messages. It is not a general-purpose WS server.
+ * Test support, not shipped code: the lifecycle harness stands up a fake Gemini
+ * Live endpoint and needs the server side of the protocol to do it. Node has no
+ * WebSocket server, and adding a dependency for tests is not worth it.
  */
 
 import { createHash } from "node:crypto";

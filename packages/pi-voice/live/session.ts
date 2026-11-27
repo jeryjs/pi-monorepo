@@ -372,7 +372,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
         }
 
         // activityStart/activityEnd are only valid with manual VAD; sending them
-        // under automatic VAD is rejected (1007). The page flushes playback.
+        // under automatic VAD is rejected (1007). The transport flushes playback.
         this.emit("interrupted", undefined);
     }
 
@@ -677,7 +677,7 @@ export class LiveSession extends Emitter<LiveSessionEvents> {
 
         if (content.turnComplete) {
             // Finalise both sides: the server never marks user transcription final,
-            // which left a "you" line stuck as interim in the page forever.
+            // which left the user's line stuck as an interim transcript forever.
             this.emit("transcript", { side: "user", text: "", final: true });
             this.emit("transcript", { side: "model", text: "", final: true });
             this.emit("turnComplete", undefined);

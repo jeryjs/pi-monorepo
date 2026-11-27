@@ -6,8 +6,10 @@
  * double start, stop during start, restart resumption, reload rebind, cross-process
  * locking, and subscription / lock / socket cleanup across many cycles.
  *
- * Nothing inside pi-voice is mocked: real audio endpoint, real LiveSession, real
- * bridge, real lock and persist files.
+ * Everything but the audio device is real: real VoiceController, real LiveSession,
+ * real bridge, real lock and persist files. Audio itself is a silent sink (see
+ * `SilentAudio`) so the suite runs on a machine with no microphone and no ffmpeg —
+ * ffmpeg capture/playback is covered by test/smoke.ts.
  */
 
 import assert from "node:assert/strict";
@@ -17,8 +19,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { acceptWebSocket } from "../audio/ws.ts";
-import type { WebSocketPeer } from "../audio/ws.ts";
+import type { AudioSink, NativeTransportOptions } from "../audio/native.ts";
+import { acceptWebSocket } from "./ws-server.ts";
+import type { WebSocketPeer } from "./ws-server.ts";
 import { VoiceController } from "../controller.ts";
 import { DEFAULT_VOICE_CONFIG, patchVoiceConfig } from "../config.ts";
 import type { VoiceConfig } from "../config.ts";
@@ -262,13 +265,71 @@ function makeCtx(history?: unknown[]): ExtensionContext {
     } as unknown as ExtensionContext;
 }
 
+/**
+ * Audio sink that satisfies the transport contract and does nothing.
+ *
+ * The controller, socket, tools and lock are all real; only PCM in/out is inert.
+ */
+class SilentAudio implements AudioSink {
+    #streaming = true;
+    started = 0;
+    stopped = 0;
+    played = 0;
+
+    readonly options: NativeTransportOptions;
+
+    constructor(options: NativeTransportOptions) {
+        this.options = options;
+    }
+
+    async start(): Promise<void> {
+        this.started++;
+    }
+
+    stop(): void {
+        this.stopped++;
+    }
+
+    play(bytes: Uint8Array): void {
+        this.played += bytes.length;
+        this.options.onLevel?.(0.01);
+    }
+
+    flush(): void {}
+
+    setStreaming(streaming: boolean): void {
+        this.#streaming = streaming;
+    }
+
+    get playingUntil(): number {
+        return 0;
+    }
+
+    get spotterProvider(): undefined {
+        return undefined;
+    }
+
+    get streaming(): boolean {
+        return this.#streaming;
+    }
+}
+
+/**
+ * Build a controller whose audio side is the silent sink. Every test uses this:
+ * a real transport would open a microphone and feed ambient noise into the idle
+ * gate, which is exactly what these tests want to control.
+ */
+function makeController(
+    api: ExtensionAPI,
+    ctx: ExtensionContext,
+    config: VoiceConfig,
+    createAudio: (options: NativeTransportOptions) => AudioSink = (options) => new SilentAudio(options),
+): VoiceController {
+    return new VoiceController(api, ctx, config, { createAudio });
+}
+
 function makeConfig(overrides: Partial<VoiceConfig> = {}): VoiceConfig {
     return patchVoiceConfig(DEFAULT_VOICE_CONFIG, {
-        // Browser transport: starts the real endpoint but never spawns ffmpeg, so
-        // the suite runs headless and fast. Native audio is covered by its own test.
-        audio: "browser",
-        openBrowser: false,
-        port: 0,
         alwaysOn: false,
         apiKey: "test-key",
         autonomy: "steer",
@@ -286,18 +347,19 @@ const live = await startFakeLive();
 process.env.PI_VOICE_LIVE_URL = live.url;
 
 const pi = makePi();
-const controller = new VoiceController(pi.api, makeCtx(), makeConfig());
-let firstUrl = "";
+const sinks: SilentAudio[] = [];
+const controller = makeController(pi.api, makeCtx(), makeConfig(), (transportOptions) => {
+    const sink = new SilentAudio(transportOptions);
+    sinks.push(sink);
+
+    return sink;
+});
 
 for (let cycle = 1; cycle <= 5; cycle++) {
     const result = await controller.start();
 
-    if (cycle === 1) {
-        firstUrl = result.url;
-    }
-
     assert.equal(controller.running, true, `cycle ${cycle}: running after start`);
-    assert.ok(result.url.startsWith("http://127.0.0.1:"), `cycle ${cycle}: endpoint url`);
+    assert.equal(result.model, DEFAULT_VOICE_CONFIG.model, `cycle ${cycle}: model reported`);
     assert.equal(readLock(cwd)?.pid, process.pid, `cycle ${cycle}: lock held while running`);
 
     // The handshake is asynchronous: wait for the setup frame, otherwise the socket
@@ -312,15 +374,18 @@ for (let cycle = 1; cycle <= 5; cycle++) {
 
     assert.equal(controller.running, false, `cycle ${cycle}: stopped`);
     assert.equal(readLock(cwd), undefined, `cycle ${cycle}: lock released`);
-    assert.equal(controller.peerCount, 0, `cycle ${cycle}: peers cleared`);
 }
 
-ok("5x start/stop cycles keep running state, lock, peers and sockets clean");
+ok("5x start/stop cycles keep running state, lock and sockets clean");
 assert.equal(live.connections.length, 5, "exactly one live connection per cycle");
 ok("each start opened exactly one Live socket (no duplicates, no leaks)");
 
-await assert.rejects(() => fetch(firstUrl), "stopped endpoint refuses connections");
-ok("stopping closes the local audio endpoint");
+// One audio sink per start, and every one of them was stopped: a leaked ffmpeg
+// pair would show up as a started sink that was never stopped.
+assert.equal(sinks.length, 5, "one audio sink per start");
+assert.ok(sinks.every((sink) => sink.started === 1), "each sink started once");
+assert.ok(sinks.every((sink) => sink.stopped === 1), "each sink stopped once");
+ok("every audio sink was started exactly once and stopped exactly once");
 
 // ---------------------------------------------------------------------------
 // 2. restart resumes the previous session instead of starting over
@@ -392,8 +457,7 @@ ok("/reload rebind keeps the Live socket and hands subscriptions to the new brid
 // 5b. idle gate: quiet time gates the mic but keeps the session
 // ---------------------------------------------------------------------------
 
-const idleController = new VoiceController(
-    makePi().api,
+const idleController = makeController(makePi().api,
     makeCtx(),
     makeConfig({ idleSleepMs: 300 }),
 );
@@ -410,7 +474,7 @@ ok("wake after an idle gate resumes listening on the same session");
 
 // Voice activity has to keep it awake: the gate keys on the mic level, not on the
 // constant frame flow that made it never fire in native mode.
-const talker = new VoiceController(makePi().api, makeCtx(), makeConfig({ idleSleepMs: 300 }));
+const talker = makeController(makePi().api, makeCtx(), makeConfig({ idleSleepMs: 300 }));
 
 await talker.start();
 await until(() => talker.liveState === "live", "talker live");
@@ -429,8 +493,7 @@ await talker.stop();
 // 5c. start asleep: no Live socket until the wake phrase
 // ---------------------------------------------------------------------------
 
-const sleeper = new VoiceController(
-    makePi().api,
+const sleeper = makeController(makePi().api,
     makeCtx(),
     makeConfig({ alwaysOn: true, connectOnWake: true }),
 );
@@ -453,8 +516,7 @@ ok("the wake phrase opens the Live session and it goes live");
 
 await sleeper.stop();
 
-const eager = new VoiceController(
-    makePi().api,
+const eager = makeController(makePi().api,
     makeCtx(),
     makeConfig({ alwaysOn: true, connectOnWake: false }),
 );
@@ -470,8 +532,7 @@ ok("connectOnWake=false keeps the eager behaviour (socket open at startup)");
 // A config change while asleep must not open the socket: `updateConfig` used to
 // call #scheduleMaxSession()/reconnectNow() unconditionally, which is exactly how a
 // "start asleep" session turned up `live` without anyone saying the wake phrase.
-const staysAsleep = new VoiceController(
-    makePi().api,
+const staysAsleep = makeController(makePi().api,
     makeCtx(),
     makeConfig({ alwaysOn: true, connectOnWake: true }),
 );
@@ -487,8 +548,7 @@ await staysAsleep.stop();
 ok("a config change while asleep does not connect the session");
 
 // ...while turning the wake word off has to leave something usable.
-const wakeDisabled = new VoiceController(
-    makePi().api,
+const wakeDisabled = makeController(makePi().api,
     makeCtx(),
     makeConfig({ alwaysOn: true, connectOnWake: true }),
 );
@@ -504,7 +564,7 @@ ok("disabling always-on while asleep connects instead of leaving dead air");
 // 6. tool calls: honest results, real abort
 // ---------------------------------------------------------------------------
 
-const controller2 = new VoiceController(reloadedPi.api, makeCtx(), makeConfig());
+const controller2 = makeController(reloadedPi.api, makeCtx(), makeConfig());
 const index = live.connections.length;
 
 await controller2.start();
@@ -601,7 +661,7 @@ const history = [
     { role: "assistant", content: [{ type: "text", text: "Added a 30s timeout to deploy.sh" }] },
 ];
 
-const resumed = new VoiceController(makePi().api, makeCtx(history), makeConfig());
+const resumed = makeController(makePi().api, makeCtx(history), makeConfig());
 const resumedIndex = live.connections.length;
 
 await resumed.start();
@@ -632,7 +692,7 @@ ok("a resumed Pi session is seeded into the voice prompt (last turns + latest re
 await resumed.stop();
 
 // A brand new session must not pretend to have history.
-const blank = new VoiceController(makePi().api, makeCtx([]), makeConfig());
+const blank = makeController(makePi().api, makeCtx([]), makeConfig());
 const blankIndex = live.connections.length;
 
 await blank.start();
@@ -650,7 +710,7 @@ await blank.stop();
 // 5e. a dead socket parks the voice instead of killing it
 // ---------------------------------------------------------------------------
 
-const revivable = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
+const revivable = makeController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
 const beforeDrop = live.connections.length;
 
 await revivable.start();
@@ -674,7 +734,7 @@ ok("the wake phrase opens a fresh session after the close (no restart needed)");
 await revivable.stop();
 
 // With no wake phrase there is nothing to re-arm, so the old behaviour stands.
-const noWake = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false, connectOnWake: false }));
+const noWake = makeController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false, connectOnWake: false }));
 const beforeNoWake = live.connections.length;
 
 await noWake.start();
@@ -686,7 +746,7 @@ ok("without always-on listening the session retries itself as before");
 await noWake.stop();
 
 // A genuine setup error must still be an error, not a silent park.
-const broken = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
+const broken = makeController(makePi().api, makeCtx(), makeConfig({ alwaysOn: true, connectOnWake: false }));
 const beforeBroken = live.connections.length;
 
 await broken.start();
@@ -703,7 +763,7 @@ await broken.stop();
 // ---------------------------------------------------------------------------
 
 const answererPi = makePi();
-const answerer = new VoiceController(answererPi.api, makeCtx(), makeConfig({ announce: true }));
+const answerer = makeController(answererPi.api, makeCtx(), makeConfig({ announce: true }));
 const answererIndex = live.connections.length;
 
 await answerer.start();
@@ -758,7 +818,7 @@ const holder = spawn(process.execPath, [
 
 await until(() => readLock(cwd)?.pid === holder.pid, "child process to take the lock");
 
-const rival = new VoiceController(makePi().api, makeCtx(), makeConfig());
+const rival = makeController(makePi().api, makeCtx(), makeConfig());
 await assert.rejects(() => rival.start(), /already running in this workspace/i);
 ok("a second Pi process in the same workspace refuses to duplicate the session");
 
@@ -774,7 +834,7 @@ await until(() => {
 }, "child process to exit");
 
 // The stale lock file is still there; the next start must take it over.
-const revived = new VoiceController(makePi().api, makeCtx(), makeConfig());
+const revived = makeController(makePi().api, makeCtx(), makeConfig());
 await revived.start();
 assert.equal(readLock(cwd)?.pid, process.pid, "stale lock taken over by the new owner");
 await revived.stop();
