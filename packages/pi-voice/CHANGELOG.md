@@ -5,6 +5,54 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-12-01
+
+### Fixed
+
+- **Log lines leaked with debug off.** Two causes: `PI_VOICE_DEBUG` was parsed with
+  plain truthiness, so `PI_VOICE_DEBUG=false` (and `0`, `off`, `no`) *enabled*
+  verbose logging; and `warn()` wrote to stderr unconditionally, which is where the
+  `[pi-voice: native] native wake (...)` lines in the editor came from.
+  - the environment is parsed strictly now (`1/true/on/yes` enable, anything else is
+    off), and the config value still wins.
+  - `warn()` is quiet unless debug is on. It is not discarded: warnings go into a
+    small ring buffer, `/voice status` prints the last three, and the failures that
+    mean "voice is not running" (auto-start failed, restart failed, transport
+    settings changed) now also raise a `ui.notify` instead of relying on stderr.
+  - `/voice status` states the mode explicitly: `logging: quiet (warnings still
+    recorded)`.
+  - tests capture `console.error` and assert nothing is written with debug off, that
+    a warning is still retrievable, and that every falsy-looking env value is off.
+
+## [0.6.1] - 2026-12-01
+
+### Added
+
+- **`asr` wake engine.** The 3.3M keyword spotter does not recognise every voice:
+  on one real user's six recordings of "hey pi" it fired on none of them at any
+  threshold (0.5 → 0.01), with any boost, for any spelling — while a general ASR
+  heard the same clips as "HAYPE". Keyword spotting compares acoustics to one
+  tokenised phrase; recognition compares *words*, which survives accents, delivery
+  and a bad microphone far better.
+  - `sherpa-onnx`'s streaming recognizer decodes continuously and
+    `audio/wake-match.ts` matches the transcript: one edit per word of three or more
+    letters, nothing for short words, and a length-guarded joined form so "HAYPE",
+    "HEY P" and "HEYPI" fire while "hey bud", "the pie is ready" and "okay pi" do not.
+  - `wakeEngine: "asr"` selects it; `"auto"` now prefers it when the model is
+    installed, then the keyword spotter, then energy VAD.
+  - `/voice asr` installs the recognizer (~40 MB of int8 weights, extracted into the
+    managed model dir) and switches the engine. `wakePhrases` finally means something
+    in native mode: the phrases are matched as text, not tokenised into one keyword.
+  - Cost is honest: a 20M-parameter encoder instead of 3.3M, so more CPU per frame.
+- `audio/wake-match.ts` is unit-tested against literal decoder output from real
+  recordings ("ITE HAYPE", "HAY PE", "HEYPI") and against the phrases that must stay
+  quiet ("THE PIE IS READY", "HEY BUD", "OKAY PI", "A PIE").
+
+### Notes
+
+- The keyword spotter remains the default only for `wakeEngine: "sherpa"`; nothing
+  is removed. If the spotter works on your voice it is still the cheaper engine.
+
 ## [0.6.0] - 2026-12-01
 
 Four reports from real use, all of them about the voice being confidently wrong

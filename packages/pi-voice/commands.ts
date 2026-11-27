@@ -9,7 +9,8 @@ import { capabilitiesFor, describeModels, liveModelIds } from "./capabilities.ts
 import { completeVoiceArguments } from "./completions.ts";
 import type { VoiceConfig } from "./config.ts";
 import type { VoiceRuntime } from "./runtime.ts";
-import { sherpaStatus, setupSherpaWake } from "./sherpa.ts";
+import { ASR_MODEL, asrModelStatus, downloadAsrModel, resolvedAsrModelDir, sherpaStatus, setupSherpaWake } from "./sherpa.ts";
+import { debugState, recentWarnings } from "./util.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
 
 export type { VoiceRuntime } from "./runtime.ts";
@@ -33,7 +34,8 @@ function statusText(runtime: VoiceRuntime): string {
         `voice name: ${config.voice}${config.language ? ` · lang ${config.language}` : ""}`,
         `key: ${config.apiKey ? "config" : controller?.keySource ?? "not resolved"}`,
         `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine} · compute ${config.compute}`,
-        `wake: ${sherpaStatus(config.kwsModelDir).detail}`,
+        `wake: ${sherpaStatus(config.kwsModelDir).detail}`
+            + `${asrModelStatus(resolvedAsrModelDir(config.asrModelDir)).ok ? " · asr model installed" : ""}`,
         `start: ${config.alwaysOn && config.connectOnWake
             ? "asleep — connects on the wake phrase (connectOnWake)"
             : "connects at startup (connectOnWake off)"}`,
@@ -42,6 +44,9 @@ function statusText(runtime: VoiceRuntime): string {
         `tools: ${capabilities.asyncTools ? "async" : "sync"} function calling · search ${config.searchGrounding ? "on" : "off"}`,
         `VAD: ${config.vadSilenceMs}ms silence, ${config.vadPrefixMs}ms prefix · barge-in ${config.bargeIn ? "on" : "off"}`,
         `idle sleep: ${Math.round(config.idleSleepMs / 1000)}s · digest ${config.digestTurns} turns`,
+        // Nothing is written to stderr unless asked for, so state the quiet mode and
+        // whether anything was withheld (`warn()` still records every warning).
+        `logging: ${debugState().enabled ? "debug on" : "quiet (warnings still recorded)"}`,
     ];
 
     if (controller?.running) {
@@ -70,12 +75,22 @@ function statusText(runtime: VoiceRuntime): string {
         lines.push(`last error: ${controller.lastError}`);
     }
 
+    const warnings = recentWarnings(3);
+
+    if (warnings.length > 0) {
+        lines.push("recent warnings (hidden from stderr while debug is off):");
+
+        for (const entry of warnings) {
+            lines.push(`  ${new Date(entry.at).toLocaleTimeString()} [${entry.scope}] ${entry.text.slice(0, 160)}`);
+        }
+    }
+
     return lines.join("\n");
 }
 
 export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): void {
     pi.registerCommand("voice", {
-        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, mic, compute, key, debug)",
+        description: "Control the Gemini Live voice assistant (status, on, off, url, listen, sleep, always-on, model, voice, wake, sherpa, asr, mic, compute, key, debug)",
         getArgumentCompletions: (prefix: string) => {
             try {
                 return completeVoiceArguments(prefix, {
@@ -294,8 +309,8 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                 case "wakeengine": {
                     const engine = value.toLowerCase();
 
-                    if (!["auto", "sherpa", "webspeech", "energy"].includes(engine)) {
-                        say(ctx, "wake engine: auto | sherpa | webspeech | energy", "warning");
+                    if (!["auto", "asr", "sherpa", "webspeech", "energy"].includes(engine)) {
+                        say(ctx, "wake engine: auto | asr | sherpa | webspeech | energy", "warning");
                         return;
                     }
 
@@ -354,6 +369,57 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     say(
                         ctx,
                         `sherpa wake ready: ${result.detail}`
+                            + (wasRunning ? " (voice restarted)" : ". Start voice with /voice on"),
+                        "info",
+                    );
+                    return;
+                }
+
+                case "asr": {
+                    // Wake word by speech recognition, for voices the 3.3M keyword
+                    // spotter cannot hear at any threshold. Matching is on *text*, so
+                    // `wakePhrases` finally means something in native mode.
+                    const target = runtime.getConfig().asrModelDir;
+                    const dir = resolvedAsrModelDir(target);
+                    const installed = asrModelStatus(dir);
+
+                    if (installed.ok && value !== "force") {
+                        runtime.patch({ wakeEngine: "asr" });
+                        say(ctx, `asr wake already installed (${dir}); engine set to asr`, "info");
+                        return;
+                    }
+
+                    const wasRunning = runtime.controller()?.running ?? false;
+
+                    say(
+                        ctx,
+                        `Installing the ASR wake model (${(ASR_MODEL.bytes / 1024 / 1024).toFixed(0)} MB). `
+                        + "It recognises words rather than acoustics, so it works on voices the phrase spotter misses.",
+                        "info",
+                    );
+
+                    const downloaded = await downloadAsrModel((line) => say(ctx, line, "info"), target || undefined);
+
+                    if (!downloaded.ok) {
+                        say(ctx, `asr model: ${downloaded.detail}`, "warning");
+                        return;
+                    }
+
+                    runtime.patch({ wakeEngine: "asr" });
+
+                    if (wasRunning) {
+                        try {
+                            await runtime.stop();
+                            await runtime.start();
+                        } catch (error) {
+                            say(ctx, `installed, but restarting voice failed: ${String(error)}`, "warning");
+                            return;
+                        }
+                    }
+
+                    say(
+                        ctx,
+                        `asr wake ready: ${downloaded.detail}`
                             + (wasRunning ? " (voice restarted)" : ". Start voice with /voice on"),
                         "info",
                     );
@@ -428,7 +494,7 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                         + "  status · diagnose · on · off · restart · url · listen · sleep\n"
                         + "  always-on [on|off] · announce [on|off] · debug [on|off]\n"
                         + "  model <id> · voice-name <name> · autonomy <level>\n"
-                        + "  wake-engine <engine> · sherpa · mic [seconds] · compute <backend>\n"
+                        + "  wake-engine <engine> · sherpa · asr · mic [seconds] · compute <backend>\n"
                         + "  key [<key>|clear] · set <json>",
                         "info",
                     );

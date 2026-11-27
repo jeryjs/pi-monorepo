@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export type WakeEngine = "auto" | "sherpa" | "webspeech" | "energy";
+export type WakeEngine = "auto" | "asr" | "sherpa" | "webspeech" | "energy";
 export type ComputeBackend = "auto" | "cpu" | "webgpu" | "webnn";
 export type Autonomy = "concierge" | "steer" | "approvals";
 export type ThinkingLevelOption = "" | "minimal" | "low" | "medium" | "high";
@@ -42,6 +42,12 @@ export interface VoiceConfig {
     wakeEngine: WakeEngine;
     /** sherpa-onnx-node KWS model directory for native wake. Empty = managed install. */
     kwsModelDir: string;
+    /**
+     * Streaming ASR model directory for the `asr` wake engine. Empty = managed
+     * install (`/voice asr`). Used by `wakeEngine: "asr"`, and by `"auto"` when the
+     * model is present and no keyword model has been chosen explicitly.
+     */
+    asrModelDir: string;
     /** Keywords for the KWS model, e.g. "HEY PI :2.0" (';' separates keywords). */
     kwsKeywords: string;
     /**
@@ -137,6 +143,7 @@ export const DEFAULT_VOICE_CONFIG: VoiceConfig = {
     wakePhrases: ["hey pi", "hi pi", "ok pi"],
     wakeEngine: "auto",
     kwsModelDir: "",
+    asrModelDir: "",
     kwsKeywords: "HEY PI :2.0",
     sherpaProvider: "auto",
     wakeModelUrl: "",
@@ -249,8 +256,9 @@ const VALIDATORS: { [K in keyof VoiceConfig]: (value: unknown) => VoiceConfig[K]
     alwaysOn: bool("alwaysOn"),
     connectOnWake: bool("connectOnWake"),
     wakePhrases: stringList("wakePhrases"),
-    wakeEngine: oneOf("wakeEngine", ["auto", "sherpa", "webspeech", "energy"] as const),
+    wakeEngine: oneOf("wakeEngine", ["auto", "asr", "sherpa", "webspeech", "energy"] as const),
     kwsModelDir: str("kwsModelDir"),
+    asrModelDir: str("asrModelDir"),
     kwsKeywords: str("kwsKeywords"),
     sherpaProvider: str("sherpaProvider"),
     wakeModelUrl: str("wakeModelUrl"),

@@ -160,14 +160,21 @@ const SUBCOMMANDS: SubcommandSpec[] = [
     {
         name: "wake-engine",
         aliases: ["wakeengine"],
-        description: "auto | sherpa | webspeech | energy",
+        description: "auto | asr | sherpa | webspeech | energy",
         weight: 65,
         values: () => [
-            { token: "auto", label: "auto", description: "sherpa when installed, else energy VAD" },
+            { token: "auto", label: "auto", description: "asr when installed, else sherpa, else energy VAD" },
+            { token: "asr", label: "asr", description: "speech recognition + fuzzy phrase match (more voices)" },
             { token: "sherpa", label: "sherpa", description: "offline phrase spotter (installs on demand)" },
             { token: "webspeech", label: "webspeech", description: "Chrome/Edge recognizer (browser transport)" },
             { token: "energy", label: "energy", description: "local VAD, any loud speech wakes" },
         ],
+    },
+    {
+        name: "asr",
+        description: "install the ASR wake engine (streaming recognizer + fuzzy phrase match)",
+        weight: 64,
+        values: () => [],
     },
     {
         name: "sherpa",

@@ -52,14 +52,76 @@ export function backoffDelay(attempt: number, baseMs = 400, maxMs = 20_000): num
     return Math.round(raw * (0.5 + Math.random() * 0.5));
 }
 
-let debugEnabled = typeof process !== "undefined" && Boolean(process.env.PI_VOICE_DEBUG);
+/**
+ * Is debug on, from the environment?
+ *
+ * `Boolean(process.env.X)` made `PI_VOICE_DEBUG=false` (and `0`, `off`, `no`)
+ * *enable* verbose logging — which is how these lines leaked into the editor with
+ * the setting visibly off.
+ */
+function envDebug(): boolean {
+    const raw = (typeof process !== "undefined" ? process.env.PI_VOICE_DEBUG : undefined)?.trim().toLowerCase();
+
+    if (!raw) {
+        return false;
+    }
+
+    return !["0", "false", "off", "no", "none"].includes(raw);
+}
+
+let debugEnabled = envDebug();
+let debugSource: "config" | "env" = "env";
 
 export function setDebug(enabled: boolean): void {
     debugEnabled = enabled;
+    debugSource = "config";
 }
 
 export function isDebug(): boolean {
     return debugEnabled;
+}
+
+/** Where the current debug state came from, for `/voice status`. */
+export function debugState(): { enabled: boolean; source: "config" | "env" } {
+    return { enabled: debugEnabled, source: debugSource };
+}
+
+/**
+ * The last few warnings, kept even with debug off.
+ *
+ * Warnings used to go straight to stderr, which put red lines in the middle of the
+ * editor during normal use. They still matter, so they are recorded and shown by
+ * `/voice status` — silent unless you ask, never lost.
+ */
+const WARNING_LIMIT = 12;
+const warnings: { at: number; scope: string; text: string }[] = [];
+
+export function recentWarnings(limit = 3): { at: number; scope: string; text: string }[] {
+    return warnings.slice(-Math.max(1, limit));
+}
+
+export function clearWarnings(): void {
+    warnings.length = 0;
+}
+
+function describe(args: unknown[]): string {
+    return args
+        .map((value) => {
+            if (typeof value === "string") {
+                return value;
+            }
+
+            if (value instanceof Error) {
+                return value.message;
+            }
+
+            try {
+                return JSON.stringify(value);
+            } catch {
+                return String(value);
+            }
+        })
+        .join(" ");
 }
 
 /** Log to the Pi process' stderr; silent unless PI_VOICE_DEBUG / debug config is on. */
@@ -75,8 +137,23 @@ export function log(scope: string, ...args: unknown[]): void {
     }
 }
 
-/** Always-on diagnostics for real failures (rate limits, socket errors). */
+/**
+ * Report a real failure. Kept in memory (see `recentWarnings`) and printed only
+ * with debug on: stderr output in normal use was the "leaking into the editor"
+ * complaint, and every one of these also reaches the user through the status bar,
+ * a notice, or `/voice status`.
+ */
 export function warn(scope: string, ...args: unknown[]): void {
+    warnings.push({ at: Date.now(), scope, text: describe(args) });
+
+    if (warnings.length > WARNING_LIMIT) {
+        warnings.splice(0, warnings.length - WARNING_LIMIT);
+    }
+
+    if (!debugEnabled) {
+        return;
+    }
+
     try {
         console.error("[pi-voice:" + scope + "]", ...args);
     } catch {

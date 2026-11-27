@@ -495,6 +495,10 @@ export class VoiceController implements VoiceControl {
                 }
 
                 warn("controller", `native audio unavailable: ${String(error)} (continuing with browser)`);
+                this.#broadcast({
+                    t: "notice",
+                    text: `Native audio unavailable (${String(error)}); using the browser transport.`,
+                });
             }
         }
         this.#assertCurrent(generation);

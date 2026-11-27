@@ -23,6 +23,34 @@ work is needed. It is not a second coding agent — it is the go-between.
   The **browser companion page** (WebRTC echo cancellation) is opt-in via
   `audio: "browser"` (or `"both"`).
 
+## Wake word: two engines, because one of them will not fit every voice
+
+| engine | what it is | cost |
+|---|---|---|
+| `asr` | streaming recognizer + fuzzy phrase match on the transcript | ~40 MB model, 20M params |
+| `sherpa` | sherpa-onnx keyword spotter (3.3M params, acoustic match) | ~17 MB model, very cheap |
+| `energy` | loud-speech VAD, no phrase model at all | free, fires on any speech |
+
+`wakeEngine: "auto"` (default) uses `asr` when its model is installed, otherwise
+`sherpa` when the keyword model is installed, otherwise `energy`.
+
+**If the wake phrase never fires, this is the order to check:**
+
+1. `/voice mic 3` — does the microphone deliver signal at all? `DIGITAL SILENCE`
+   means Windows privacy/mute, not the detector.
+2. The lab in `C:/tmp/pv-kws-demo` (`node lab.mjs`) — record six takes, press
+   *Analyze*: it reports, per take, the peak/RMS, whether the level is clipping, the
+   **lowest threshold at which that take fires** (or `never`), and what a general ASR
+   hears in it.
+3. `never` at every threshold is not a tuning problem. Switch engines:
+   `/voice asr` installs the recognizer and sets `wakeEngine: "asr"`; the phrase is
+   matched as words, so it tolerates accents and delivery in a way acoustic keyword
+   spotting cannot.
+4. Clipping (peak 1.00) destroys intelligibility for *both* engines: lower the
+   microphone level (Windows: Sound → Input → level, and turn off "Microphone
+   Boost"), then re-record. Five of six takes in the case that motivated this were
+   clipping at full scale.
+
 ## Quick start
 
 ```bash
@@ -252,9 +280,12 @@ keeps you audible.
 makes the wake word phrase-specific. Without it, the energy fallback needs the
 room noise floor to be measured first: it logs
 `native wake: energy floor ... threshold ... level ...` every five seconds in
+`native wake (...): level ... floor ... threshold ...` every five seconds in
 debug mode, and if `level` stays below `threshold` while you speak, raise the mic
 gain (Windows: Sound settings → Input → device properties). Turn `debug` on to
-see those numbers while you tune `wakeSensitivity`.
+see those numbers while you tune `wakeSensitivity` — with it off, nothing is
+written to the console at all (`/voice status` keeps the last warnings and shows
+them on demand).
 
 **`1011 exceeded your current quota` even though `diagnose` passed** — that was a
 real bug: `diagnose` used to probe a *minimal* setup, so it tested the key but
@@ -337,7 +368,8 @@ Ctrl-R restart · Ctrl-T stop · Ctrl-D diagnose · Ctrl-O open page · Esc clos
                            · 3.1-flash-live-preview · 2.5-flash-native-audio-preview-12-2025
 /voice voice-name <name>   prebuilt Gemini voice (default Zephyr)
 /voice autonomy <concierge|steer|approvals>
-/voice wake-engine <auto|sherpa|webspeech|energy>
+/voice wake-engine <auto|asr|sherpa|webspeech|energy>
+/voice asr                 install the ASR wake model and switch to it
 /voice mic [seconds]       record the input and report peak/rms; says plainly when the mic is silent
 /voice compute <auto|cpu|webgpu|webnn>
 /voice key <key>
@@ -412,6 +444,14 @@ then the answer instead of finishing the sentence it was told to abandon.
 A notice delivered while the session was idle-gated re-opens the mic first, so the
 reply to it is heard. Model audio also counts as conversation activity now, so the
 idle window starts when it stops talking rather than when the user last spoke.
+
+### Logging
+
+Nothing is written to stderr unless `debug` is on (`/voice debug on`, or
+`PI_VOICE_DEBUG=1`; `PI_VOICE_DEBUG=false`, `0`, `off` and `no` are all off — plain
+truthiness used to enable verbose logging for the string `"false"`). Failures are
+never lost: `warn()` records them and `/voice status` prints the last three, and the
+ones that mean "voice is not running" also surface through `ui.notify`.
 
 ### Context: what the voice knows about your Pi session
 
@@ -537,7 +577,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.6.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.6.1** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -556,7 +596,7 @@ test/                     smoke + endpoint + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (70) + endpoint (19) + lifecycle (35) + sherpa (13)
+npm test   # smoke (74) + endpoint (19) + lifecycle (35) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

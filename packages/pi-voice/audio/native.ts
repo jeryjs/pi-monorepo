@@ -19,8 +19,9 @@ import { join } from "node:path";
 import type { VoiceConfig } from "../config.ts";
 import { log, warn, RingBuffer, float32ToPcm16 } from "../util.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "./aec.ts";
+import { NativeAsrWakeSpotter } from "./asr-wake.ts";
 import { NativeKeywordSpotter } from "./kws.ts";
-import { resolvedModelDir, sherpaStatus } from "../sherpa.ts";
+import { asrModelStatus, resolvedAsrModelDir, resolvedModelDir, sherpaStatus } from "../sherpa.ts";
 
 export interface NativeTransportEvents {
     /** 16 kHz s16le microphone bytes, already gated. */
@@ -358,6 +359,7 @@ export class NativeTransport {
     #input = "";
     #aec: AcousticEchoCanceller | undefined;
     #kws: NativeKeywordSpotter | undefined;
+    #asr: NativeAsrWakeSpotter | undefined;
     #lastKeywordAt = 0;
     #noiseFloor = 0.012;
     #voicedMs = 0;
@@ -374,9 +376,9 @@ export class NativeTransport {
     /** Restart the capture process at most this many times before reporting failure. */
     static readonly CAPTURE_ATTEMPTS = 5;
 
-    /** Which engine actually got constructed ("sherpa cpu" or nothing = energy VAD). */
+    /** Which engine actually got constructed ("sherpa cpu", "asr cpu"; nothing = energy VAD). */
     get spotterProvider(): string | undefined {
-        return this.#kws?.provider;
+        return this.#asr ? `asr ${this.#asr.provider}` : this.#kws?.provider;
     }
     /** Drop queued playback beyond this many bytes (~2 s of 24 kHz mono). */
     static readonly MAX_PLAYBACK_BYTES = 24_000 * 2 * 2;
@@ -461,13 +463,32 @@ export class NativeTransport {
 
         // The wake model falls back to the managed directory, so installing it
         // from `/voice` is enough — no config edit needed. `energy` still means
-        // "never use a phrase spotter".
+        // "never use a phrase recognizer".
         const modelDir = resolvedModelDir(config.kwsModelDir);
-        const wantsKws = config.wakeEngine !== "energy";
+
+        // Which recognizer runs. `auto` prefers the ASR when its model is present:
+        // it is the one that works on voices the 3.3M keyword spotter cannot hear.
+        const asrDir = resolvedAsrModelDir(config.asrModelDir);
+        const asrReady = asrModelStatus(asrDir).ok;
+        const wantsAsr = config.wakeEngine === "asr" || (config.wakeEngine === "auto" && asrReady);
+        const wantsKws = !wantsAsr && config.wakeEngine !== "energy";
 
         // 0..1 sensitivity: at the default 0.5 this is the tuned 2.2x factor.
         const sensitivity = Number.isFinite(config.wakeSensitivity) ? Math.min(1, Math.max(0, config.wakeSensitivity)) : 0.5;
         this.#wakeMultiplier = 3.0 - sensitivity * 1.6;
+
+        if (wantsAsr) {
+            this.#asr = await NativeAsrWakeSpotter.create({
+                modelDir: asrDir,
+                phrases: config.wakePhrases,
+                provider: config.sherpaProvider,
+                onLog: (message) => this.#log(message),
+            });
+
+            if (!this.#asr) {
+                this.#log("native wake: ASR recognizer failed to start, falling back to energy VAD");
+            }
+        }
 
         if (wantsKws) {
             this.#kws = await NativeKeywordSpotter.create({
@@ -785,10 +806,20 @@ export class NativeTransport {
             // "the phrase is not recognized" and "the mic delivers silence".
             if (Date.now() - this.#wakeNoteAt > 5000) {
                 this.#wakeNoteAt = Date.now();
+                const engine = this.#asr
+                    ? `asr ${this.#asr.provider}`
+                    : this.#kws ? `sherpa ${this.#kws.provider}` : "energy";
+
                 this.#log(
-                    `native wake (${this.#kws ? `sherpa ${this.#kws.provider}` : "energy"}): `
+                    `native wake (${engine}): `
                     + `level ${rms.toFixed(4)} floor ${this.#noiseFloor.toFixed(4)} threshold ${threshold.toFixed(4)}`,
                 );
+            }
+
+            if (this.#asr) {
+                this.#asr.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
+
+                return;
             }
 
             if (this.#kws) {

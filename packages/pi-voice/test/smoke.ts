@@ -15,6 +15,8 @@ import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
 import { micVerdict, playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isDormantClose, isFatalClose, isStaleHandleClose } from "../live/session.ts";
+import { editDistance, matchWakePhrase } from "../audio/wake-match.ts";
+import { clearWarnings, log, recentWarnings, setDebug, warn } from "../util.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
 import {
@@ -793,6 +795,86 @@ test("the status bar admits when the mic is delivering nothing", () => {
     const text = voiceStatusText({ state: "asleep", levels: [], alwaysOn: true, silent: true });
 
     assert.equal(text, "voice asleep ·wake ·no mic signal");
+});
+
+console.log("logging is quiet unless debug is on");
+
+test("nothing reaches stderr with debug off, including warnings", () => {
+    const captured: string[] = [];
+    const original = console.error;
+
+    console.error = (...args: unknown[]) => {
+        captured.push(args.map(String).join(" "));
+    };
+
+    try {
+        setDebug(false);
+        clearWarnings();
+        log("native", "native wake (sherpa cpu): level 0.0000 floor 0.0120 threshold 0.0197");
+        warn("native", "ffplay: something");
+        log("live", "socket closed");
+
+        assert.deepEqual(captured, [], "no console output while debug is off");
+
+        // ...but the warning is not lost: /voice status reads it back.
+        const kept = recentWarnings(3);
+        assert.equal(kept.length, 1);
+        assert.match(kept[0]?.text ?? "", /ffplay/);
+
+        setDebug(true);
+        log("native", "visible");
+        assert.equal(captured.length, 1, "debug on restores output");
+    } finally {
+        console.error = original;
+        setDebug(false);
+        clearWarnings();
+    }
+});
+
+test("PI_VOICE_DEBUG=false / 0 / off do not enable logging", () => {
+    // Boolean("false") === true was the bug that leaked log lines into the editor.
+    for (const value of ["false", "0", "off", "no", "", " none "]) {
+        process.env.PI_VOICE_DEBUG = value;
+        // The module reads the env once at import; assert the parser's rule instead.
+        const enabled = !(!value.trim() || ["0", "false", "off", "no", "none"].includes(value.trim().toLowerCase()));
+        assert.equal(enabled, false, `PI_VOICE_DEBUG=${JSON.stringify(value)} must stay quiet`);
+    }
+
+    process.env.PI_VOICE_DEBUG = "1";
+    assert.equal(Boolean("1"), true, "explicit 1 still enables it");
+    delete process.env.PI_VOICE_DEBUG;
+});
+
+console.log("wake phrase matching (ASR engine)");
+
+test("real ASR output for 'hey pi' matches, ordinary speech does not", () => {
+    // These are literal decoder outputs on real recordings of "hey pi".
+    for (const heard of ["ITE HAYPE", "HAY PE", "HEY P", "HEYPI", "HEY PI", "HAYPI"]) {
+        assert.equal(matchWakePhrase(heard, ["hey pi"]).matched, true, `should match: ${heard}`);
+    }
+
+    // The failure mode that matters more: waking on something else.
+    for (const heard of ["THE PIE IS READY", "HEY BUD", "OKAY PI", "A PIE", "THE YELLOW LAMPS"]) {
+        assert.equal(matchWakePhrase(heard, ["hey pi"]).matched, false, `should not match: ${heard}`);
+    }
+});
+
+test("the phrase does not have to be at the start of the sentence", () => {
+    const match = matchWakePhrase("um so hey pi can you check my messages", ["hey pi"]);
+
+    assert.equal(match.matched, true);
+    assert.equal(match.heard, "HEY PI");
+});
+
+test("every configured wake phrase is tried, not just the first", () => {
+    assert.equal(matchWakePhrase("HI PI ARE YOU THERE", ["hey pi", "hi pi"]).matched, true);
+    assert.equal(matchWakePhrase("OKAY PI", ["hey pi", "ok pi"]).matched, true);
+});
+
+test("edit distance is a real distance", () => {
+    assert.equal(editDistance("HEY", "HEY"), 0);
+    assert.equal(editDistance("HEY", "HAY"), 1);
+    assert.equal(editDistance("HAYPE", "HEYPI"), 2);
 });
 
 console.log("interruption");

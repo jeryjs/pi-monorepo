@@ -86,6 +86,21 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
     };
 
+    /**
+     * Tell the user something that used to only reach stderr.
+     *
+     * With debug off there is no console output at all, so a failure that only called
+     * `warn()` would be invisible — and "voice never started" is exactly the kind of
+     * thing that must not be silent.
+     */
+    const notify = (kind: "info" | "warning" | "error", message: string): void => {
+        try {
+            context?.ui.notify(message, kind);
+        } catch {
+            // no UI in this mode; `recentWarnings()` still has it for /voice status
+        }
+    };
+
     const start = async (): Promise<StartResult> => {
         if (!context) {
             throw new Error("voice cannot start before a Pi session exists");
@@ -168,6 +183,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     await start();
                 } catch (error) {
                     warn("extension", `restart after a settings change failed: ${String(error)}`);
+                    notify("error", `Voice did not restart: ${String(error)}. Run /voice restart.`);
                 } finally {
                     rebuilding = undefined;
                 }
@@ -254,6 +270,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             // settings that changed on disk are reported rather than applied here.
             if (controller.updateConfig(config).restart) {
                 warn("extension", "transport settings changed; run /voice restart to apply them");
+                notify("warning", "Transport settings changed; run /voice restart to apply them.");
             }
 
             controller.setAgentAbort(() => {
@@ -291,6 +308,8 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                 }
             } catch (error) {
                 warn("extension", `auto-start failed: ${String(error)}`);
+                // Silence here means "voice is not running and nothing said so".
+                notify("error", `Voice did not start: ${String(error)}`);
             }
         }
     });

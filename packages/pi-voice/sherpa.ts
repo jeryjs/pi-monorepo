@@ -50,6 +50,22 @@ export const KWS_MODEL = {
     label: "sherpa-onnx zipformer KWS (gigaspeech, English, BPE)",
 };
 
+/**
+ * English streaming ASR used as the alternative wake engine.
+ *
+ * The keyword spotter is cheap but fragile: on some speakers it never fires at any
+ * threshold. A general recognizer hears the same words and the wake phrase is
+ * matched as *text*, which works on voices the spotter cannot hear and lets the
+ * phrase be anything the user types. The int8 files are what gets loaded.
+ */
+export const ASR_MODEL = {
+    name: "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+        + "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
+    bytes: 127_887_156,
+    label: "sherpa-onnx streaming zipformer ASR (English, 20M)",
+};
+
 /** Default boost applied to keyword tokens when the user did not set one. */
 export const DEFAULT_KEYWORD_SCORE = 1.5;
 
@@ -103,6 +119,22 @@ export function resolvedModelDir(configured: string): string {
 
 export function isManagedModelDir(dir: string): boolean {
     return dir === managedModelDir();
+}
+
+export function managedAsrModelDir(): string {
+    return join(managedModelsRoot(), ASR_MODEL.name);
+}
+
+/** The ASR model dir in use: an explicit config wins, otherwise the managed one. */
+export function resolvedAsrModelDir(configured = ""): string {
+    const trimmed = configured.trim();
+
+    return trimmed.length > 0 ? trimmed : managedAsrModelDir();
+}
+
+/** Same file requirements as the KWS model: transducer + tokens. */
+export function asrModelStatus(modelDir: string): { ok: boolean; missing: string[] } {
+    return modelStatus(modelDir);
 }
 
 // ---------------------------------------------------------------------------
@@ -607,14 +639,42 @@ export async function downloadKwsModel(
     onLine: (line: string) => void,
     targetDir = managedModelDir(),
 ): Promise<StepResult> {
-    const target = targetDir;
+    return fetchModel({
+        url: process.env.PI_VOICE_KWS_MODEL_URL?.trim() || KWS_MODEL.url,
+        label: KWS_MODEL.label,
+        target: targetDir,
+        onLine,
+    });
+}
+
+export async function downloadAsrModel(
+    onLine: (line: string) => void,
+    targetDir = managedAsrModelDir(),
+): Promise<StepResult> {
+    return fetchModel({
+        url: process.env.PI_VOICE_ASR_MODEL_URL?.trim() || ASR_MODEL.url,
+        label: ASR_MODEL.label,
+        target: targetDir,
+        onLine,
+    });
+}
+
+/**
+ * Download a `.tar.bz2` model into `target`: stage next to it so the last step is a
+ * rename on the same volume, and never leave a half-extracted directory behind.
+ */
+async function fetchModel(options: {
+    url: string;
+    label: string;
+    target: string;
+    onLine: (line: string) => void;
+}): Promise<StepResult> {
+    const { url, label, target, onLine } = options;
     const existing = modelStatus(target);
 
     if (existing.ok) {
         return { ok: true, detail: `model already installed in ${target}` };
     }
-
-    const url = process.env.PI_VOICE_KWS_MODEL_URL?.trim() || KWS_MODEL.url;
     // Stage next to the target so the final move is a rename on the same volume.
     const staging = join(dirname(target), `.staging-${process.pid}`);
     const archive = "model.tar.bz2";
@@ -635,7 +695,7 @@ export async function downloadKwsModel(
         return { ok: false, detail: `cannot create ${staging}: ${String(error)}` };
     }
 
-    onLine(`downloading ${KWS_MODEL.label}`);
+    onLine(`downloading ${label}`);
 
     const fetched = await download(url, join(staging, archive), onLine);
 
@@ -669,7 +729,7 @@ export async function downloadKwsModel(
     if (!source) {
         cleanup();
 
-        return { ok: false, detail: "the archive did not contain a complete KWS model" };
+        return { ok: false, detail: "the archive did not contain a complete model (encoder/decoder/joiner + tokens.txt)" };
     }
 
     try {
