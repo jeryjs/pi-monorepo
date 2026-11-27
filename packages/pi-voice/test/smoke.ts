@@ -1063,10 +1063,11 @@ test("a capture failure and an empty capture are different messages", () => {
     assert.match(micVerdict(probe({ samples: 0, peak: 0, rms: 0 })), /no audio arrived/i);
 });
 
-test("the status bar admits when the mic is delivering nothing", () => {
-    const text = voiceStatusText({ state: "asleep", levels: [], alwaysOn: true, silent: true });
+test("the status bar keeps a flat waveform rather than a 'no mic signal' caption", () => {
+    const text = voiceStatusText({ state: "asleep", levels: [], alwaysOn: true });
 
-    assert.equal(text, "voice asleep ·wake ·no mic signal");
+    assert.equal(text, "voice asleep ·wake");
+    assert.doesNotMatch(text, /no mic signal/);
 });
 
 console.log("logging is quiet unless debug is on");

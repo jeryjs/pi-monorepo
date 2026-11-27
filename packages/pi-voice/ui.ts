@@ -29,17 +29,14 @@ export interface VoiceStatusInput {
     levels: number[];
     alwaysOn: boolean;
     error?: string;
-    /** Mic produced nothing for a while: say so instead of leaving "asleep" unexplained. */
-    silent?: boolean;
 }
 
 export function voiceStatusText(input: VoiceStatusInput): string {
     if (input.state === "live" || input.state === "sleeping" || input.state === "asleep") {
         const bar = input.state === "asleep" ? "" : levelBar(input.levels.slice(-10));
         const wake = input.alwaysOn ? " ·wake" : "";
-        const silent = input.silent ? " ·no mic signal" : "";
 
-        return `voice ${input.state}${bar ? " " + bar : ""}${wake}${silent}`;
+        return `voice ${input.state}${bar ? " " + bar : ""}${wake}`;
     }
 
     if (input.state === "error") {

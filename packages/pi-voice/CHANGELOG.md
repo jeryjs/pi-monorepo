@@ -5,6 +5,22 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-12-02
+
+Two field fixes from a live session.
+
+### Fixed
+
+- **The session no longer comes back to life a second after `voice_sleep`.** Muting the
+  mic armed the wake detectors on the very next frame, so the tail of the sentence that
+  asked for the sleep ("stop listening"), and the model's own goodbye still coming out of
+  the speakers, were decoded as a wake. A short settle window now follows every mute,
+  and while the speakers are busy the detectors listen through the echo canceller (or
+  stay deaf when AEC is off) instead of through Pi's own voice.
+- **The status bar no longer appends `·no mic signal`.** A flat waveform already means a
+  silent mic; the explicit caption was redundant. `/voice status` and `/voice mic` still
+  report `mic: NO SIGNAL`.
+
 ## [0.8.2] - 2026-12-02
 
 Follow-up re-review of 0.8.1 found that four of its claims were only partly true.

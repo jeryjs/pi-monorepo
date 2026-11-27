@@ -419,6 +419,15 @@ export class NativeTransport implements AudioSink {
     /** Restart the capture process at most this many times before reporting failure. */
     static readonly CAPTURE_ATTEMPTS = 5;
 
+    /**
+     * How long the wake detectors stay off after the mic is muted.
+     *
+     * The words that triggered the sleep ("stop listening") are still in the decoder,
+     * and the model's goodbye is still coming out of the speakers: waking on either is
+     * the "asleep for a second, then live again" bug.
+     */
+    static readonly SLEEP_SETTLE_MS = 900;
+
     /** When the current capture process was spawned (health window for retries). */
     #captureSpawnedAt = 0;
 
@@ -639,6 +648,11 @@ export class NativeTransport implements AudioSink {
 
         if (!streaming) {
             this.#preRoll.clear();
+            // Drop a partial energy count and hold both detectors off while the sentence
+            // that asked for the sleep, and the goodbye that follows it, are still in the
+            // air. Without this the next frame re-wakes the session it just put to sleep.
+            this.#voicedMs = 0;
+            this.#wakeCooldownUntil = Date.now() + NativeTransport.SLEEP_SETTLE_MS;
         }
     }
 
@@ -907,6 +921,40 @@ export class NativeTransport implements AudioSink {
             // Sleep: keep a pre-roll and look for the wake phrase.
             this.#preRoll.push(rawFloat);
 
+            // Settle window: see setStreaming(false). The tail of the utterance that put
+            // us to sleep must not be decoded as the phrase, and the goodbye must not
+            // wake the session it is closing.
+            if (Date.now() < this.#wakeCooldownUntil) {
+                return;
+            }
+
+            // Never detect a wake through our own playback. With AEC the echo is
+            // cancelled first, so a real "hey pi" spoken over the goodbye still lands;
+            // with AEC off there is no way to tell the two apart, so stay deaf until the
+            // speakers are quiet rather than open a session on our own voice.
+            let detect = rawFloat;
+
+            if (this.playing) {
+                if (!this.#aec) {
+                    return;
+                }
+
+                detect = this.#aec.process(rawFloat);
+            }
+
+            let wakeRms = rms;
+
+            if (detect !== rawFloat) {
+                let detectSum = 0;
+
+                for (let i = 0; i < detect.length; i++) {
+                    const value = detect[i] as number;
+                    detectSum += value * value;
+                }
+
+                wakeRms = Math.sqrt(detectSum / Math.max(1, detect.length));
+            }
+
             const threshold = Math.max(0.006, this.#noiseFloor * this.#wakeMultiplier);
 
             // Logged for both engines: "level 0.0000" is the difference between
@@ -919,18 +967,18 @@ export class NativeTransport implements AudioSink {
 
                 this.#log(
                     `native wake (${engine}): `
-                    + `level ${rms.toFixed(4)} floor ${this.#noiseFloor.toFixed(4)} threshold ${threshold.toFixed(4)}`,
+                    + `level ${wakeRms.toFixed(4)} floor ${this.#noiseFloor.toFixed(4)} threshold ${threshold.toFixed(4)}`,
                 );
             }
 
             if (this.#asr && !this.#asr.failed) {
-                this.#asr.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
+                this.#asr.feed(detect, (keyword) => this.#onKeyword(keyword));
 
                 return;
             }
 
             if (this.#kws && !this.#kws.failed) {
-                this.#kws.feed(rawFloat, (keyword) => this.#onKeyword(keyword));
+                this.#kws.feed(detect, (keyword) => this.#onKeyword(keyword));
 
                 return;
             }
@@ -941,14 +989,14 @@ export class NativeTransport implements AudioSink {
             // Energy wake with an adaptive noise floor, so a quiet mic still
             // wakes: a fixed threshold either misses soft speech or fires at
             // room tone.
-            if (rms < threshold) {
-                this.#noiseFloor = Math.max(0.002, this.#noiseFloor * 0.95 + rms * 0.05);
+            if (wakeRms < threshold) {
+                this.#noiseFloor = Math.max(0.002, this.#noiseFloor * 0.95 + wakeRms * 0.05);
                 this.#voicedMs = 0;
             } else {
                 this.#voicedMs += 20;
             }
 
-            if (this.#voicedMs >= 120 && Date.now() > this.#wakeCooldownUntil) {
+            if (this.#voicedMs >= 120) {
                 this.#wakeCooldownUntil = Date.now() + 1500;
                 this.#voicedMs = 0;
                 this.#emitWake("energy");

@@ -121,7 +121,6 @@ than a phrase. The status bar carries a live waveform:
 voice live ▁▂▄▆▄▂ ·wake         # hearing you, always-on
 voice live ▁▁▁▁                  # live, wake word off
 voice asleep ·wake               # no Gemini session yet; only the local spotter runs
-voice asleep ·wake ·no mic signal # the device is delivering silence — /voice mic
 voice sleeping ▁▂▁              # gated after idle, still hearing for the wake phrase
 voice error: quota...             # stopped; /voice diagnose
 ```
@@ -209,8 +208,8 @@ It records 3 seconds from the configured input and prints one of four verdicts:
 `/voice status` also reports `wake engine running: sherpa (cpu)` (the engine that
 actually got constructed, not what the config asks for), `wake hits` with the last
 source, and `mic: NO SIGNAL` when nothing but silence arrived in the last 8
-seconds. A silent mic also shows up in the status bar as `·no mic signal`, so
-"asleep forever" is never left unexplained.
+seconds. That detail lives in `/voice status` and `/voice mic`, not the status bar:
+a flat waveform already means a silent mic.
 
 **The status bar says `voice asleep` and nothing is connected** — that is
 `connectOnWake` working: the wake spotter is running, no Gemini session exists
@@ -631,7 +630,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.8.2** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.8.3** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout

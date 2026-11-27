@@ -1539,7 +1539,6 @@ export class VoiceController implements VoiceControl {
             levels: this.#levels,
             alwaysOn: this.#config.alwaysOn,
             error: this.#lastError,
-            silent: this.micSilent,
         }));
     }
 
