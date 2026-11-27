@@ -1381,6 +1381,18 @@ test("a questionnaire-shaped tool gets a read-only notice, not a fake answer pat
         "a label-only or padded option does not break the fallback notice",
     );
 
+    // A hostile entry (a throwing accessor, a revoked proxy) must not escape the
+    // tool_execution_start handler either: it is skipped and later labels survive.
+    const hostile: Record<string, unknown> = {};
+
+    Object.defineProperty(hostile, "label", { get() { throw new Error("label getter"); } });
+
+    assert.deepEqual(
+        questionsFromArgs({ questions: [{ prompt: "Which db?", options: [hostile, "Good"] }] }),
+        ["Which db? (options: Good)"],
+        "a throwing option accessor is skipped, not propagated",
+    );
+
     const notice = waitingForInputNotice("ask_user_questions", ["Which db? (options: A, B)"]);
 
     assert.match(notice, /ask_user_questions/);

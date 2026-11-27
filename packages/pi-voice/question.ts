@@ -652,38 +652,50 @@ export function questionsFromArgs(args: unknown): string[] | undefined {
 /**
  * Lenient option labels for the read-only notice.
  *
- * Unlike parseOptions() this never validates identities and never throws: a malformed
- * entry is skipped, the rest are still announced.
+ * Unlike parseOptions() this never validates identities and never throws — not even for
+ * a hostile object (a throwing getter, a revoked proxy): a malformed entry is skipped
+ * and the rest are still announced.
  */
 function optionLabels(value: unknown): string[] {
-    if (!Array.isArray(value)) {
-        return [];
+    const labels: string[] = [];
+    let entries: unknown[];
+
+    try {
+        if (!Array.isArray(value)) {
+            return labels;
+        }
+
+        entries = value.slice(0, 12);
+    } catch {
+        return labels;
     }
 
-    const labels: string[] = [];
-
-    for (const entry of value.slice(0, 12)) {
-        if (typeof entry === "string") {
-            const label = text(entry, 120);
+    for (const entry of entries) {
+        try {
+            const label = entryLabel(entry);
 
             if (label) {
                 labels.push(label);
             }
-
-            continue;
-        }
-
-        if (!entry || typeof entry !== "object") {
-            continue;
-        }
-
-        const record = entry as Record<string, unknown>;
-        const label = text(record.label, 120) ?? text(record.value, 120);
-
-        if (label) {
-            labels.push(label);
+        } catch {
+            // A property accessor that throws, a revoked proxy, ...: skip this entry only.
         }
     }
 
     return labels;
+}
+
+/** The display label of one option entry, or undefined when it has none. */
+function entryLabel(entry: unknown): string | undefined {
+    if (typeof entry === "string") {
+        return text(entry, 120);
+    }
+
+    if (!entry || typeof entry !== "object") {
+        return undefined;
+    }
+
+    const record = entry as Record<string, unknown>;
+
+    return text(record.label, 120) ?? text(record.value, 120);
 }

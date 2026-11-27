@@ -49,7 +49,8 @@ like the bug cannot mask it.
   label carried by the incoming event, which another extension could set to anything.
 - **The read-only fallback notice no longer throws** on an option the strict parser
   rejects (a label-only or padded option). It scans labels leniently instead, so one
-  unusable entry no longer hides the good options beside it.
+  unusable entry no longer hides the good options beside it — and not even a hostile
+  entry (a throwing accessor, a revoked proxy) can escape the event handler.
 
 ## [0.8.1] - 2026-12-02
 
