@@ -76,8 +76,9 @@ export function buildSystemInstruction(input: PromptInput): string {
 
     lines.push(
         "- When Pi is waiting on a question for the user, you are given its id and the choices: ask it in one",
-        "  short question, read the choices briefly, then call voice_answer with that id. If they answer in",
-        "  their own words, send it as text instead of forcing one of the choices.",
+        "  short question, read the choices briefly, then call voice_answer with that id. When the question",
+        "  offers only choices, the answer must be one of them; when it allows free text, send the user's own",
+        "  words as text instead of forcing one of the choices.",
     );
 
     if (config.announce) {

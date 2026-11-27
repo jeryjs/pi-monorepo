@@ -1363,6 +1363,101 @@ test("a questionnaire-shaped tool gets a read-only notice, not a fake answer pat
     assert.match(questionWithdrawnNotice("req-3"), /req-3/);
 });
 
+test("a request that cannot be represented in full is rejected whole", () => {
+    // Silently keeping six of seven questions let voice report the prompt complete
+    // while the provider still waited on the seventh.
+    assert.equal(
+        parseQuestionRequest({ id: "a", questions: Array.from({ length: 7 }, (_, i) => ({ id: `q${i}`, prompt: "p" })) }),
+        undefined,
+        "too many questions",
+    );
+    assert.equal(
+        parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: Array.from({ length: 13 }, (_, i) => `o${i}`) }] }),
+        undefined,
+        "too many options",
+    );
+    assert.equal(
+        parseQuestionRequest({ id: "a", questions: [{ id: "x", prompt: "p" }, { id: "x", prompt: "q" }] }),
+        undefined,
+        "duplicate question ids",
+    );
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [1] }] }), undefined, "a number is not an option");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [] }), undefined, "an empty prompt is not a prompt");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: "x" }] }), undefined, "options must be a list");
+    assert.equal(
+        parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{}, "A"] }] }),
+        undefined,
+        "one unusable option rejects the request rather than being dropped",
+    );
+});
+
+test("matching is word-based, refuses ambiguity, and survives other scripts", () => {
+    const pets = [{ value: "cat", label: "Cat" }, { value: "dog", label: "Dog" }];
+
+    // Substring matching picked "cat" out of "concatenate" and answered a choice the
+    // user never made.
+    assert.equal(matchOption("please concatenate the file", pets), undefined, "a word, not a substring");
+    assert.equal(matchOption("cat", pets)?.value, "cat", "the word itself still matches");
+
+    const twins = [{ value: "del-a", label: "Delete" }, { value: "del-b", label: "Delete" }];
+
+    assert.equal(matchOption("delete", twins), undefined, "two options with the same wording is ambiguous");
+
+    assert.equal(matchOption("数据库", [{ value: "cjk", label: "数据库" }])?.value, "cjk", "non-Latin options match");
+
+    const many = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"]
+        .map((value) => ({ value, label: value }));
+
+    assert.equal(matchOption("the second choice", many)?.value, "two", "'the second choice'");
+    assert.equal(matchOption("the twelfth one", many)?.value, "twelve", "eleven and twelve");
+
+    const yn = [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }];
+
+    assert.equal(matchOption("yeah", yn)?.value, "yes", "plain affirmatives");
+    assert.equal(matchOption("no thanks", yn)?.value, "no", "plain negatives");
+    assert.equal(matchOption("go ahead", [{ value: "go", label: "Go" }, { value: "stop", label: "Stop" }])?.value, "go");
+    assert.equal(matchOption("joke", yn), undefined, "'ok' inside a word is not 'ok'");
+});
+
+test("nothing spoken to the model or the user can carry a credential", () => {
+    // The prompt is transmitted to Gemini and read out loud, so an option value or a
+    // question that quotes a token has to be redacted exactly like an approval does.
+    const request = parseQuestionRequest({
+        id: "req-4",
+        title: "token GITHUB_TOKEN=abcdefghijkl",
+        questions: [
+            {
+                id: "deploy",
+                prompt: "Use sk-abcdefghijklmnop or wait?",
+                options: [{ value: "sk-abcdefghijklmnop", label: "Use the key sk-abcdefghijklmnop" }],
+            },
+        ],
+    })!;
+    const notice = questionNotice(request);
+
+    assert.doesNotMatch(notice, /sk-abcdefghijklmnop/);
+    assert.doesNotMatch(notice, /abcdefghijkl/);
+    assert.match(notice, /<redacted>/);
+    assert.match(notice, /Use/, "the rest of the prompt survives");
+    // Still answerable: the option is offered by number, and the example sends the
+    // number rather than the redacted value the model would otherwise echo.
+    assert.doesNotMatch(notice, /value=/, "a secret-shaped option value is not shown");
+    assert.match(notice, /1\)/);
+    assert.match(notice, /"value": "1"/);
+
+    const blocked = waitingForInputNotice("run", ["Deploy with AIzaSyABCDEFGHIJKLMNOPQRSTUV ?"]);
+
+    assert.doesNotMatch(blocked, /AIzaSyABCDEFGHIJKLMNOPQRSTUV/);
+    assert.match(blocked, /<redacted>/);
+
+    // A question with no options must not be given the literal placeholder as an
+    // example: a model copying it recorded "<option value>" as the user's answer.
+    const freeform = questionNotice(parseQuestionRequest({ id: "r", questions: [{ id: "q", prompt: "Name?" }] })!);
+
+    assert.doesNotMatch(freeform, /<option value>/);
+    assert.match(freeform, /"text"/);
+});
+
 console.log("bridge");
 
 test("a tool result is never stored or spoken as an assistant reply", () => {

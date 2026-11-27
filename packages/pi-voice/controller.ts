@@ -46,6 +46,8 @@ export interface VoiceControllerOptions {
     onConfigChange?: (config: VoiceConfig) => void;
     /** Hand a spoken answer back to the extension that asked the question. */
     onQuestionAnswer?: (result: VoiceAnswerResult) => void;
+    /** Overrides the prompt lifetime; the harness uses a short one. */
+    questionTtlMs?: number;
 }
 
 export interface StartResult {
@@ -145,6 +147,8 @@ export class VoiceController implements VoiceControl {
              * replaces it instead of being counted twice.
              */
             answers: Map<string, VoiceAnswerItem>;
+            /** The prompt's own deadline, independent of the idle tick. */
+            timer?: ReturnType<typeof setTimeout>;
         }
     >();
     /** Tool calls already announced read-only, so a long tool does not talk twice. */
@@ -155,6 +159,7 @@ export class VoiceController implements VoiceControl {
     #createAudio: (options: NativeTransportOptions) => AudioSink;
     readonly #onConfigChange: ((config: VoiceConfig) => void) | undefined;
     readonly #onQuestionAnswer: ((result: VoiceAnswerResult) => void) | undefined;
+    readonly #questionTtlMs: number;
 
     constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig, options: VoiceControllerOptions = {}) {
         this.#pi = pi;
@@ -163,6 +168,7 @@ export class VoiceController implements VoiceControl {
         this.#createAudio = options.createAudio ?? ((transportOptions) => new NativeTransport(transportOptions));
         this.#onConfigChange = options.onConfigChange;
         this.#onQuestionAnswer = options.onQuestionAnswer;
+        this.#questionTtlMs = options.questionTtlMs ?? QUESTION_TTL_MS;
         this.#capabilities = capabilitiesFor(config.model);
         this.#bridge = new AgentBridge(pi, ctx.cwd);
         this.#seedBridgeFromSession();
@@ -192,6 +198,11 @@ export class VoiceController implements VoiceControl {
      */
     rebind(pi: ExtensionAPI, ctx: ExtensionContext): void {
         const previous = this.#bridge;
+
+        // A reloaded provider instance cannot resolve the old request ids, and the old
+        // extension API no longer accepts events. Close the prompts instead of keeping
+        // them registered against a socket whose owner has been disposed.
+        this.cancelQuestions("reload");
 
         this.#pi = pi;
         this.#ctx = ctx;
@@ -597,7 +608,7 @@ export class VoiceController implements VoiceControl {
         this.#modelTurnOpen = false;
         // Prompts belonged to the socket that just closed: their ids can never be
         // answered by a new session, and the provider keeps its own UI.
-        this.#questions.clear();
+        this.cancelQuestions("voice-stopped");
         this.#announcedToolCalls.clear();
         releaseLock(this.ctx.cwd);
     }
@@ -897,37 +908,93 @@ export class VoiceController implements VoiceControl {
     // Voice questions (the `voice:question` protocol, see question.ts)
     // -----------------------------------------------------------------------
 
-    /** Drop prompts past their deadline and report the ones still live. */
-    #liveQuestions(now = Date.now()): VoiceQuestionRequest[] {
-        const live: VoiceQuestionRequest[] = [];
+    /** Relay a spoken/closed prompt to the provider, surviving a disposed extension. */
+    #relayAnswer(result: VoiceAnswerResult): void {
+        try {
+            this.#onQuestionAnswer?.(result);
+        } catch (error) {
+            warn("controller", `could not relay the answer for ${result.id}: ${String(error)}`);
+        }
+    }
 
-        for (const [id, entry] of this.#questions) {
-            if (now - entry.at > QUESTION_TTL_MS) {
-                this.#questions.delete(id);
-                log("controller", `question ${id} expired unanswered`);
+    /**
+     * Close one prompt and tell both sides.
+     *
+     * `expired`/`voice-stopped`/`reload` all end a prompt the provider is still
+     * blocked on, so the provider is told (and can fall back to its own UI) instead of
+     * waiting out its timeout.
+     */
+    #expireQuestion(id: string, reason: "expired" | "voice-stopped" | "reload"): void {
+        const entry = this.#questions.get(id);
 
-                continue;
-            }
-
-            live.push(entry.request);
+        if (!entry) {
+            return;
         }
 
-        return live;
+        if (entry.timer) {
+            clearTimeout(entry.timer);
+        }
+
+        this.#questions.delete(id);
+        log("controller", `question ${id} closed (${reason})`);
+
+        if (reason === "expired") {
+            // The model would otherwise keep asking about a prompt nobody can answer.
+            this.#notice(() => questionWithdrawnNotice(id), false);
+        }
+
+        this.#relayAnswer({ id, answers: [], cancelled: true, reason });
+    }
+
+    /** Close every open prompt (teardown, restart, `/reload`). */
+    cancelQuestions(reason: "voice-stopped" | "reload"): void {
+        for (const id of [...this.#questions.keys()]) {
+            this.#expireQuestion(id, reason);
+        }
+    }
+
+    /** Drop prompts past their deadline and report the ones still live. */
+    #liveQuestions(now = Date.now()): VoiceQuestionRequest[] {
+        for (const [id, entry] of [...this.#questions]) {
+            if (now - entry.at > this.#questionTtlMs) {
+                this.#expireQuestion(id, "expired");
+            }
+        }
+
+        return [...this.#questions.values()].map((entry) => entry.request);
     }
 
     /**
      * Announce a prompt and keep it answerable.
      *
-     * Returns false when nothing could be spoken (voice off, socket down): the
-     * provider then keeps its own UI as the only way to answer, and a headless
-     * provider can fail fast instead of waiting out its timeout.
+     * Returns false when nothing could be spoken (voice off, socket down, the same id
+     * already open): the provider then keeps its own UI as the only way to answer, and
+     * a headless provider can fail fast instead of waiting out its timeout.
      */
     presentQuestion(request: VoiceQuestionRequest): boolean {
         if (!this.#running) {
             return false;
         }
 
-        this.#questions.set(request.id, { request, at: Date.now(), answers: new Map() });
+        // A second live prompt under the same id would overwrite the first, and answers
+        // are matched by id alone — one provider could receive another's answer.
+        if (this.#questions.has(request.id)) {
+            warn("controller", `voice_question id ${request.id} is already open; ignoring the duplicate`);
+
+            return false;
+        }
+
+        if (this.#questions.size >= 8) {
+            warn("controller", "too many open questions; ignoring the newest");
+
+            return false;
+        }
+
+        const timer = setTimeout(() => this.#expireQuestion(request.id, "expired"), this.#questionTtlMs);
+
+        // Do not hold the process open for a prompt nobody can answer.
+        (timer as { unref?: () => void }).unref?.();
+        this.#questions.set(request.id, { request, at: Date.now(), answers: new Map(), timer });
 
         // The user is being asked something: the mic must stay open, or a spoken
         // answer arrives after the idle gate has muted it.
@@ -936,7 +1003,7 @@ export class VoiceController implements VoiceControl {
         const spoken = this.#notice(() => questionNotice(request), true);
 
         if (!spoken) {
-            this.#questions.delete(request.id);
+            this.#expireQuestion(request.id, "voice-stopped");
         }
 
         return spoken;
@@ -944,15 +1011,23 @@ export class VoiceController implements VoiceControl {
 
     /** The provider resolved the prompt on screen (or gave up). */
     withdrawQuestion(id: string): boolean {
-        const had = this.#questions.delete(id);
+        const entry = this.#questions.get(id);
 
-        if (had) {
-            // Tell the model to drop it too, or its next sentence asks about a
-            // question that is already answered.
-            this.#notice(() => questionWithdrawnNotice(id), false);
+        if (!entry) {
+            return false;
         }
 
-        return had;
+        if (entry.timer) {
+            clearTimeout(entry.timer);
+        }
+
+        this.#questions.delete(id);
+
+        // Tell the model to drop it too, or its next sentence asks about a
+        // question that is already answered.
+        this.#notice(() => questionWithdrawnNotice(id), false);
+
+        return true;
     }
 
     /** Is a registered prompt waiting on this tool call? (suppresses the fallback notice) */
@@ -1003,7 +1078,7 @@ export class VoiceController implements VoiceControl {
         id: string,
         raw: unknown,
         cancel = false,
-    ): { status: "answered" | "cancelled" | "partial"; count: number; unknown: string[] } | undefined {
+    ): { status: "answered" | "cancelled" | "partial"; count: number; unknown: string[]; freeText?: boolean } | undefined {
         this.#liveQuestions();
 
         const entry = this.#questions.get(id);
@@ -1013,8 +1088,7 @@ export class VoiceController implements VoiceControl {
         }
 
         if (cancel) {
-            this.#questions.delete(id);
-            this.#onQuestionAnswer?.({ id, answers: [], cancelled: true });
+            this.#expireQuestion(id, "voice-stopped");
 
             return { status: "cancelled", count: 0, unknown: [] };
         }
@@ -1023,8 +1097,13 @@ export class VoiceController implements VoiceControl {
 
         if (answers.length === 0) {
             // Nothing usable: keep the prompt live so the model can try again rather
-            // than silently dropping a question the user is still waiting on.
-            return { status: "partial", count: 0, unknown };
+            // than silently dropping a question the user is still waiting on. The
+            // provider is told whether free text was even an option, so the retry
+            // prompt does not keep suggesting it to a choices-only question.
+            const blocked = entry.request.questions.filter((question) => !entry.answers.has(question.id));
+            const freeText = blocked.some((question) => question.allowOther !== false);
+
+            return { status: "partial", count: 0, unknown, freeText };
         }
 
         for (const answer of answers) {
@@ -1034,12 +1113,16 @@ export class VoiceController implements VoiceControl {
         const complete = entry.request.questions.every((question) => entry.answers.has(question.id));
 
         if (complete) {
+            if (entry.timer) {
+                clearTimeout(entry.timer);
+            }
+
             this.#questions.delete(id);
         }
 
         // Only the new answers are relayed: the provider merges them into its own state,
         // so re-sending earlier ones would be noise (and could re-ask a question).
-        this.#onQuestionAnswer?.({ id, answers, cancelled: false });
+        this.#relayAnswer({ id, answers, cancelled: false });
 
         return { status: complete ? "answered" : "partial", count: answers.length, unknown };
     }

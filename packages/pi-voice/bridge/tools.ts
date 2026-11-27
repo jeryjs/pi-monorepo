@@ -281,7 +281,9 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
 
             if (result.status === "partial" && result.count === 0) {
                 return respond({
-                    error: "no answer was usable for that question; ask again using one of the option values or the user's own words as text",
+                    error: result.freeText === false
+                        ? "nothing matched an option for that question and it accepts no free text; ask the user to pick one of the listed option values"
+                        : "no answer was usable for that question; ask again using one of the option values or the user's own words as text",
                     unknown: result.unknown,
                 });
             }

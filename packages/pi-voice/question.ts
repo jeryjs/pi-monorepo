@@ -19,6 +19,8 @@
  * by voice" for the ten-line provider snippet.
  */
 
+import { redactSecrets } from "./util.ts";
+
 export const VOICE_QUESTION_CHANNEL = "voice:question";
 export const VOICE_QUESTION_ACCEPTED_CHANNEL = "voice:question:accepted";
 export const VOICE_QUESTION_WITHDRAW_CHANNEL = "voice:question:withdraw";
@@ -70,6 +72,12 @@ export interface VoiceAnswerResult {
     id: string;
     answers: VoiceAnswerItem[];
     cancelled: boolean;
+    /**
+     * Why the prompt closed. `cancelled` alone could not tell "the user said handle
+     * it yourself" apart from "voice stopped" or "the prompt expired", so a provider
+     * waiting without a UI had no way to fall back to the keyboard immediately.
+     */
+    reason?: "cancelled" | "expired" | "voice-stopped" | "reload";
 }
 
 /** A question could not be parsed out of an event payload. */
@@ -84,25 +92,37 @@ function text(value: unknown, max = 400): string | undefined {
 }
 
 function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
-    if (!Array.isArray(value)) {
+    if (value === undefined || value === null) {
         return undefined;
+    }
+
+    if (!Array.isArray(value)) {
+        throw new Error("options must be an array");
+    }
+
+    // Rejecting the whole request is deliberate: silently keeping eleven of twelve
+    // options would let the model answer a prompt the provider no longer recognises.
+    if (value.length > 12) {
+        throw new Error(`too many options (${value.length} > 12)`);
     }
 
     const options: VoiceQuestionOption[] = [];
 
-    for (const entry of value.slice(0, 12)) {
+    for (const entry of value) {
         if (typeof entry === "string") {
             const label = text(entry, 120);
 
-            if (label) {
-                options.push({ value: label, label });
+            if (!label) {
+                throw new Error("empty option label");
             }
+
+            options.push({ value: label, label });
 
             continue;
         }
 
         if (!entry || typeof entry !== "object") {
-            continue;
+            throw new Error("option must be a string or an object");
         }
 
         const record = entry as Record<string, unknown>;
@@ -110,7 +130,7 @@ function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
         const optionValue = text(record.value, 120) ?? label;
 
         if (!label || !optionValue) {
-            continue;
+            throw new Error("option needs a label or a value");
         }
 
         const description = text(record.description, 200);
@@ -128,9 +148,9 @@ function parseOptions(value: unknown): VoiceQuestionOption[] | undefined {
 /**
  * Validate a payload from another extension.
  *
- * Everything on the bus is untrusted: a malformed request must be ignored, never
- * half-applied, and text that will be spoken is capped so one request cannot
- * monopolise the model's turn.
+ * Everything on the bus is untrusted: a malformed request is rejected as a whole,
+ * never half-applied. Dropping one bad question out of seven used to leave the
+ * provider waiting on a prompt voice believed it had fully answered.
  */
 export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | undefined {
     if (!value || typeof value !== "object") {
@@ -144,22 +164,35 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
         return undefined;
     }
 
-    const questions: VoiceQuestionItem[] = [];
+    if (record.questions.length === 0 || record.questions.length > 6) {
+        return undefined;
+    }
 
-    for (const entry of record.questions.slice(0, 6)) {
+    const questions: VoiceQuestionItem[] = [];
+    const seen = new Set<string>();
+
+    for (const entry of record.questions) {
         if (!entry || typeof entry !== "object") {
-            continue;
+            return undefined;
         }
 
         const question = entry as Record<string, unknown>;
         const prompt = text(question.prompt, 400) ?? text(question.question, 400);
         const questionId = text(question.id, 120) ?? `q${questions.length + 1}`;
 
-        if (!prompt) {
-            continue;
+        if (!prompt || seen.has(questionId)) {
+            return undefined;
         }
 
-        const options = parseOptions(question.options);
+        seen.add(questionId);
+
+        let options: VoiceQuestionOption[] | undefined;
+
+        try {
+            options = parseOptions(question.options);
+        } catch {
+            return undefined;
+        }
 
         questions.push({
             id: questionId,
@@ -170,10 +203,6 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
         });
     }
 
-    if (questions.length === 0) {
-        return undefined;
-    }
-
     return {
         id,
         ...(text(record.toolCallId, 120) ? { toolCallId: text(record.toolCallId, 120) as string } : {}),
@@ -182,44 +211,112 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
     };
 }
 
+/**
+ * Fold to lowercase and keep letters/digits from any script, so a Chinese, Greek or
+ * accented option is still matchable. Punctuation and spacing become single spaces.
+ */
 function normalize(value: string): string {
     return value
         .toLowerCase()
-        .replace(/[^a-z0-9 ]+/g, " ")
+        .replace(/[^\p{L}\p{N}]+/gu, " ")
         .replace(/\s+/g, " ")
         .trim();
 }
 
-/** Is `candidate` mentioned in `said`, as a word worth matching? */
+/**
+ * Is `candidate` mentioned in `said`, as a *word*?
+ *
+ * Matching is token-based, not substring-based: the old `includes` check let the
+ * option "cat" match "please concatenate the file", silently picking a choice the user
+ * never made. Both directions count, so a truncated utterance still lands ("postgres"
+ * against the label "postgres please").
+ */
 function contains(said: string, candidate: string): boolean {
-    if (candidate.length < 3) {
+    const saidTokens = said.split(" ").filter(Boolean);
+    const candidateTokens = candidate.split(" ").filter(Boolean);
+
+    // Single-character words ("a", "y") are articles or fragments in almost any
+    // sentence; they only match when they are the whole answer, which the exact pass
+    // has already checked by the time we get here.
+    if (candidateTokens.length === 0 || !candidateTokens.every((token) => token.length >= 2)) {
         return false;
     }
 
-    return said.includes(candidate) || (said.length >= 3 && candidate.includes(said));
+    const covered = (needle: string[], haystack: string[]): boolean =>
+        needle.every((token) => haystack.includes(token));
+
+    return covered(candidateTokens, saidTokens) || (saidTokens.length > 0 && covered(saidTokens, candidateTokens));
+}
+
+/** Same option offered twice (identical value and label) is not an ambiguity. */
+function distinct(options: VoiceQuestionOption[]): VoiceQuestionOption[] {
+    const seen = new Set<string>();
+
+    return options.filter((option) => {
+        const key = `${option.value}\u0000${option.label}`;
+
+        if (seen.has(key)) {
+            return false;
+        }
+
+        seen.add(key);
+
+        return true;
+    });
 }
 
 const WORD_NUMBERS: Record<string, number> = {
     one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12,
     first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8,
-    ninth: 9, tenth: 10,
+    ninth: 9, tenth: 10, eleventh: 11, twelfth: 12,
 };
+
+const CHOICE_FILLER = new Set(["option", "number", "choice", "the", "one", "and"]);
 
 /**
  * A spoken choice by number: "2", "option 2", "the second", "the second one", "number
- * two". People do not read option ids out loud, so this carries most of the load.
+ * two", "the second choice". People do not read option ids out loud, so this carries
+ * most of the load.
  */
 function choiceIndex(said: string): number | undefined {
-    const trimmed = said
-        .replace(/^(?:option|number|choice|the)\s+/, "")
-        .replace(/\s+one$/, "")
-        .trim();
+    const words = said.split(" ").filter(Boolean).filter((word) => !CHOICE_FILLER.has(word));
 
-    if (/^\d{1,2}$/.test(trimmed)) {
-        return Number(trimmed);
+    if (words.length !== 1) {
+        return undefined;
     }
 
-    return WORD_NUMBERS[trimmed];
+    const [word] = words;
+
+    return /^\d{1,2}$/.test(word) ? Number(word) : WORD_NUMBERS[word];
+}
+
+/** Affirmative/negative forms people actually say, mapped to the labels they mean. */
+const AFFIRMATIVE_WORDS = ["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "correct", "confirm", "affirmative", "absolutely", "go ahead", "do it", "proceed", "continue"];
+const NEGATIVE_WORDS = ["no", "nope", "nah", "negative", "deny", "cancel", "reject", "stop", "abort", "skip", "dont", "never"];
+const YES_LABELS = new Set(["yes", "y", "true", "ok", "okay", "confirm", "allow", "approve", "accept", "continue", "proceed", "go", "agree", "enable"]);
+const NO_LABELS = new Set(["no", "n", "false", "cancel", "deny", "reject", "stop", "abort", "skip", "disallow", "disable", "never", "nope"]);
+
+/** "yeah" against an option called "Yes", "no thanks" against "No". */
+function matchSynonym(said: string, options: VoiceQuestionOption[]): VoiceQuestionOption | undefined {
+    const words = new Set(said.split(" ").filter(Boolean));
+    // Whole words only: `said.includes("ok")` is true for "joke" and `includes("no")`
+    // for "nope"... which is why multi-word phrases get their own branch.
+    const mentions = (list: string[]): boolean =>
+        list.some((word) => (word.includes(" ") ? said.includes(word) : words.has(word)));
+    const saysYes = mentions(AFFIRMATIVE_WORDS);
+    const saysNo = mentions(NEGATIVE_WORDS);
+    const pick = (labels: Set<string>): VoiceQuestionOption | undefined => {
+        const hits = distinct(options.filter((option) => labels.has(normalize(option.value)) || labels.has(normalize(option.label))));
+
+        return hits.length === 1 ? hits[0] : undefined;
+    };
+
+    if (saysYes) {
+        return pick(YES_LABELS);
+    }
+
+    return saysNo ? pick(NO_LABELS) : undefined;
 }
 
 /**
@@ -227,20 +324,24 @@ function choiceIndex(said: string): number | undefined {
  *
  * The voice model is told to send the option's `value`, but a spoken answer arrives
  * as whatever the model transcribed: "2", "the second one", "use postgres", "Postgres
- * please". Exact id, label, 1-based index and a single unambiguous containment all
- * count; anything ambiguous is left to free text rather than guessing.
+ * please". Exact id, label, 1-based index, a single unambiguous mention and the common
+ * yes/no forms all count; anything ambiguous is left to free text rather than guessing.
  */
 export function matchOption(utterance: string, options: VoiceQuestionOption[]): VoiceQuestionOption | undefined {
     const said = normalize(utterance);
 
-    if (!said) {
+    if (!said || options.length === 0) {
         return undefined;
     }
 
-    for (const option of options) {
-        if (normalize(option.value) === said || normalize(option.label) === said) {
-            return option;
-        }
+    const exact = distinct(options.filter(
+        (option) => normalize(option.value) === said || normalize(option.label) === said,
+    ));
+
+    if (exact.length > 0) {
+        // Two options carrying the same wording is ambiguous: refusing to guess is the
+        // only safe answer ("delete" against two "Delete" options).
+        return exact.length === 1 ? exact[0] : undefined;
     }
 
     const index = choiceIndex(said);
@@ -249,17 +350,20 @@ export function matchOption(utterance: string, options: VoiceQuestionOption[]): 
         return options[index - 1];
     }
 
-    // One option mentioned by name: "use postgres", "postgres please". Containment only
-    // for words long enough to mean something: a one-letter option value ("a", "y")
-    // is a substring of almost every sentence and matched everything.
-    const hits = options.filter((option) => {
-        const value = normalize(option.value);
-        const label = normalize(option.label);
+    // One option mentioned by name: "use postgres", "postgres please".
+    const mentioned = distinct(options.filter((option) =>
+        contains(said, normalize(option.value)) || contains(said, normalize(option.label)),
+    ));
 
-        return contains(said, value) || contains(said, label);
-    });
+    if (mentioned.length === 1) {
+        return mentioned[0];
+    }
 
-    return hits.length === 1 ? hits[0] : undefined;
+    if (mentioned.length === 0) {
+        return matchSynonym(said, options);
+    }
+
+    return undefined;
 }
 
 /**
@@ -339,12 +443,21 @@ export function resolveAnswers(
     return { answers, unknown };
 }
 
+/**
+ * The option list as it is read to the model.
+ *
+ * An option whose *value* is credential-shaped is shown by number and label only: the
+ * notice is transmitted and spoken, and the model can still answer by number (the
+ * matcher resolves "2"/"the second one" to the option).
+ */
 function optionLine(options: VoiceQuestionOption[]): string {
     return options
         .map((option, index) => {
             const detail = option.description ? ` — ${option.description}` : "";
+            const safeValue = redactSecrets(option.value);
+            const shown = safeValue === option.value ? ` value=${JSON.stringify(option.value)}` : "";
 
-            return `${index + 1}) value=${JSON.stringify(option.value)} ${option.label}${detail}`;
+            return `${index + 1})${shown} ${option.label}${detail}`;
         })
         .join("; ");
 }
@@ -355,12 +468,16 @@ function optionLine(options: VoiceQuestionOption[]): string {
  * It carries the ids and the exact argument shape, because the model has to answer
  * with a tool call, and it says what to do when the user answers in their own words
  * (`text`) instead of naming an option.
+ *
+ * Everything spoken is redacted first: an option value or prompt can be a command line
+ * or a header, and this text is transmitted to Gemini and read out loud.
  */
 export function questionNotice(request: VoiceQuestionRequest): string {
     const lines = [
         `[Pi is waiting for the user's answer] id=${request.id}`
             + (request.title ? ` (${request.title})` : ""),
     ];
+    let anyFreeText = false;
 
     for (const question of request.questions) {
         const options = question.options ?? [];
@@ -374,29 +491,44 @@ export function questionNotice(request: VoiceQuestionRequest): string {
         } else {
             lines.push("  no fixed options: answer with text");
         }
+
+        anyFreeText = anyFreeText || question.allowOther !== false;
     }
 
     const example = request.questions[0];
     const sample = example?.options?.[0];
+    // With no options the example must use `text`: a model copying the literal
+    // placeholder `"<option value>"` recorded it as the user's answer. A redacted
+    // value is replaced by its number for the same reason.
+    const sampleValue = !sample
+        ? undefined
+        : redactSecrets(sample.value) === sample.value
+            ? sample.value
+            : "1";
+    const exampleArg = sampleValue !== undefined
+        ? `"value": ${JSON.stringify(sampleValue)}`
+        : "\"text\": \"<the user's own words>\"";
 
     lines.push(
         "",
         `Ask the user in one short question, reading the choices briefly. Then call voice_answer with`
             + ` {"id": ${JSON.stringify(request.id)}, "answers": [{"questionId": ${JSON.stringify(example?.id ?? "q1")},`
-            + ` "value": ${JSON.stringify(sample?.value ?? "<option value>")}}]}`
-            + ` — use "text" instead of "value" when the user answers in their own words,`
+            + ` ${exampleArg}}]}`
+            + (anyFreeText
+                ? ` — use "text" instead of "value" when the user answers in their own words,`
+                : " — a question with no free text accepts only one of the listed option values,")
             + ` and "cancel": true if they would rather answer on screen.`,
         request.questions.length > 1
             ? `Every question needs an answer: ${request.questions.map((question) => question.id).join(", ")}.`
             : "Do not repeat the question once the user has answered.",
     );
 
-    return lines.join("\n");
+    return redactSecrets(lines.join("\n"));
 }
 
 /** The note that retires a prompt (answered on screen, or expired). */
 export function questionWithdrawnNotice(id: string): string {
-    return `[Answer no longer needed] id=${id}: the user already answered on screen. Drop that question; do not ask it again.`;
+    return redactSecrets(`[Answer no longer needed] id=${id}: the user already answered on screen. Drop that question; do not ask it again.`);
 }
 
 /**
@@ -416,7 +548,7 @@ export function waitingForInputNotice(toolName: string, prompts: string[]): stri
             + " to tell you — they must answer with the keyboard.",
     ];
 
-    return lines.join("\n");
+    return redactSecrets(lines.join("\n"));
 }
 
 /**

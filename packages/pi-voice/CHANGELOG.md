@@ -5,6 +5,67 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-12-02
+
+The independent review of 0.8.0 found a credential leak and several paths that could
+wedge a real session. Each is fixed with a regression test where the harness can reach it.
+
+### Security
+
+- **The question notice is redacted.** A prompt, label or option value can quote a
+  command line or a header (`GITHUB_TOKEN=`, `Authorization: Bearer`, `sk-`, `AIza`),
+  and the notice is transmitted to Gemini and read out loud. It now goes through the
+  same `redactSecrets()` boundary the spoken approval uses, as does the read-only
+  fallback notice.
+
+### Fixed
+
+- **A prompt expires on its own clock.** Expiry was evaluated only inside the idle tick,
+  which runs after `idleSleepMs` (up to an hour), so an abandoned question held the
+  microphone open and burned Live quota long past the advertised five minutes. Every
+  prompt now carries its own timer, cleared on answer, withdrawal, reload and teardown.
+- **A request that cannot be represented in full is rejected whole.** The parser used to
+  keep the first six questions, the first twelve options and skip invalid entries, then
+  report the prompt complete after voice answered the survivors — while the provider
+  still waited on the rest. Duplicate ids, excess counts and unusable options now reject
+  the request, and `voice:question:accepted` says so (`rejected: true`).
+- **A closed prompt tells the provider.** `expired`, `voice-stopped` and `reload`
+  previously cleared the registry silently, leaving a headless provider waiting out its
+  full timeout. They now arrive as `voice:answer` with `cancelled: true` and a `reason`,
+  and the model is told to drop the question.
+- **`/reload` no longer strands a prompt.** The controller survives a reload but its
+  answer callback captured the old extension API object, which refuses events once
+  invalidated; the answer was lost and the model saw a dispatch error. The callback now
+  reads the current API, and `rebind()` closes pending prompts (which the changelog for
+  0.8.0 already claimed).
+- **Duplicate live ids are refused instead of overwriting.** Answers match on the id
+  alone, so two providers both using a natural id like `"q1"` could receive each other's
+  answer.
+- **Matching is word-based, not substring-based.** The old containment check let the
+  option `cat` match “please concatenate the file”, and two options labelled `Delete`
+  silently resolved to the first. Matching is now token-based, refuses ambiguous
+  matches, keeps non-Latin scripts, understands “the second choice” and ordinals through
+  twelve, and maps the plain affirmatives and negatives people actually say (“yeah”
+  against `Yes`, “no thanks” against `No`). Single-character options no longer match
+  every sentence, without losing short answers like “No”.
+- **The rejected-answer message respects the question.** A choices-only question no
+  longer suggests free text on retry, and a question with no options gets a `text`
+  example instead of the literal `"<option value>"` placeholder a model could record as
+  the user's answer.
+- **The fallback notice is cancelled when the tool finishes.** The 250 ms delay could
+  announce “Pi is blocked waiting for an answer” moments after a fast questionnaire had
+  already returned.
+
+### Adopter (questionnaire.ts)
+
+- Subscribes to `voice:question:accepted` and fails fast in a headless session when
+  voice refuses (`spoken: false`) instead of waiting five minutes.
+- Honours the tool `AbortSignal`: aborting the turn closes the prompt and resolves the
+  tool instead of keeping Pi blocked.
+- Validates a `voice:answer` against the options it actually offered (and refuses free
+  text when the question does not allow it), so another extension cannot inject an
+  option that was never presented.
+
 ## [0.8.0] - 2026-12-01
 
 Voice can now answer Pi's questions. Until this release, a tool that blocked on a human

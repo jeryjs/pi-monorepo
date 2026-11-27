@@ -97,6 +97,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     let config = loadVoiceConfig();
     let context: ExtensionContext | undefined;
     let controller: VoiceController | undefined;
+    // The extension API object is replaced on `/reload` (and the old one rejects
+    // events), while the controller survives; the answer callback reads this.
+    let livePi = pi;
 
     /**
      * Apply the debug switch: the config file *or* the environment.
@@ -169,9 +172,15 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     }
                 },
                 // A spoken answer goes back to whichever extension asked the question,
-                // over the shared event bus (see question.ts).
+                // over the shared event bus (see question.ts). `livePi` and not `pi`:
+                // the controller survives `/reload`, whose new API object rejects events
+                // emitted through the old one.
                 onQuestionAnswer: (result) => {
-                    pi.events.emit(VOICE_ANSWER_CHANNEL, result);
+                    try {
+                        livePi.events.emit(VOICE_ANSWER_CHANNEL, result);
+                    } catch (error) {
+                        warn("extension", `could not relay an answer: ${String(error)}`);
+                    }
                 },
             });
             // `pi_stop` must really abort the running turn; the context is replaced on
@@ -327,6 +336,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         // opening a duplicate.
         if (existing?.running && event.reason === "reload") {
             controller = existing;
+            // Before rebind: it closes the pending prompts through the answer callback
+            // above, which reads this variable.
+            livePi = pi;
             controller.rebind(pi, ctx);
 
             // `/reload` deliberately keeps the running session, so transport-level
@@ -397,13 +409,29 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         if (!request) {
             warn("extension", "ignored a malformed voice:question payload");
 
+            // The provider is blocked on something nobody can answer: tell it, when the
+            // id survived parsing, so a headless one fails instead of waiting.
+            const id = (payload as { id?: unknown } | undefined)?.id;
+
+            if (typeof id === "string" && id) {
+                try {
+                    livePi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id, spoken: false, rejected: true });
+                } catch {
+                    // Nothing listening; the provider keeps its own UI.
+                }
+            }
+
             return;
         }
 
         const spoken = controller?.presentQuestion(request) ?? false;
 
         // Let a provider that is waiting without a UI fail fast instead of timing out.
-        pi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id: request.id, spoken });
+        try {
+            livePi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id: request.id, spoken });
+        } catch {
+            // Nothing listening; the provider keeps its own UI.
+        }
     });
 
     pi.events.on(VOICE_QUESTION_WITHDRAW_CHANNEL, (payload) => {
@@ -420,20 +448,45 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     // moment after this event, so the notice is delayed just enough to be skipped when
     // the protocol already covered the same tool call. Without this, an unadopted
     // questionnaire left the voice model completely silent while Pi waited.
+    const activeToolCalls = new Set<string>();
+
     pi.on("tool_execution_start", (event) => {
         const detail = event as { toolName?: string; toolCallId?: string; args?: unknown };
         const toolName = detail.toolName ?? "";
         const prompts = questionsFromArgs(detail.args);
+        const toolCallId = detail.toolCallId;
 
         if (!prompts || !controller?.running) {
             return;
         }
 
+        if (toolCallId) {
+            if (activeToolCalls.size > 64) {
+                activeToolCalls.clear();
+            }
+
+            activeToolCalls.add(toolCallId);
+        }
+
         setTimeout(() => {
-            if (controller?.running && !controller.hasQuestionForToolCall(detail.toolCallId)) {
-                controller.announceWaitingForInput(toolName, prompts, detail.toolCallId);
+            // A tool that returned inside the delay is not waiting on anything; the
+            // timer used to announce "Pi is blocked" moments after it finished.
+            if (toolCallId && !activeToolCalls.has(toolCallId)) {
+                return;
+            }
+
+            if (controller?.running && !controller.hasQuestionForToolCall(toolCallId)) {
+                controller.announceWaitingForInput(toolName, prompts, toolCallId);
             }
         }, 250);
+    });
+
+    pi.on("tool_execution_end", (event) => {
+        const toolCallId = (event as { toolCallId?: string }).toolCallId;
+
+        if (toolCallId) {
+            activeToolCalls.delete(toolCallId);
+        }
     });
 
     // Spoken approval for risky shell commands.

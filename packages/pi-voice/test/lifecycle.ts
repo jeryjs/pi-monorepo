@@ -1095,6 +1095,71 @@ assert.equal(asker.pendingQuestions, 0, "teardown drops prompts that can no long
 ok("stopping voice drops pending prompts");
 
 // ---------------------------------------------------------------------------
+// prompt lifetime: expired, refused and abandoned prompts
+// ---------------------------------------------------------------------------
+
+const late: VoiceAnswerResult[] = [];
+const ttlCtl = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false }), {
+    createAudio: (options) => new SilentAudio(options),
+    onQuestionAnswer: (result) => late.push(result),
+    questionTtlMs: 300,
+});
+
+await ttlCtl.start();
+await until(() => ttlCtl.liveState === "live", "ttl: live");
+
+assert.equal(ttlCtl.presentQuestion({ id: "t-1", questions: [{ id: "a", prompt: "Are you still there?" }] }), true);
+assert.equal(ttlCtl.pendingQuestions, 1);
+// Expiry used to be evaluated only inside the idle tick, so a prompt lived as long as
+// idleSleepMs (up to an hour) and held the microphone open the whole time.
+await until(() => late.length === 1, "prompt expired on its own clock", 6000);
+assert.equal(late[0]?.id, "t-1");
+assert.equal(late[0]?.cancelled, true);
+assert.equal(late[0]?.reason, "expired");
+assert.equal(ttlCtl.pendingQuestions, 0, "the expired prompt is retired");
+ok("an unanswered prompt expires on its own clock and tells the provider");
+
+// Two providers using the same natural id ("q1") must not overwrite each other:
+// answers are matched by id alone, so a duplicate would cross the wires.
+assert.equal(ttlCtl.presentQuestion({ id: "dup", questions: [{ id: "a", prompt: "First" }] }), true);
+assert.equal(
+    ttlCtl.presentQuestion({ id: "dup", questions: [{ id: "a", prompt: "Second" }] }),
+    false,
+    "the same id cannot be open twice",
+);
+assert.equal(ttlCtl.withdrawQuestion("dup"), true);
+ok("reusing a live prompt id is refused instead of overwriting the first one");
+
+// Stopping voice used to clear the registry silently, leaving a headless provider
+// waiting out its full timeout for an answer that could never arrive.
+assert.equal(ttlCtl.presentQuestion({ id: "s-1", questions: [{ id: "a", prompt: "Still needed?" }] }), true);
+await ttlCtl.stop();
+assert.equal(late.at(-1)?.id, "s-1");
+assert.equal(late.at(-1)?.reason, "voice-stopped");
+assert.equal(late.at(-1)?.cancelled, true);
+ok("stopping voice closes pending prompts with a reason instead of stranding the provider");
+
+// `/reload` keeps the socket but disposes the extension API object the answer callback
+// captured; a prompt left registered would be answerable only through that dead object.
+const reloadCtl = new VoiceController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false }), {
+    createAudio: (options) => new SilentAudio(options),
+    onQuestionAnswer: () => {
+        throw new Error("the extension API object was replaced by /reload");
+    },
+    questionTtlMs: 60_000,
+});
+
+await reloadCtl.start();
+await until(() => reloadCtl.liveState === "live", "reload: live");
+assert.equal(reloadCtl.presentQuestion({ id: "r-1", questions: [{ id: "a", prompt: "Still needed?" }] }), true);
+
+reloadCtl.rebind(makePi().api, makeCtx());
+assert.equal(reloadCtl.pendingQuestions, 0, "reload does not leave a prompt answerable by the new socket");
+ok("a reload closes pending prompts instead of keeping a dead provider's id");
+
+await reloadCtl.stop();
+
+// ---------------------------------------------------------------------------
 // done
 // ---------------------------------------------------------------------------
 

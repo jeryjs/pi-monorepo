@@ -389,8 +389,16 @@ extension can offer a prompt to voice without depending on pi-voice** (see
 provider  ->  voice:question            { id, toolCallId?, title?, questions[] }
 voice     ->  voice:question:accepted   { id, spoken }        // false: answer on screen
 provider  ->  voice:question:withdraw   { id }                // answered on screen
-voice     ->  voice:answer              { id, answers[], cancelled }
+voice     ->  voice:answer              { id, answers[], cancelled, reason? }
 ```
+
+`spoken: false` comes back immediately when voice is off or the socket cannot speak, and
+`rejected: true` is added when the request itself was unusable (more than six questions,
+too many options, duplicate ids) — a headless provider can then fail instead of waiting.
+A prompt that closes without an answer (it expired, voice stopped, `/reload`) arrives as
+`voice:answer` with `cancelled: true` and `reason: "expired" | "voice-stopped" |
+"reload"`, so the provider is never left blocked on an id nobody can answer. Ids must be
+unique while live: a duplicate is refused, because answers match on the id alone.
 
 A provider never blocks on voice: it shows its own UI and resolves it from whichever
 channel gets there first. If pi-voice is off, nothing happens and the keyboard still
@@ -613,7 +621,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.8.0** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.8.1** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -631,7 +639,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (94) + lifecycle (47) + sherpa (13)
+npm test   # smoke (97) + lifecycle (51) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config
