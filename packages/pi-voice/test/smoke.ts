@@ -1393,6 +1393,16 @@ test("a questionnaire-shaped tool gets a read-only notice, not a fake answer pat
         "a throwing option accessor is skipped, not propagated",
     );
 
+    const hostileQuestion: Record<string, unknown> = {};
+
+    Object.defineProperty(hostileQuestion, "prompt", { get() { throw new Error("prompt getter"); } });
+
+    assert.deepEqual(
+        questionsFromArgs({ questions: [hostileQuestion, { prompt: "Second?" }] }),
+        ["Second?"],
+        "a throwing question accessor is skipped, not propagated",
+    );
+
     const notice = waitingForInputNotice("ask_user_questions", ["Which db? (options: A, B)"]);
 
     assert.match(notice, /ask_user_questions/);

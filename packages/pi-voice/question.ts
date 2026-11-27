@@ -611,6 +611,16 @@ export function waitingForInputNotice(toolName: string, prompts: string[]): stri
  * registered question covers the same tool call.
  */
 export function questionsFromArgs(args: unknown): string[] | undefined {
+    try {
+        return questionNotices(args);
+    } catch {
+        // A hostile args object (a revoked proxy, a throwing accessor) must not escape the
+        // event handler: a read-only notice is skipped, never thrown.
+        return undefined;
+    }
+}
+
+function questionNotices(args: unknown): string[] | undefined {
     if (!args || typeof args !== "object") {
         return undefined;
     }
@@ -625,25 +635,29 @@ export function questionsFromArgs(args: unknown): string[] | undefined {
     const prompts: string[] = [];
 
     for (const entry of list.slice(0, 4)) {
-        if (!entry || typeof entry !== "object") {
-            continue;
+        try {
+            if (!entry || typeof entry !== "object") {
+                continue;
+            }
+
+            const question = entry as Record<string, unknown>;
+            const prompt = text(question.prompt, 240) ?? text(question.question, 240);
+
+            if (!prompt) {
+                continue;
+            }
+
+            // Best effort: a read-only announcement must never throw, and one unusable option
+            // must not hide the good ones. This is a lenient label-only scan, not the strict
+            // parser — the notice is display text and cannot be answered anyway.
+            const labels = optionLabels(question.options);
+
+            const options = labels.length > 0 ? ` (options: ${labels.join(", ")})` : "";
+
+            prompts.push(`${prompt}${options}`);
+        } catch {
+            // A malformed question is skipped, the rest are still announced.
         }
-
-        const question = entry as Record<string, unknown>;
-        const prompt = text(question.prompt, 240) ?? text(question.question, 240);
-
-        if (!prompt) {
-            continue;
-        }
-
-        // Best effort: a read-only announcement must never throw, and one unusable option
-        // must not hide the good ones. This is a lenient label-only scan, not the strict
-        // parser — the notice is display text and cannot be answered anyway.
-        const labels = optionLabels(question.options);
-
-        const options = labels.length > 0 ? ` (options: ${labels.join(", ")})` : "";
-
-        prompts.push(`${prompt}${options}`);
     }
 
     return prompts.length > 0 ? prompts : undefined;
