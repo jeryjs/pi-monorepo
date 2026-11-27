@@ -18,6 +18,16 @@ import { micVerdict, gainToFloat, playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isDormantClose, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { editDistance, matchWakePhrase } from "../audio/wake-match.ts";
 import { clearWarnings, debugFromEnv, debugState, log, recentWarnings, redactSecrets, setDebug, warn } from "../util.ts";
+import {
+    matchOption,
+    parseQuestionRequest,
+    questionNotice,
+    questionWithdrawnNotice,
+    questionsFromArgs,
+    resolveAnswers,
+    waitingForInputNotice,
+} from "../question.ts";
+import { dispatchTool } from "../bridge/tools.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
 import {
@@ -1183,6 +1193,174 @@ test("inputGain 0 mutes the microphone instead of meaning 'unset'", () => {
     assert.equal(gainToFloat(samples, 2)[0], 1, "gain above unity clips instead of wrapping");
     assert.equal(gainToFloat(samples, 1)[1], -0.5);
     assert.equal(gainToFloat(samples, Number.NaN)[0], 0.5, "a broken value falls back to unity");
+});
+
+console.log("voice questions (the voice:question protocol)");
+
+test("a malformed protocol payload is rejected instead of half-applied", () => {
+    // Everything on pi.events comes from another extension: a bad payload must be
+    // ignored, and spoken text is capped so one request cannot flood a turn.
+    assert.equal(parseQuestionRequest(undefined), undefined);
+    assert.equal(parseQuestionRequest({ questions: [{ prompt: "x" }] }), undefined, "no id");
+    assert.equal(parseQuestionRequest({ id: "a" }), undefined, "no questions");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ label: "no prompt" }] }), undefined);
+
+    const request = parseQuestionRequest({
+        id: "req-1",
+        toolCallId: "tc-9",
+        title: "Pi needs an answer",
+        questions: [
+            { id: "c1", prompt: "Which database?", options: ["Postgres", { label: "SQLite", description: "a file" }] },
+            { prompt: "Anything else?" },
+        ],
+    });
+
+    assert.equal(request?.id, "req-1");
+    assert.equal(request?.toolCallId, "tc-9");
+    assert.equal(request?.questions.length, 2);
+    assert.equal(request?.questions[0]?.options?.[0]?.value, "Postgres", "a bare string option works");
+    assert.equal(request?.questions[0]?.allowOther, true, "free text allowed unless refused");
+    assert.equal(request?.questions[1]?.id, "q2", "a missing question id gets a stable one");
+    assert.equal(request?.questions[1]?.options, undefined, "no options means free-form");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "x", allowOther: false }] })?.questions[0]?.allowOther, false);
+});
+
+test("options match by value, label, number or a single mention", () => {
+    const options = [
+        { value: "postgres", label: "Postgres" },
+        { value: "sqlite", label: "SQLite" },
+        { value: "mysql", label: "MySQL" },
+    ];
+
+    assert.equal(matchOption("postgres", options)?.value, "postgres");
+    assert.equal(matchOption("Postgres", options)?.value, "postgres");
+    assert.equal(matchOption("2", options)?.value, "sqlite");
+    assert.equal(matchOption("option 3", options)?.value, "mysql");
+    assert.equal(matchOption("use postgres please", options)?.value, "postgres");
+    assert.equal(matchOption("sqlite, I think", options)?.value, "sqlite");
+    assert.equal(matchOption("9", options), undefined, "out of range");
+    assert.equal(matchOption("the second one", options)?.value, "sqlite", "spoken ordinals work");
+    assert.equal(matchOption("number two", options)?.value, "sqlite");
+    assert.equal(matchOption("whatever you think", options), undefined, "nothing to guess from");
+    assert.equal(matchOption("postgres or sqlite", options), undefined, "ambiguous: leave it to the model");
+    assert.equal(matchOption("sql or sqlite", options)?.value, "sqlite", "a single mention still resolves when the other word is not an option");
+});
+
+test("a spoken answer is resolved into the provider's own terms", () => {
+    const request = parseQuestionRequest({
+        id: "req-2",
+        questions: [
+            {
+                id: "db",
+                prompt: "Which database?",
+                options: [{ value: "postgres", label: "Postgres" }, { value: "sqlite", label: "SQLite" }],
+            },
+            { id: "note", prompt: "Anything to add?" },
+        ],
+    })!;
+
+    // Single-question shorthand: no questionId needed when there is only one.
+    const solo = resolveAnswers([{ id: "only", prompt: "Pick", options: [{ value: "a", label: "A" }] }], [{ value: "a" }]);
+
+    assert.equal(solo.answers[0]?.option?.value, "a");
+
+    const spoken = resolveAnswers(request.questions, [
+        { questionId: "db", value: "the second one" },
+        { questionId: "note", text: "ship it Friday" },
+    ]);
+
+    assert.equal(spoken.answers.length, 2);
+    assert.equal(spoken.answers[0]?.option?.value, "sqlite", "'the second one' is the second option");
+    assert.equal(spoken.answers[1]?.questionId, "note");
+    assert.equal(spoken.answers[1]?.text, "ship it Friday");
+    assert.equal(spoken.answers[1]?.said, "ship it Friday");
+
+    // Free text is allowed on an open question, so an unmatched utterance stays text and
+    // is never presented to the provider as if the user had picked an option.
+    const freeform = resolveAnswers(request.questions, [{ questionId: "db", value: "maybe later" }]);
+
+    assert.equal(freeform.answers[0]?.option, undefined);
+    assert.equal(freeform.answers[0]?.text, "maybe later");
+    assert.deepEqual(freeform.unknown, []);
+
+    const chosen = resolveAnswers(request.questions, [{ questionId: "db", value: "sqlite" }]);
+
+    assert.equal(chosen.answers[0]?.option?.label, "SQLite");
+    assert.equal(chosen.answers[0]?.text, undefined, "an option never becomes free text");
+
+    // Choices-only question: an unmatched utterance must not be smuggled through as text.
+    const closed = resolveAnswers(
+        [{ id: "c", prompt: "Pick", options: [{ value: "a", label: "A" }], allowOther: false }],
+        [{ value: "maybe later" }],
+    );
+
+    assert.deepEqual(closed.answers, []);
+    assert.equal(closed.unknown.length, 1);
+
+    // Unknown question id with several questions: ignored, and reported.
+    const stray = resolveAnswers(request.questions, [{ questionId: "nope", value: "x" }]);
+
+    assert.deepEqual(stray.answers, []);
+    assert.deepEqual(stray.unknown, ["nope"]);
+
+    // One answer per question, even if the model repeats itself.
+    const twice = resolveAnswers(request.questions, [
+        { questionId: "db", value: "postgres" },
+        { questionId: "db", value: "sqlite" },
+    ]);
+
+    assert.equal(twice.answers.length, 1);
+    assert.equal(twice.answers[0]?.option?.value, "postgres");
+});
+
+test("the notice carries ids, options and the exact call to make", () => {
+    const request = parseQuestionRequest({
+        id: "req-3",
+        title: "Pi needs an answer",
+        questions: [
+            { id: "db", label: "Scope", prompt: "Which database?", options: [{ value: "postgres", label: "Postgres", description: "relational" }] },
+        ],
+    })!;
+    const notice = questionNotice(request);
+
+    assert.match(notice, /id=req-3/);
+    assert.match(notice, /questionId=db/);
+    assert.match(notice, /Which database\?/);
+    assert.match(notice, /value="postgres"/);
+    assert.match(notice, /voice_answer/);
+    assert.match(notice, /"id": "req-3"/);
+    assert.match(notice, /text/);
+
+    const freeform = questionNotice(parseQuestionRequest({ id: "r", questions: [{ id: "q", prompt: "Name?" }] })!);
+
+    assert.match(freeform, /no fixed options/);
+
+    const closed = questionNotice(
+        parseQuestionRequest({ id: "r", questions: [{ id: "q", prompt: "Pick", options: ["A"], allowOther: false }] })!,
+    );
+
+    assert.match(closed, /no free text/);
+});
+
+test("a questionnaire-shaped tool gets a read-only notice, not a fake answer path", () => {
+    // The fallback for tools that never adopted the protocol: say where the question
+    // is, and say clearly that voice cannot answer it.
+    assert.deepEqual(
+        questionsFromArgs({ questions: [{ prompt: "Which db?", options: [{ value: "a", label: "A" }, "B"] }] }),
+        ['Which db? (options: A, B)'],
+    );
+
+    assert.equal(questionsFromArgs({ questions: [] }), undefined);
+    assert.equal(questionsFromArgs({ command: "ls" }), undefined, "a shell command is not a questionnaire");
+    assert.equal(questionsFromArgs("text"), undefined);
+    assert.equal(questionsFromArgs({ questions: [{ options: ["A"] }] }), undefined, "no prompt, no guess");
+
+    const notice = waitingForInputNotice("ask_user_questions", ["Which db? (options: A, B)"]);
+
+    assert.match(notice, /ask_user_questions/);
+    assert.match(notice, /Which db\?/);
+    assert.match(notice, /cannot pass an answer back/);
+    assert.match(questionWithdrawnNotice("req-3"), /req-3/);
 });
 
 console.log("bridge");

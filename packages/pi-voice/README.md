@@ -371,7 +371,59 @@ Function declarations are filtered per model, so a sync-only model never gets
 | `pi_stop` | interrupt Pi (autonomy ≥ steer) |
 | `voice_sleep` / `voice_always_on` | control the listener |
 | `voice_approve` | answer a pending approval |
+| `voice_answer` | answer a question Pi is blocked on (an option, or the user's own words) |
 | `voice_note` | save a note into the session |
+
+### Answering Pi's questions by voice
+
+When Pi needs a decision — `ask_user_questions`, a questionnaire, any tool that blocks
+on a human — voice offers it out loud and takes the answer, by option or in the user's
+own words. The mic also stays open for it: the next thing said is the answer, so there
+is no wake phrase in the middle of answering.
+
+The channel is a protocol on `pi.events`, not an API call between packages, so **any
+extension can offer a prompt to voice without depending on pi-voice** (see
+`question.ts` for the reference implementation and the payload types):
+
+```text
+provider  ->  voice:question            { id, toolCallId?, title?, questions[] }
+voice     ->  voice:question:accepted   { id, spoken }        // false: answer on screen
+provider  ->  voice:question:withdraw   { id }                // answered on screen
+voice     ->  voice:answer              { id, answers[], cancelled }
+```
+
+A provider never blocks on voice: it shows its own UI and resolves it from whichever
+channel gets there first. If pi-voice is off, nothing happens and the keyboard still
+works. The whole integration is about ten lines:
+
+```ts
+const id = toolCallId;
+const off = pi.events.on("voice:answer", (payload) => {
+    const answer = payload as { id: string; answers: { questionId: string; option?: { value: string }; text?: string }[] };
+
+    if (answer.id !== id) return;
+    for (const entry of answer.answers) {
+        answers.set(entry.questionId, entry.option?.value ?? entry.text ?? "");
+    }
+    if (everyQuestionAnswered()) done();
+});
+
+pi.events.emit("voice:question", {
+    id,
+    toolCallId,
+    questions: questions.map((q) => ({ id: q.id, prompt: q.prompt, options: q.options, allowOther: true })),
+});
+// on screen answer or teardown:
+off();
+pi.events.emit("voice:question:withdraw", { id });
+```
+
+Matching is done on the voice side, so the provider only ever receives an option it
+offered: the model's `value` is resolved against the option ids, labels, 1-based
+numbers and spoken ordinals (“the second one”), and anything ambiguous comes back as
+`text` only when the question allows free text. A tool that blocks on input but never
+adopts the protocol is still not silent — voice announces that Pi is waiting and reads
+the question, then says plainly that it must be answered on screen.
 
 ### Everything is Pi's job (no refusals)
 
@@ -561,7 +613,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.7.2** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.8.0** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -579,7 +631,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (89) + lifecycle (39) + sherpa (13)
+npm test   # smoke (94) + lifecycle (47) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

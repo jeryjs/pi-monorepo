@@ -74,6 +74,12 @@ export function buildSystemInstruction(input: PromptInput): string {
         );
     }
 
+    lines.push(
+        "- When Pi is waiting on a question for the user, you are given its id and the choices: ask it in one",
+        "  short question, read the choices briefly, then call voice_answer with that id. If they answer in",
+        "  their own words, send it as text instead of forcing one of the choices.",
+    );
+
     if (config.announce) {
         lines.push("- Pi will tell you when long work finishes or fails; report it briefly without being asked, once.");
     }

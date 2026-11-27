@@ -17,6 +17,14 @@ import { liveModelIds } from "./capabilities.ts";
 import { buildSystemInstruction } from "./bridge/prompt.ts";
 import { functionDeclarations } from "./bridge/tools.ts";
 import { createSetupBuilder } from "./live/setup.ts";
+import {
+    VOICE_ANSWER_CHANNEL,
+    VOICE_QUESTION_ACCEPTED_CHANNEL,
+    VOICE_QUESTION_CHANNEL,
+    VOICE_QUESTION_WITHDRAW_CHANNEL,
+    parseQuestionRequest,
+    questionsFromArgs,
+} from "./question.ts";
 import { NativeTransport } from "./audio/native.ts";
 import { debugFromEnv, redactSecrets, setDebug, warn } from "./util.ts";
 
@@ -159,6 +167,11 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                     } catch (error) {
                         warn("config", `could not save pi-voice.json: ${String(error)}`);
                     }
+                },
+                // A spoken answer goes back to whichever extension asked the question,
+                // over the shared event bus (see question.ts).
+                onQuestionAnswer: (result) => {
+                    pi.events.emit(VOICE_ANSWER_CHANNEL, result);
                 },
             });
             // `pi_stop` must really abort the running turn; the context is replaced on
@@ -371,6 +384,56 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
 
         await stop();
+    });
+
+    // Spoken answers for questions other extensions are blocked on.
+    //
+    // The protocol lives on `pi.events`, so any extension can offer a prompt to voice
+    // without importing this package (see question.ts and the README). Registration
+    // happens once, outside start(), because the controller comes and goes.
+    pi.events.on(VOICE_QUESTION_CHANNEL, (payload) => {
+        const request = parseQuestionRequest(payload);
+
+        if (!request) {
+            warn("extension", "ignored a malformed voice:question payload");
+
+            return;
+        }
+
+        const spoken = controller?.presentQuestion(request) ?? false;
+
+        // Let a provider that is waiting without a UI fail fast instead of timing out.
+        pi.events.emit(VOICE_QUESTION_ACCEPTED_CHANNEL, { id: request.id, spoken });
+    });
+
+    pi.events.on(VOICE_QUESTION_WITHDRAW_CHANNEL, (payload) => {
+        const id = (payload as { id?: unknown } | undefined)?.id;
+
+        if (typeof id === "string" && id) {
+            controller?.withdrawQuestion(id);
+        }
+    });
+
+    // Fallback for a tool that blocks on a human but never offered itself to voice.
+    //
+    // The provider emits its own `voice:question` from inside execute(), which runs a
+    // moment after this event, so the notice is delayed just enough to be skipped when
+    // the protocol already covered the same tool call. Without this, an unadopted
+    // questionnaire left the voice model completely silent while Pi waited.
+    pi.on("tool_execution_start", (event) => {
+        const detail = event as { toolName?: string; toolCallId?: string; args?: unknown };
+        const toolName = detail.toolName ?? "";
+        const prompts = questionsFromArgs(detail.args);
+
+        if (!prompts || !controller?.running) {
+            return;
+        }
+
+        setTimeout(() => {
+            if (controller?.running && !controller.hasQuestionForToolCall(detail.toolCallId)) {
+                controller.announceWaitingForInput(toolName, prompts, detail.toolCallId);
+            }
+        }, 250);
     });
 
     // Spoken approval for risky shell commands.

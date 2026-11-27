@@ -20,6 +20,15 @@ export interface VoiceControl {
     interruptAgent(): void;
     /** Resolve a pending voice approval. */
     answerApproval(id: string, allow: boolean, reason?: string): boolean;
+    /**
+     * Relay a spoken answer back to the extension that asked the question.
+     * `undefined` when the id is unknown or expired (the user answered on screen).
+     */
+    answerQuestion(
+        id: string,
+        answers: unknown,
+        cancel?: boolean,
+    ): { status: "answered" | "cancelled" | "partial"; count: number; unknown: string[] } | undefined;
 }
 
 export interface ToolDeps {
@@ -107,6 +116,38 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
                     reason: { type: "string" },
                 },
                 ["id", "allow"],
+            ),
+        },
+        {
+            name: "voice_answer",
+            description:
+                "Answer a question Pi is waiting on. Only use the id from a \"Pi is waiting for the user's "
+                + "answer\" note, and only after the user has said what they want. Pass the option's value "
+                + "when they picked one; pass text when they answered in their own words.",
+            parameters: obj(
+                {
+                    id: { type: "string", description: "The prompt id from the note." },
+                    answers: {
+                        type: "array",
+                        description: "One entry per question in the note.",
+                        items: {
+                            type: "object",
+                            properties: {
+                                questionId: { type: "string", description: "The questionId from the note." },
+                                value: {
+                                    type: "string",
+                                    description: "The chosen option's value (or its label, or its 1-based number).",
+                                },
+                                text: { type: "string", description: "The user's own words, when they did not pick an option." },
+                            },
+                        },
+                    },
+                    cancel: {
+                        type: "boolean",
+                        description: "true when the user would rather answer on screen; closes the prompt.",
+                    },
+                },
+                ["id"],
             ),
         },
         {
@@ -219,6 +260,38 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
             const known = control.answerApproval(id, allow, stringArg(call.args, "reason"));
 
             return respond({ status: known ? "recorded" : "unknown_id" });
+        }
+
+        case "voice_answer": {
+            const id = stringArg(call.args, "id");
+
+            if (!id) {
+                return respond({ error: "id is required" });
+            }
+
+            const result = control.answerQuestion(id, call.args.answers, call.args.cancel === true);
+
+            if (!result) {
+                // The usual cause is the user answering on screen first: saying "sent"
+                // here would have the model repeat a question nobody is waiting on.
+                return respond({
+                    error: "no question with that id is open (the user may have already answered on screen); do not ask again",
+                });
+            }
+
+            if (result.status === "partial" && result.count === 0) {
+                return respond({
+                    error: "no answer was usable for that question; ask again using one of the option values or the user's own words as text",
+                    unknown: result.unknown,
+                });
+            }
+
+            return respond({
+                status: result.status,
+                answered: result.count,
+                ...(result.unknown.length > 0 ? { unrecognised: result.unknown } : {}),
+                ...(result.status === "partial" ? { note: "some questions are still waiting for an answer" } : {}),
+            });
         }
 
         case "voice_note": {

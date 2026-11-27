@@ -23,6 +23,7 @@ import type { AudioSink, NativeTransportOptions, WakeEngineStatus } from "../aud
 import { acceptWebSocket } from "./ws-server.ts";
 import type { WebSocketPeer } from "./ws-server.ts";
 import { VoiceController } from "../controller.ts";
+import type { VoiceAnswerResult } from "../question.ts";
 import { DEFAULT_VOICE_CONFIG, patchVoiceConfig } from "../config.ts";
 import type { VoiceConfig } from "../config.ts";
 import { readLock } from "../lock.ts";
@@ -331,8 +332,20 @@ function makeController(
     config: VoiceConfig,
     createAudio: (options: NativeTransportOptions) => AudioSink = (options) => new SilentAudio(options),
     onConfigChange?: (next: VoiceConfig) => void,
+    onQuestionAnswer?: (result: VoiceAnswerResult) => void,
 ): VoiceController {
-    return new VoiceController(api, ctx, config, { createAudio, onConfigChange });
+    return new VoiceController(api, ctx, config, { createAudio, onConfigChange, onQuestionAnswer });
+}
+
+/** Everything the client sent as model input text, for asserting on notices. */
+function textsOf(connection: FakeConnection): string[] {
+    const frames = connection.messages.filter((message) => message.clientContent);
+
+    return frames.flatMap((frame) => {
+        const turns = (frame.clientContent as { turns?: { parts?: { text?: string }[] }[] }).turns ?? [];
+
+        return turns.flatMap((turn) => (turn.parts ?? []).map((part) => part.text ?? ""));
+    });
 }
 
 function makeConfig(overrides: Partial<VoiceConfig> = {}): VoiceConfig {
@@ -949,6 +962,137 @@ await revived.start();
 assert.equal(readLock(cwd)?.pid, process.pid, "stale lock taken over by the new owner");
 await revived.stop();
 ok("a stale lock from a dead process is taken over instead of blocking voice");
+
+// ---------------------------------------------------------------------------
+// voice questions: Pi asks, the user answers out loud
+// ---------------------------------------------------------------------------
+
+const relayed: VoiceAnswerResult[] = [];
+const asker = makeController(
+    makePi().api,
+    makeCtx(),
+    makeConfig({ alwaysOn: false }),
+    undefined,
+    undefined,
+    (result) => relayed.push(result),
+);
+const askerIndex = live.connections.length;
+
+await asker.start();
+await until(() => asker.liveState === "live", "asker: live");
+
+const askConnection = live.connections[askerIndex]!;
+const request = {
+    id: "q-1",
+    toolCallId: "tc-1",
+    title: "Pi needs an answer",
+    questions: [
+        {
+            id: "db",
+            prompt: "Which database should I use?",
+            options: [
+                { value: "postgres", label: "Postgres" },
+                { value: "sqlite", label: "SQLite" },
+            ],
+        },
+    ],
+};
+
+assert.equal(asker.presentQuestion(request), true, "the notice could be spoken");
+await until(() => textsOf(askConnection).some((text) => text.includes("q-1")), "question notice delivered");
+assert.equal(asker.pendingQuestions, 1);
+assert.equal(asker.hasQuestionForToolCall("tc-1"), true, "the fallback notice knows to stand down");
+ok("a question is read to the user and remembered as pending");
+
+live.send(askConnection, {
+    toolCall: {
+        functionCalls: [
+            { id: "qa1", name: "voice_answer", args: { id: "q-1", answers: [{ questionId: "db", value: "the second one" }] } },
+        ],
+    },
+});
+await until(() => relayed.length === 1, "answer relayed to the provider");
+assert.equal(relayed[0]?.id, "q-1");
+assert.equal(relayed[0]?.cancelled, false);
+assert.equal(relayed[0]?.answers[0]?.option?.value, "sqlite", "'the second one' picked the second option");
+assert.equal(asker.pendingQuestions, 0, "an answered prompt is retired");
+await until(() => live.toolResponses(askConnection).some((entry) => String(JSON.stringify(entry)).includes("answered")), "tool response");
+ok("a spoken option choice reaches the provider as the option it offered");
+
+// An id that is not open must not look like success: the user may have answered on
+// screen already, and repeating the question would be the visible failure.
+const before = relayed.length;
+
+live.send(askConnection, {
+    toolCall: { functionCalls: [{ id: "qa2", name: "voice_answer", args: { id: "q-1", answers: [{ questionId: "db", value: "postgres" }] } }] },
+});
+await until(
+    () => live.toolResponses(askConnection).some((entry) => String(JSON.stringify(entry)).includes("no question with that id")),
+    "stale answer rejected",
+);
+assert.equal(relayed.length, before, "nothing is relayed for an expired prompt");
+ok("answering a prompt that is already closed is refused, not faked");
+
+// Two questions: an answer for one leaves the prompt open until the other arrives.
+assert.equal(
+    asker.presentQuestion({
+        id: "q-2",
+        questions: [
+            { id: "a", prompt: "First?", options: [{ value: "one", label: "One" }, { value: "two", label: "Two" }] },
+            { id: "b", prompt: "Second?" },
+        ],
+    }),
+    true,
+);
+
+live.send(askConnection, {
+    toolCall: { functionCalls: [{ id: "qa3", name: "voice_answer", args: { id: "q-2", answers: [{ questionId: "a", value: "two" }] } }] },
+});
+await until(() => relayed.length === 2, "partial answer relayed");
+assert.equal(relayed[1]?.answers.length, 1);
+assert.equal(asker.pendingQuestions, 1, "half answered is still waiting");
+
+live.send(askConnection, {
+    toolCall: {
+        functionCalls: [
+            { id: "qa4", name: "voice_answer", args: { id: "q-2", answers: [{ questionId: "b", text: "nothing else" }] } },
+        ],
+    },
+});
+await until(() => relayed.length === 3, "second half relayed");
+assert.equal(relayed[2]?.answers[0]?.text, "nothing else");
+assert.equal(asker.pendingQuestions, 0, "all questions answered");
+ok("a multi-question prompt is answered one question at a time");
+
+// The provider answering on screen retires the prompt and tells the model to stop.
+assert.equal(asker.presentQuestion({ id: "q-3", questions: [{ id: "only", prompt: "Still there?" }] }), true);
+assert.equal(asker.withdrawQuestion("q-3"), true);
+assert.equal(asker.pendingQuestions, 0);
+await until(() => textsOf(askConnection).some((text) => text.includes("Answer no longer needed")), "withdraw notice");
+assert.equal(asker.withdrawQuestion("q-3"), false, "withdrawing twice is harmless");
+ok("an answer given on screen retires the prompt and tells the model to drop it");
+
+// "Handle it for me" is a cancel: the provider closes its own UI.
+assert.equal(asker.presentQuestion({ id: "q-4", questions: [{ id: "x", prompt: "Pick one" }] }), true);
+live.send(askConnection, {
+    toolCall: { functionCalls: [{ id: "qa5", name: "voice_answer", args: { id: "q-4", cancel: true } }] },
+});
+await until(() => relayed.some((entry) => entry.id === "q-4"), "cancel relayed");
+assert.equal(relayed.find((entry) => entry.id === "q-4")?.cancelled, true);
+ok("a cancel request closes the provider's prompt");
+
+// The mic must stay open while a question is pending: the next thing said is the
+// answer. Gating it here would demand the wake phrase in the middle of answering.
+assert.equal(asker.presentQuestion({ id: "q-5", questions: [{ id: "y", prompt: "Waiting on you" }] }), true);
+await new Promise((resolve) => setTimeout(resolve, 7000));
+assert.equal(asker.liveState, "live", "a pending question keeps the session out of the idle gate");
+assert.equal(asker.micOpen, true, "the mic is still open");
+asker.withdrawQuestion("q-5");
+ok("a pending question holds the mic open past the idle timeout");
+
+await asker.stop();
+assert.equal(asker.pendingQuestions, 0, "teardown drops prompts that can no longer be answered");
+ok("stopping voice drops pending prompts");
 
 // ---------------------------------------------------------------------------
 // done

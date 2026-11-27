@@ -22,6 +22,16 @@ import { persistVoiceState, readVoiceState } from "./state.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
 import { acquireLock, releaseLock } from "./lock.ts";
 import { clearPersistedHandle, loadPersistedHandle, persistedSeq, savePersistedHandle } from "./persist.ts";
+import {
+    QUESTION_TTL_MS,
+    questionNotice,
+    questionWithdrawnNotice,
+    resolveAnswers,
+    waitingForInputNotice,
+    type VoiceAnswerItem,
+    type VoiceAnswerResult,
+    type VoiceQuestionRequest,
+} from "./question.ts";
 import { setVoiceStatus, voiceStatusText } from "./ui.ts";
 import { log, warn } from "./util.ts";
 
@@ -32,6 +42,10 @@ import { log, warn } from "./util.ts";
  */
 export interface VoiceControllerOptions {
     createAudio?: (options: NativeTransportOptions) => AudioSink;
+    /** Persist a config change made through a voice tool. */
+    onConfigChange?: (config: VoiceConfig) => void;
+    /** Hand a spoken answer back to the extension that asked the question. */
+    onQuestionAnswer?: (result: VoiceAnswerResult) => void;
 }
 
 export interface StartResult {
@@ -111,11 +125,36 @@ export class VoiceController implements VoiceControl {
     /** Notices held back until the model's turn ends, so they never overlap. */
     #deferredNotices: string[] = [];
     #deferredNoticesTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * Prompts waiting for a spoken answer, keyed by the provider's id.
+     *
+     * A provider (any extension) hands over a question; the voice model reads it out
+     * and answers with `voice_answer`, which is relayed back as data. Kept here rather
+     * than in the extension so a `/reload` cannot leave a prompt answerable by a socket
+     * that no longer exists.
+     */
+    #questions = new Map<
+        string,
+        {
+            request: VoiceQuestionRequest;
+            at: number;
+            /**
+             * Answers collected so far. A spoken answer usually covers one question at a
+             * time ("postgres" ... "and ship it Friday"), so a prompt is only complete
+             * when every question has one — and answering the same question again
+             * replaces it instead of being counted twice.
+             */
+            answers: Map<string, VoiceAnswerItem>;
+        }
+    >();
+    /** Tool calls already announced read-only, so a long tool does not talk twice. */
+    #announcedToolCalls = new Set<string>();
 
     #pi: ExtensionAPI;
     #ctx: ExtensionContext;
     #createAudio: (options: NativeTransportOptions) => AudioSink;
     readonly #onConfigChange: ((config: VoiceConfig) => void) | undefined;
+    readonly #onQuestionAnswer: ((result: VoiceAnswerResult) => void) | undefined;
 
     constructor(pi: ExtensionAPI, ctx: ExtensionContext, config: VoiceConfig, options: VoiceControllerOptions = {}) {
         this.#pi = pi;
@@ -123,6 +162,7 @@ export class VoiceController implements VoiceControl {
         this.#config = config;
         this.#createAudio = options.createAudio ?? ((transportOptions) => new NativeTransport(transportOptions));
         this.#onConfigChange = options.onConfigChange;
+        this.#onQuestionAnswer = options.onQuestionAnswer;
         this.#capabilities = capabilitiesFor(config.model);
         this.#bridge = new AgentBridge(pi, ctx.cwd);
         this.#seedBridgeFromSession();
@@ -555,6 +595,10 @@ export class VoiceController implements VoiceControl {
         // A turn left open by a session that died must not block the idle gate of the
         // next one forever.
         this.#modelTurnOpen = false;
+        // Prompts belonged to the socket that just closed: their ids can never be
+        // answered by a new session, and the provider keeps its own UI.
+        this.#questions.clear();
+        this.#announcedToolCalls.clear();
         releaseLock(this.ctx.cwd);
     }
 
@@ -847,6 +891,162 @@ export class VoiceController implements VoiceControl {
 
     get approvalAvailable(): boolean {
         return this.#running && this.#session?.state === "live";
+    }
+
+    // -----------------------------------------------------------------------
+    // Voice questions (the `voice:question` protocol, see question.ts)
+    // -----------------------------------------------------------------------
+
+    /** Drop prompts past their deadline and report the ones still live. */
+    #liveQuestions(now = Date.now()): VoiceQuestionRequest[] {
+        const live: VoiceQuestionRequest[] = [];
+
+        for (const [id, entry] of this.#questions) {
+            if (now - entry.at > QUESTION_TTL_MS) {
+                this.#questions.delete(id);
+                log("controller", `question ${id} expired unanswered`);
+
+                continue;
+            }
+
+            live.push(entry.request);
+        }
+
+        return live;
+    }
+
+    /**
+     * Announce a prompt and keep it answerable.
+     *
+     * Returns false when nothing could be spoken (voice off, socket down): the
+     * provider then keeps its own UI as the only way to answer, and a headless
+     * provider can fail fast instead of waiting out its timeout.
+     */
+    presentQuestion(request: VoiceQuestionRequest): boolean {
+        if (!this.#running) {
+            return false;
+        }
+
+        this.#questions.set(request.id, { request, at: Date.now(), answers: new Map() });
+
+        // The user is being asked something: the mic must stay open, or a spoken
+        // answer arrives after the idle gate has muted it.
+        this.#lastVoiceAt = Date.now();
+
+        const spoken = this.#notice(() => questionNotice(request), true);
+
+        if (!spoken) {
+            this.#questions.delete(request.id);
+        }
+
+        return spoken;
+    }
+
+    /** The provider resolved the prompt on screen (or gave up). */
+    withdrawQuestion(id: string): boolean {
+        const had = this.#questions.delete(id);
+
+        if (had) {
+            // Tell the model to drop it too, or its next sentence asks about a
+            // question that is already answered.
+            this.#notice(() => questionWithdrawnNotice(id), false);
+        }
+
+        return had;
+    }
+
+    /** Is a registered prompt waiting on this tool call? (suppresses the fallback notice) */
+    hasQuestionForToolCall(toolCallId: string | undefined): boolean {
+        if (!toolCallId) {
+            return false;
+        }
+
+        return this.#liveQuestions().some((request) => request.toolCallId === toolCallId);
+    }
+
+    /**
+     * Read-only notice for a blocked tool that never adopted the protocol.
+     *
+     * Voice cannot answer it — the tool is waiting on its own UI — so the note only
+     * tells the user where the question is.
+     */
+    announceWaitingForInput(toolName: string, prompts: string[], toolCallId?: string): boolean {
+        if (!this.#running || prompts.length === 0) {
+            return false;
+        }
+
+        const key = toolCallId ?? `${toolName}:${prompts[0] ?? ""}`;
+
+        if (this.#announcedToolCalls.has(key) || this.hasQuestionForToolCall(toolCallId)) {
+            return false;
+        }
+
+        // Bounded: one entry per announcing tool call, and a long session can run
+        // thousands of them. The ids are only used to avoid a second announcement, so
+        // forgetting old ones is harmless.
+        if (this.#announcedToolCalls.size > 64) {
+            this.#announcedToolCalls.clear();
+        }
+
+        this.#announcedToolCalls.add(key);
+
+        return this.#notice(() => waitingForInputNotice(toolName, prompts), false);
+    }
+
+    /**
+     * The voice model answered. `undefined` means the id is unknown or expired.
+     *
+     * The model's strings are matched against the offered options here, so a provider
+     * only ever receives an option it actually offered (or free text it allowed).
+     */
+    answerQuestion(
+        id: string,
+        raw: unknown,
+        cancel = false,
+    ): { status: "answered" | "cancelled" | "partial"; count: number; unknown: string[] } | undefined {
+        this.#liveQuestions();
+
+        const entry = this.#questions.get(id);
+
+        if (!entry) {
+            return undefined;
+        }
+
+        if (cancel) {
+            this.#questions.delete(id);
+            this.#onQuestionAnswer?.({ id, answers: [], cancelled: true });
+
+            return { status: "cancelled", count: 0, unknown: [] };
+        }
+
+        const { answers, unknown } = resolveAnswers(entry.request.questions, raw);
+
+        if (answers.length === 0) {
+            // Nothing usable: keep the prompt live so the model can try again rather
+            // than silently dropping a question the user is still waiting on.
+            return { status: "partial", count: 0, unknown };
+        }
+
+        for (const answer of answers) {
+            entry.answers.set(answer.questionId, answer);
+        }
+
+        const complete = entry.request.questions.every((question) => entry.answers.has(question.id));
+
+        if (complete) {
+            this.#questions.delete(id);
+        }
+
+        // Only the new answers are relayed: the provider merges them into its own state,
+        // so re-sending earlier ones would be noise (and could re-ask a question).
+        this.#onQuestionAnswer?.({ id, answers, cancelled: false });
+
+        return { status: complete ? "answered" : "partial", count: answers.length, unknown };
+    }
+
+    /** Prompts still open, for `/voice status`. */
+    get pendingQuestions(): number {
+        return this.#liveQuestions().length;
     }
 
     // -----------------------------------------------------------------------
@@ -1263,6 +1463,16 @@ export class VoiceController implements VoiceControl {
         // short idleSleepMs (5 s is allowed) extended thinking or a slow tool call
         // gated the mic mid-answer, so barge-in and the user's reply were dropped.
         if (this.#modelTurnOpen) {
+            this.#lastVoiceAt = Date.now();
+
+            return;
+        }
+
+        // Pi is waiting for an answer: the next thing said is the answer, so the mic
+        // must stay open. Gating here made the user say the wake phrase in the middle
+        // of answering a question. The TTL bounds it, so an abandoned prompt cannot
+        // keep the socket awake forever.
+        if (this.#liveQuestions().length > 0) {
             this.#lastVoiceAt = Date.now();
 
             return;

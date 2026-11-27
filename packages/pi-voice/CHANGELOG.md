@@ -5,6 +5,45 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-12-01
+
+Voice can now answer Pi's questions. Until this release, a tool that blocked on a human
+(`ask_user_questions`, a questionnaire, any confirm-by-typing prompt) made voice go
+silent: the socket stayed up, the mic was open, and nothing reached the model — so the
+user could not even be told what Pi was waiting for, let alone answer it.
+
+### Added
+
+- **A question protocol on `pi.events`.** Four channels — `voice:question`,
+  `voice:question:accepted`, `voice:question:withdraw`, `voice:answer` — so any extension
+  can offer a prompt to voice without importing this package. `question.ts` holds the
+  contract, validation and matching; the README shows the ten-line provider.
+- **`voice_answer` tool.** The model answers with the option's value, the option's label,
+  its 1-based number, a spoken ordinal ("the second one") or the user's own words as
+  `text`. Matching happens in pi-voice, so a provider only ever receives an option it
+  actually offered, and a choices-only question never turns an unmatched utterance into
+  free text. `cancel: true` closes the provider's own UI instead.
+- **Multi-question prompts** are answered one at a time and accumulated: a prompt is
+  complete only when every question has an answer, and answering the same question again
+  replaces it rather than being counted twice.
+- **The mic is held open while a prompt is pending.** The next thing said is the answer,
+  so the idle gate must not mute the mic mid-answer; the 5-minute TTL bounds it, so an
+  abandoned question cannot keep the session (and its quota) awake.
+- **Prompts are retired properly.** `withdraw` (answered on screen) tells the model to
+  drop the question instead of asking again; teardown, restart and `/reload` clear the
+  registry so an old id can never be answered by a new socket. Answering a closed id is
+  refused with "the user may have already answered on screen" rather than reported as
+  success.
+- **A read-only fallback** for tools that block on input but never adopted the protocol:
+  `tool_execution_start` with a questionnaire-shaped argument gets one announcement that
+  reads the question and says plainly it must be answered on screen. It is suppressed
+  when the protocol already covers the same tool call, and de-duplicated per call so a
+  long-running tool cannot talk twice.
+- `ask_user_questions` (in `~/.pi/agent/extensions/questionnaire.ts`) is the first adopter:
+  options are answerable out loud, "Type something" answers work as `text`, the keyboard
+  and the voice channel race and whichever answers first wins, and in a headless session
+  (no UI) the tool now waits for a spoken answer instead of failing outright.
+
 ## [0.7.2] - 2026-12-01
 
 A third audit, on the surface the first two skimmed (command parsing, status text,
