@@ -29,7 +29,9 @@ like the bug cannot mask it.
   (a padded one is rejected, not trimmed), and an object option must carry its own
   `value` — a value invented from the label could never match the provider's option.
   A question with no id at all still gets a positional `q1`, `q2`, ... for providers
-  that answer by position; a supplied id is never rewritten.
+  that answer by position; a supplied id is never rewritten — including an explicit
+  `null`, which rejects the request instead of being replaced with a `q1` the provider
+  never sent.
 - **Plain "one" is answerable.** "one" was in the choice-filler list, so "one", "the
   one", "number one" and "option number one" all failed unless an option was literally
   called "one". It is now only stripped when it trails another number ("the second one").
@@ -45,9 +47,9 @@ like the bug cannot mask it.
   questions/options, a bad id).
 - **The questionnaire stores the offered option's own value and label** rather than the
   label carried by the incoming event, which another extension could set to anything.
-- **The read-only fallback notice no longer throws** on an option the strict parser now
-  rejects (a label-only or padded option): the prompt is still announced, without
-  options voice cannot represent exactly.
+- **The read-only fallback notice no longer throws** on an option the strict parser
+  rejects (a label-only or padded option). It scans labels leniently instead, so one
+  unusable entry no longer hides the good options beside it.
 
 ## [0.8.1] - 2026-12-02
 

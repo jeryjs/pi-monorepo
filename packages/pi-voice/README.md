@@ -406,8 +406,9 @@ rewritten is rejected whole rather than silently altered — the provider compar
 answer with the value it sent, so a rewritten id is an answer it drops. A bare-string
 option is its own value (padded or over-long is rejected, not trimmed) and an object
 option must carry a `value`; one is never derived from `label`, which is display text.
-A question sent with no id at all gets `q1`, `q2`, ... positionally, for providers that
-answer by position; a supplied id is never rewritten.
+A question sent with no id at all (`undefined`) gets `q1`, `q2`, ... positionally, for
+providers that answer by position; a supplied id is never rewritten, and an explicit
+`null` is rejected like any other unusable id.
 
 A provider never blocks on voice: it shows its own UI and resolves it from whichever
 channel gets there first. If pi-voice is off, nothing happens and the keyboard still

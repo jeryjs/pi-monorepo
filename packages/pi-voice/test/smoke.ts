@@ -1362,11 +1362,22 @@ test("a questionnaire-shaped tool gets a read-only notice, not a fake answer pat
     assert.equal(questionsFromArgs("text"), undefined);
     assert.equal(questionsFromArgs({ questions: [{ options: ["A"] }] }), undefined, "no prompt, no guess");
 
-    // An option the strict parser rejects must not throw out of the read-only notice: the
-    // prompt is still announced, just without options it cannot represent exactly.
+    // An option the strict parser rejects must not throw out of the read-only notice, and
+    // must not hide the good options beside it. This scan is display-only, so a label-only
+    // entry is still shown; a null or numeric entry is skipped.
+    assert.deepEqual(
+        questionsFromArgs({
+            questions: [{
+                prompt: "Which db?",
+                options: [{ value: "a", label: "A" }, null, 42, { label: "C" }, "  padded  ", "B"],
+            }],
+        }),
+        ["Which db? (options: A, C, padded, B)"],
+        "an unusable option does not hide the labels beside it",
+    );
     assert.deepEqual(
         questionsFromArgs({ questions: [{ prompt: "Which db?", options: [{ label: "SQLite" }, "  padded  "] }] }),
-        ["Which db?"],
+        ["Which db? (options: SQLite, padded)"],
         "a label-only or padded option does not break the fallback notice",
     );
 
@@ -1409,6 +1420,10 @@ test("a request that cannot be represented in full is rejected whole", () => {
     // truncated or derived would be answered under a different spelling and dropped.
     assert.equal(parseQuestionRequest({ id: " padded ", questions: [{ prompt: "p" }] }), undefined, "a request id that would be rewritten");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ id: " q ", prompt: "p" }] }), undefined, "a question id that would be rewritten");
+    // An explicit null id is a supplied identity pi-voice cannot honour: it is rejected,
+    // never replaced with a positional q1 the provider would not recognise.
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ id: null, prompt: "p" }] }), undefined, "a null question id");
+    assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p" }] })?.questions[0]?.id, "q1", "an omitted question id still gets one");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: [{ value: " x ", label: "X" }] }] }), undefined, "an option value that would be trimmed");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: ["  padded  "] }] }), undefined, "a bare option string that would be trimmed");
     assert.equal(parseQuestionRequest({ id: "a", questions: [{ prompt: "p", options: ["x".repeat(121)] }] }), undefined, "a bare option string that would be truncated");

@@ -211,8 +211,12 @@ export function parseQuestionRequest(value: unknown): VoiceQuestionRequest | und
 
         const question = entry as Record<string, unknown>;
         const prompt = text(question.prompt, 400) ?? text(question.question, 400);
-        const namedId = question.id === undefined || question.id === null ? undefined : identity(question.id, 120);
-        const questionId = namedId ?? (question.id === undefined || question.id === null ? `q${questions.length + 1}` : undefined);
+        const rawId = question.id;
+        // A positional qN is for a provider that sent no id at all ("answer by position").
+        // An explicit null is a supplied identity that pi-voice cannot honour: it is dropped
+        // like any other unusable id rather than replaced with one the provider never saw.
+        const namedId = rawId === undefined ? undefined : identity(rawId, 120);
+        const questionId = namedId ?? (rawId === undefined ? `q${questions.length + 1}` : undefined);
 
         if (!prompt || !questionId || seen.has(questionId)) {
             return undefined;
@@ -632,15 +636,10 @@ export function questionsFromArgs(args: unknown): string[] | undefined {
             continue;
         }
 
-        // Best effort: a read-only announcement must never throw. An option the parser
-        // rejects (a label-only object, a padded string) is simply not announced.
-        let labels: string[] = [];
-
-        try {
-            labels = (parseOptions(question.options) ?? []).map((option) => option.label);
-        } catch {
-            labels = [];
-        }
+        // Best effort: a read-only announcement must never throw, and one unusable option
+        // must not hide the good ones. This is a lenient label-only scan, not the strict
+        // parser — the notice is display text and cannot be answered anyway.
+        const labels = optionLabels(question.options);
 
         const options = labels.length > 0 ? ` (options: ${labels.join(", ")})` : "";
 
@@ -648,4 +647,43 @@ export function questionsFromArgs(args: unknown): string[] | undefined {
     }
 
     return prompts.length > 0 ? prompts : undefined;
+}
+
+/**
+ * Lenient option labels for the read-only notice.
+ *
+ * Unlike parseOptions() this never validates identities and never throws: a malformed
+ * entry is skipped, the rest are still announced.
+ */
+function optionLabels(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const labels: string[] = [];
+
+    for (const entry of value.slice(0, 12)) {
+        if (typeof entry === "string") {
+            const label = text(entry, 120);
+
+            if (label) {
+                labels.push(label);
+            }
+
+            continue;
+        }
+
+        if (!entry || typeof entry !== "object") {
+            continue;
+        }
+
+        const record = entry as Record<string, unknown>;
+        const label = text(record.label, 120) ?? text(record.value, 120);
+
+        if (label) {
+            labels.push(label);
+        }
+    }
+
+    return labels;
 }
