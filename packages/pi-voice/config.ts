@@ -4,7 +4,7 @@
  * is easy to hand-edit. Unknown/garbage values fall back to defaults.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -290,9 +290,57 @@ export function saveVoiceConfig(config: VoiceConfig, path = voiceConfigPath()): 
     const data = readSettingsFile(path);
     data[VOICE_SETTINGS_NAMESPACE] = config;
     mkdirSync(dirname(path), { recursive: true });
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-    renameSync(temporary, path);
+
+    // Unique temp name: `/voice key <secret>` and a TUI edit could otherwise share one
+    // `path.tmp` and rename a half-written file over the good one. `wx` then claims the
+    // name so a concurrent writer cannot take it either.
+    const temporary = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+
+    try {
+        writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        renameSync(temporary, path);
+    } catch (error) {
+        try {
+            rmSync(temporary, { force: true });
+        } catch {
+            // best effort
+        }
+
+        throw error;
+    }
+}
+
+/**
+ * Apply a sparse patch and report what the validators actually did to it.
+ *
+ * `normalizeVoiceConfig({ ...config, ...patch })` silently coerces: an unknown key is
+ * dropped and `{"idleSleepMs":"soon"}` becomes the 5 s default. `/voice set` answered
+ * "config updated" either way, so a typo looked exactly like a successful change.
+ */
+export function patchReport(
+    config: VoiceConfig,
+    patch: unknown,
+): { next: VoiceConfig; unknown: string[]; adjusted: string[] } {
+    const input = patch && typeof patch === "object" ? (patch as Record<string, unknown>) : {};
+    const known = new Set(Object.keys(VALIDATORS));
+    const unknown = Object.keys(input).filter((key) => !known.has(key));
+    const next = normalizeVoiceConfig({ ...config, ...input });
+    const adjusted: string[] = [];
+
+    for (const key of Object.keys(input)) {
+        if (!known.has(key)) {
+            continue;
+        }
+
+        const before = input[key];
+        const after = next[key as keyof VoiceConfig];
+
+        if (JSON.stringify(before) !== JSON.stringify(after)) {
+            adjusted.push(`${key}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+        }
+    }
+
+    return { next, unknown, adjusted };
 }
 
 /** Apply a sparse patch on top of a config, normalizing the result. */

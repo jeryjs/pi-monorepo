@@ -73,7 +73,7 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
         },
         {
             name: "pi_recent",
-            description: "Read the most recent messages between the user and the main Pi agent.",
+            description: "Read the most recent messages between the user and the main Pi agent, each with its role.",
             parameters: obj({ count: { type: "integer", minimum: 1, maximum: 10, description: "How many recent messages." } }),
         },
         ask,
@@ -85,7 +85,8 @@ export function functionDeclarations(capabilities: ModelCapabilities): FunctionD
         {
             name: "voice_sleep",
             description:
-                "Stop listening until the wake phrase. Call this when the user signals they are done talking "
+                "Mute the microphone (the model stops hearing the user) until the wake phrase or voice_listen. "
+                + "Call this when the user signals they are done talking "
                 + "(finished, leaving, goodnight, “we can stop”, “that's all”), after one short goodbye.",
             parameters: obj({ reason: { type: "string" } }),
         },
@@ -150,9 +151,12 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
 
         case "pi_recent": {
             const count = typeof call.args.count === "number" ? Math.min(10, Math.max(1, call.args.count)) : 3;
-            const text = bridge.recentAssistant(count);
+            // The description promises "messages between the user and Pi", but this only
+            // ever returned assistant text — asking about what the *user* last said
+            // produced assistant lines presented as the answer.
+            const text = bridge.recentMessages(count);
 
-            return respond({ messages: text.map((entry) => entry.slice(0, 600)) });
+            return respond({ messages: text.map((entry) => ({ role: entry.role, text: entry.text.slice(0, 600) })) });
         }
 
         case "pi_ask": {
@@ -189,7 +193,7 @@ export async function dispatchTool(call: ToolCall, deps: ToolDeps): Promise<Func
         case "voice_sleep": {
             control.sleep(stringArg(call.args, "reason"));
 
-            return respond({ status: "sleeping" });
+            return respond({ status: "asleep", note: "the microphone is muted until the wake phrase or voice_listen" });
         }
 
         case "voice_always_on": {

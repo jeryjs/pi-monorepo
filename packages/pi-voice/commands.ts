@@ -7,7 +7,8 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { micVerdict, probeMic } from "./audio/native.ts";
 import { capabilitiesFor, describeModels, liveModelIds } from "./capabilities.ts";
 import { completeVoiceArguments } from "./completions.ts";
-import type { VoiceConfig } from "./config.ts";
+import { patchReport, type VoiceConfig } from "./config.ts";
+import { keySourceLabel } from "./keychain.ts";
 import type { VoiceRuntime } from "./runtime.ts";
 import { ASR_MODEL, asrModelStatus, downloadAsrModel, resolvedAsrModelDir, sherpaStatus, setupSherpaWake } from "./sherpa.ts";
 import { debugState, recentWarnings } from "./util.ts";
@@ -23,6 +24,33 @@ function say(ctx: ExtensionCommandContext, message: string, type: "info" | "warn
     }
 }
 
+export function parseBool(value: string | undefined, current: boolean): boolean | undefined {
+    if (!value) {
+        return !current;
+    }
+
+    if (/^(on|true|yes|1)$/i.test(value)) {
+        return true;
+    }
+
+    if (/^(off|false|no|0)$/i.test(value)) {
+        return false;
+    }
+
+    return undefined;
+}
+
+/** Honest one-line answer for "what happens when voice starts". */
+export function describeStart(config: VoiceConfig): string {
+    if (!config.alwaysOn) {
+        return "connects at startup and stays connected (always-on off)";
+    }
+
+    return config.connectOnWake
+        ? "asleep — connects on the wake phrase (connectOnWake)"
+        : "connects at startup and stays connected (always-on, connectOnWake off)";
+}
+
 function statusText(runtime: VoiceRuntime): string {
     const config = runtime.getConfig();
     const controller = runtime.controller();
@@ -32,20 +60,22 @@ function statusText(runtime: VoiceRuntime): string {
         `voice: ${controller?.running ? controller.liveState : "off"}`,
         `model: ${config.model} (${capabilities.label})`,
         `voice name: ${config.voice}${config.language ? ` · lang ${config.language}` : ""}`,
-        `key: ${config.apiKey ? "config" : controller?.keySource ?? "not resolved"}`,
-        `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine}`,
+        `key: ${keySourceLabel(config.apiKey, controller?.keySource)}`,
+        `always-on: ${config.alwaysOn ? "on" : "off"} · engine ${config.wakeEngine}`
+            + (controller?.running ? ` · mic ${controller.micOpen ? "open" : "muted"}` : ""),
         `wake: ${sherpaStatus(config.kwsModelDir).detail}`
             + `${asrModelStatus(resolvedAsrModelDir(config.asrModelDir)).ok ? " · asr model installed" : ""}`,
-        `start: ${config.alwaysOn && config.connectOnWake
-            ? "asleep — connects on the wake phrase (connectOnWake)"
-            : "connects at startup (connectOnWake off)"}`,
+        // Four combinations, not two: always-on with connectOnWake off connects at
+        // startup and never sleeps; claiming "connects at startup (connectOnWake off)"
+        // for a plain non-always-on config read as if the flag were involved.
+        `start: ${describeStart(config)}`,
         `autonomy: ${config.autonomy}${config.voiceApprovals ? " (voice approvals)" : ""}`,
         `tools: ${capabilities.asyncTools ? "async" : "sync"} function calling · search ${config.searchGrounding ? "on" : "off"}`,
         `VAD: ${config.vadSilenceMs}ms silence, ${config.vadPrefixMs}ms prefix · barge-in ${config.bargeIn ? "on" : "off"}`,
         `idle sleep: ${Math.round(config.idleSleepMs / 1000)}s · digest ${config.digestTurns} turns`,
         // Nothing is written to stderr unless asked for, so state the quiet mode and
         // whether anything was withheld (`warn()` still records every warning).
-        `logging: ${debugState().enabled ? "debug on" : "quiet (warnings still recorded)"}`,
+        `logging: ${debugState().enabled ? `debug on (${debugState().source})` : "quiet (warnings still recorded)"}`,
     ];
 
     lines.push(`wake: ${config.alwaysOn ? "on" : "off (enable with /voice always-on on)"}`);
@@ -62,6 +92,8 @@ function statusText(runtime: VoiceRuntime): string {
 
         if (controller.micSilent) {
             lines.push("mic: NO SIGNAL in the last 8s (the device is delivering silence) — /voice mic");
+        } else if (!controller.micOpen) {
+            lines.push("mic: muted — say the wake phrase, or call /voice listen");
         }
     }
 
@@ -216,18 +248,34 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
 
                 case "listen":
                 case "wake":
+                    if (!runtime.controller()?.running) {
+                        say(ctx, "voice is off — run /voice on first", "warning");
+                        return;
+                    }
+
                     runtime.controller()?.wake();
                     say(ctx, "listening", "info");
                     return;
 
                 case "sleep":
+                    if (!runtime.controller()?.running) {
+                        say(ctx, "voice is off — nothing to sleep", "warning");
+                        return;
+                    }
+
                     runtime.controller()?.sleep("command");
-                    say(ctx, "asleep", "info");
+                    say(ctx, "asleep — the mic is muted; say the wake phrase or run /voice listen", "info");
                     return;
 
                 case "always-on":
                 case "alwaysOn": {
-                    const enabled = value ? /^(on|true|yes|1)$/i.test(value) : !runtime.getConfig().alwaysOn;
+                    const enabled = parseBool(value, runtime.getConfig().alwaysOn);
+
+                    if (enabled === undefined) {
+                        say(ctx, `always-on takes on or off (got "${value}")`, "warning");
+                        return;
+                    }
+
                     runtime.patch({ alwaysOn: enabled });
                     runtime.controller()?.setAlwaysOn(enabled);
                     say(ctx, `always-on ${enabled ? "on" : "off"}`, "info");
@@ -256,6 +304,14 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                         say(ctx, `voice name: ${runtime.getConfig().voice}`, "info");
                         return;
                     }
+
+                    // The name goes straight into the setup frame: a typo used to survive
+                    // until the server closed the socket with a validation error.
+                    if (!PREBUILT_VOICES.some((voice) => voice.toLowerCase() === value.toLowerCase())) {
+                        say(ctx, `unknown voice "${value}" — prebuilt: ${PREBUILT_VOICES.join(", ")}`, "warning");
+                        return;
+                    }
+
                     runtime.patch({ voice: value });
                     say(ctx, `voice name set to ${value}. Restart to apply.`, "info");
                     return;
@@ -397,10 +453,7 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                 case "key":
                     if (!value) {
                         const controller = runtime.controller();
-                        const source = runtime.getConfig().apiKey
-                            ? "config (pi-voice.json)"
-                            : controller?.keySource ?? "not resolved (auth.json → env → Pi provider)";
-                        say(ctx, `api key: ${source}`, "info");
+                        say(ctx, `api key: ${keySourceLabel(runtime.getConfig().apiKey, controller?.keySource)}`, "info");
                         return;
                     }
                     if (value === "clear") {
@@ -413,16 +466,28 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                     return;
 
                 case "announce": {
-                    const enabled = value ? /^(on|true|yes|1)$/i.test(value) : !runtime.getConfig().announce;
+                    const enabled = parseBool(value, runtime.getConfig().announce);
+
+                    if (enabled === undefined) {
+                        say(ctx, `announce takes on or off (got "${value}")`, "warning");
+                        return;
+                    }
+
                     runtime.patch({ announce: enabled });
                     say(ctx, `announce ${enabled ? "on" : "off"}`, "info");
                     return;
                 }
 
                 case "debug": {
-                    const enabled = value ? /^(on|true|yes|1)$/i.test(value) : !runtime.getConfig().debug;
+                    const enabled = parseBool(value, runtime.getConfig().debug);
+
+                    if (enabled === undefined) {
+                        say(ctx, `debug takes on or off (got "${value}")`, "warning");
+                        return;
+                    }
+
                     runtime.patch({ debug: enabled });
-                    say(ctx, `debug ${enabled ? "on" : "off"} (PI_VOICE_DEBUG)`, "info");
+                    say(ctx, `debug ${enabled ? "on" : "off"} (PI_VOICE_DEBUG=1 forces it on)`, "info");
                     return;
                 }
 
@@ -432,13 +497,33 @@ export function registerVoiceCommands(pi: ExtensionAPI, runtime: VoiceRuntime): 
                         return;
                     }
 
+                    let parsed: unknown;
+
                     try {
-                        const patch = JSON.parse(value) as Partial<VoiceConfig>;
-                        runtime.patch(patch);
-                        say(ctx, "config updated", "info");
+                        parsed = JSON.parse(value);
                     } catch (error) {
                         say(ctx, `bad json: ${String(error)}`, "error");
+                        return;
                     }
+
+                    // The validators coerce silently: an unknown key was dropped and
+                    // `{"idleSleepMs":"soon"}` became the default, yet the answer was
+                    // always "config updated". Say what was ignored or changed.
+                    const report = patchReport(runtime.getConfig(), parsed);
+
+                    runtime.patch(report.next);
+
+                    const notes: string[] = [];
+
+                    if (report.unknown.length > 0) {
+                        notes.push(`ignored unknown key${report.unknown.length > 1 ? "s" : ""}: ${report.unknown.join(", ")}`);
+                    }
+
+                    if (report.adjusted.length > 0) {
+                        notes.push(`coerced: ${report.adjusted.join("; ")}`);
+                    }
+
+                    say(ctx, notes.length > 0 ? `config updated — ${notes.join(" · ")}` : "config updated", notes.length > 0 ? "warning" : "info");
                     return;
                 }
 

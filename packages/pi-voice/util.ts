@@ -69,12 +69,22 @@ function envDebug(): boolean {
     return !["0", "false", "off", "no", "none"].includes(raw);
 }
 
+/**
+ * The environment switch, exposed so the extension can honour it.
+ *
+ * `setDebug(config.debug)` runs on every config load and used to overwrite the
+ * environment unconditionally, so the documented `PI_VOICE_DEBUG=1` did nothing.
+ */
+export function debugFromEnv(): boolean {
+    return envDebug();
+}
+
 let debugEnabled = envDebug();
 let debugSource: "config" | "env" = "env";
 
-export function setDebug(enabled: boolean): void {
+export function setDebug(enabled: boolean, source: "config" | "env" = "config"): void {
     debugEnabled = enabled;
-    debugSource = "config";
+    debugSource = source;
 }
 
 export function isDebug(): boolean {
@@ -84,6 +94,38 @@ export function isDebug(): boolean {
 /** Where the current debug state came from, for `/voice status`. */
 export function debugState(): { enabled: boolean; source: "config" | "env" } {
     return { enabled: debugEnabled, source: debugSource };
+}
+
+/**
+ * Strip credential-shaped text before it can be spoken, logged or sent to the API.
+ *
+ * The approval summary quotes a shell command, and that summary is handed to the
+ * voice model with "ask the user to allow or deny" — so a command line carrying a
+ * token was read out loud and transmitted to Gemini. Redaction keeps the useful part
+ * of the command (which tool, which file) while removing the secret.
+ */
+export function redactSecrets(text: string): string {
+    return text
+        // Provider key shapes, before anything quotes them.
+        .replace(/\bAIza[0-9A-Za-z_-]{10,}/g, "<redacted>")
+        .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, "<redacted>")
+        .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "<redacted>")
+        // Bearer/JWT-style headers.
+        .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "$1 <redacted>")
+        // Credentials in a URL: https://user:token@host/repo
+        .replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+):([^@\s/]{3,})@/gi, "$1:<redacted>@")
+        // NAME=value (or NAME: value) where the name carries a secret word, any case —
+        // `GITHUB_TOKEN=`, `GEMINI_API_KEY=`, `:_authToken=`. "Authorization: Bearer" is
+        // a header rather than an assignment, so it is excluded here.
+        .replace(
+            /\b((?!authorization\b|authentication\b|authenticate\b)[A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;|&]+)/gi,
+            "$1$2<redacted>",
+        )
+        // --password value / --api-key value style flags, either case.
+        .replace(
+            /(--?[A-Za-z0-9-]*(?:password|passwd|token|secret|api-?key|credential)[A-Za-z0-9-]*)(\s+|=)("[^"]*"|'[^']*'|[^\s;|&]+)/gi,
+            "$1$2<redacted>",
+        );
 }
 
 /**

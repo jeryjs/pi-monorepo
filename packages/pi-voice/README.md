@@ -82,8 +82,11 @@ Resolved in the same order Pi's own Google provider uses:
 4. Pi's provider registry (`getApiKeyForProvider`)
 
 OAuth credentials (`google-gemini-cli`, `google-antigravity`) are skipped — they are not API keys.
-`/voice key` with no argument shows **which source is in use**, never the key itself.
+`/voice key` with no argument shows **which source is in use**, never the key itself. It resolves the
+same chain on the spot, so it answers before voice has ever started.
 Set one explicitly with `/voice key AIza...`, or `/voice key clear` to go back to auth.json/env.
+A key stored this way lives in `pi-voice.json`, which is written owner-only (`0600`) on POSIX; use
+`/voice key clear` and auth.json instead if you would rather no key sat in the settings file.
 
 ## Audio devices
 
@@ -363,7 +366,7 @@ Function declarations are filtered per model, so a sync-only model never gets
 | Tool | Purpose |
 |---|---|
 | `pi_status` | what Pi is doing right now (state, active tool, last result) |
-| `pi_recent` | recent Pi messages |
+| `pi_recent` | recent messages between the user and Pi, each labelled with its role |
 | `pi_ask` | send a request to Pi; **async** on capable models, so the conversation continues while Pi works |
 | `pi_stop` | interrupt Pi (autonomy ≥ steer) |
 | `voice_sleep` / `voice_always_on` | control the listener |
@@ -459,8 +462,10 @@ voice({ action: "listen" | "sleep" | "status" | "always_on", enabled?: boolean }
 ```
 
 Saying you are done (“that's all”, “we can stop”, “goodnight”, “stop listening”)
-makes the model give one short goodbye and call `voice_sleep`, which stops the mic
-until the wake phrase brings it back. Pi itself keeps working.
+makes the model give one short goodbye and call `voice_sleep`, which mutes the mic
+until the wake phrase brings it back. Pi itself keeps working. `/voice status` and the
+`pi_voice` tool report `mic: muted` for as long as that lasts, because the socket
+staying open made them claim the model could still hear you.
 
 ### Barge-in
 
@@ -556,7 +561,7 @@ scheduling · `voiceActivity` / `interactionStatus` signals · usage metadata ·
 
 ## Version
 
-Current: **0.7.1** — pre-1.0 while the Gemini Live API is in preview. See
+Current: **0.7.2** — pre-1.0 while the Gemini Live API is in preview. See
 [CHANGELOG.md](CHANGELOG.md) for the history and the versioning policy.
 
 ## Layout
@@ -574,7 +579,7 @@ test/                     smoke + lifecycle + installer suites
 ## Tests
 
 ```bash
-npm test   # smoke (82) + lifecycle (38) + sherpa (13)
+npm test   # smoke (89) + lifecycle (39) + sherpa (13)
 ```
 
 `test/smoke.ts` covers capability filtering, setup shaping, wire protocol, config

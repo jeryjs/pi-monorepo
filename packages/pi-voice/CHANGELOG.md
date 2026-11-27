@@ -5,6 +5,76 @@ All notable changes to `@jeryjs/pi-voice` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-12-01
+
+A third audit, on the surface the first two skimmed (command parsing, status text,
+prompt payloads, key handling) found one issue serious enough to block a release and
+a set of honesty bugs in the reporting the user relies on. All fixed, each with a test.
+
+### Security
+
+- **A command being approved could be read out loud with its credentials.** The risky
+  command's text is put in the approval summary, which is handed to the voice model
+  with "ask the user to allow or deny" — so the whole prompt (and the spoken question)
+  carried whatever the command line contained. `curl -H "Authorization: Bearer sk-…"`,
+  `GITHUB_TOKEN=…`, `--password …`, `https://user:token@host`, `:_authToken=…` and raw
+  `AIza`/`sk-`/`ghp_` key shapes are now redacted in the summary and again at the prompt
+  boundary. The rest of the command (which tool, which path) is kept, because that is
+  what makes the approval question worth asking.
+- **The settings file holding the API key is written owner-only** (`0600` on POSIX) and
+  through a unique temp file, so `/voice key` and a concurrent TUI edit can no longer
+  share one `path.tmp` and rename a half-written file over the good one.
+
+### Fixed
+
+- **`PI_VOICE_DEBUG=1` did nothing.** `setDebug(config.debug)` ran on every config load
+  and overwrote the environment with the config value, so the documented switch was
+  dead unless the setting was also on. The environment is now read as an override and
+  `/voice status` says which source won.
+- **`/voice key` (and status, and the TUI header) said "not resolved" when a key was
+  resolvable.** They reported the *controller's* last resolution, which does not exist
+  before voice starts — exactly when a user asks because a start just failed. The chain
+  is now resolved synchronously for display: config → auth.json → environment, with Pi's
+  provider registry named as the last resort it cannot check without starting.
+- **`/voice always-on enabled` turned the wake word off.** Any value that was not
+  `on|true|yes|1` was coerced to false. Unrecognised values are now rejected with the
+  accepted list; the same applies to `announce` and `debug`. The `pi_voice` tool's
+  `always_on` action likewise required `enabled`, instead of treating an omitted field
+  as "off".
+- **`/voice set` answered "config updated" whatever happened.** Unknown keys were dropped
+  and `{"idleSleepMs":"soon"}` silently became the default, so a typo was indistinguishable
+  from success. The command now names the ignored keys and the values the validators
+  coerced (with before → after), and reports those as warnings.
+- **`/voice voice-name Aepide` was accepted** and only failed when the server rejected the
+  setup frame. Names are now checked against the prebuilt list at the command.
+- **Status text contradicted the controller.** The `start:` line claimed "connects at
+  startup (connectOnWake off)" whenever always-on was off, even with `connectOnWake` on —
+  the default. It now states all four combinations truthfully, in `/voice status`, in the
+  `pi_voice` tool and in the TUI.
+- **`voice_sleep` / `/voice sleep` reported "asleep" while status still said "live".**
+  Sleep mutes the mic without closing the socket, which is correct, but nothing said so.
+  The controller now exposes `micOpen`, and `/voice status`, the `pi_voice` tool and the
+  `voice_sleep` reply all report the muted state and how to reopen it. `/voice listen` and
+  `/voice sleep` now refuse to claim success when voice is not running.
+- **`pi_recent` promised "messages between the user and the main Pi agent" and returned
+  assistant text only**, so "what did I ask?" was answered with Pi's replies. It returns
+  both roles, labelled, and the description says so.
+- **The prompt treated Pi's own output as instructions.** A command's output can carry
+  "ignore your rules" text from a file or a web page, and it lands in the voice model's
+  system prompt. The transcript is now introduced with an explicit trust boundary: it is
+  data to report, never a directive. `speak()` serialises the requested text with
+  `JSON.stringify` instead of dropping it inside apparent quotes, so a quote or newline in
+  the text can no longer escape into the surrounding instruction.
+- **The TUI header named the wrong wake engine** — it checked whether Sherpa was installed,
+  so an ASR setup read as "energy VAD" and vice versa. It shows the engine that is actually
+  running when voice is up, and the configured engine otherwise.
+
+### Added
+
+- `patchReport()` (`config.ts`), `keySourceLabel()` (`keychain.ts`), `debugFromEnv()` and
+  `redactSecrets()` (`util.ts`), `describeStart()`/`parseBool()` (`commands.ts`),
+  `AgentBridge.recentMessages()` and `VoiceController.micOpen`.
+
 ## [0.7.1] - 2026-12-01
 
 Two independent audits of 0.7.0 (one on the removal diff, one on runtime behaviour)

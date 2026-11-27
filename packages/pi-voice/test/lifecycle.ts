@@ -823,6 +823,26 @@ assert.equal(
 await rotated.stop();
 ok("a rejected handle issued by the server reconnects fresh instead of dying");
 
+// voice_sleep / /voice sleep mute the mic while leaving the socket live, and the
+// status surface used to show `state: live` with no hint that speaking would be
+// ignored. micOpen is the honest answer the agent tools and /voice status now use.
+const muted = makeController(makePi().api, makeCtx(), makeConfig());
+
+await muted.start();
+await until(() => muted.liveState === "live", "muted: live");
+assert.equal(muted.micOpen, true, "the mic is open while live and streaming");
+
+muted.sleep("command");
+assert.equal(muted.micOpen, false, "sleep mutes the mic");
+
+muted.wake();
+assert.equal(muted.micOpen, true, "the wake phrase opens it again");
+
+muted.sleep("agent");
+assert.equal(muted.micOpen, false);
+ok("sleep mutes the microphone and the wake phrase unmutes it");
+await muted.stop();
+
 // With no wake phrase there is nothing to re-arm, so the old behaviour stands.
 const noWake = makeController(makePi().api, makeCtx(), makeConfig({ alwaysOn: false, connectOnWake: false }));
 const beforeNoWake = live.connections.length;

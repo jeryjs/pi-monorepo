@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { liveModelIds } from "./capabilities.ts";
 import type { VoiceConfig } from "./config.ts";
+import { keySourceLabel } from "./keychain.ts";
 import type { VoiceRuntime } from "./runtime.ts";
 import { KWS_MODEL, managedDepsDir, sherpaStatus, setupSherpaWake } from "./sherpa.ts";
 import { PREBUILT_VOICES } from "./voices.ts";
@@ -526,13 +527,19 @@ function headerText(runtime: VoiceRuntime, theme: Theme): string {
     const config = runtime.getConfig();
     const controller = runtime.controller();
     const state = controller?.running ? controller.liveState : "off";
-    const key = controller?.keySource ?? "not resolved";
+    const key = keySourceLabel(config.apiKey, controller?.keySource);
     const sherpa = sherpaStatus(config.kwsModelDir);
-    const wake = config.alwaysOn
-        ? sherpa.ready
-            ? `on · ${sherpa.version ? `sherpa ${sherpa.version}` : "sherpa"}`
-            : `on · energy VAD (${sherpa.detail})`
-        : "off";
+    // Report the engine that is actually running. The old summary consulted
+    // `sherpaStatus` alone, so with wakeEngine "asr" the header called a working ASR
+    // setup "energy VAD".
+    const running = controller?.running ? controller.wakeEngineActive : undefined;
+    const wake = !config.alwaysOn
+        ? "off"
+        : running && running !== "not running"
+            ? `on · ${running}`
+            : sherpa.ready
+                ? `on · ${sherpa.version ? `sherpa ${sherpa.version}` : "sherpa"}`
+                : `on · energy VAD (${sherpa.detail})`;
 
     return [
         theme.style(`Pi Voice ${VERSION}`, { fg: "accent", bold: true }),

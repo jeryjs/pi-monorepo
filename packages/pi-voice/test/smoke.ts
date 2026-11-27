@@ -5,18 +5,19 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilitiesFor, liveModelIds } from "../capabilities.ts";
 import { completeVoiceArguments } from "../completions.ts";
-import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchVoiceConfig } from "../config.ts";
-import { readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
+import { describeStart, parseBool } from "../commands.ts";
+import { DEFAULT_VOICE_CONFIG, normalizeVoiceConfig, patchReport, patchVoiceConfig, saveVoiceConfig, loadVoiceConfig } from "../config.ts";
+import { keySourceLabel, readKeyFromAuthJson, resolveGeminiKey } from "../keychain.ts";
 import { AcousticEchoCanceller, floatToInt16, resample24kTo16k } from "../audio/aec.ts";
 import { micVerdict, gainToFloat, playbackArgs } from "../audio/native.ts";
 import { friendlyCloseError, isDormantClose, isFatalClose, isStaleHandleClose } from "../live/session.ts";
 import { editDistance, matchWakePhrase } from "../audio/wake-match.ts";
-import { clearWarnings, log, recentWarnings, setDebug, warn } from "../util.ts";
+import { clearWarnings, debugFromEnv, debugState, log, recentWarnings, redactSecrets, setDebug, warn } from "../util.ts";
 import { levelBar, voiceStatusText } from "../ui.ts";
 import { PREBUILT_VOICES } from "../voices.ts";
 import {
@@ -262,6 +263,55 @@ test("voice starts asleep by default (no Live session until the wake phrase)", (
     assert.equal(normalizeVoiceConfig({ connectOnWake: false }).connectOnWake, false);
 });
 
+test("/voice set reports what the validators did, instead of always 'config updated'", () => {
+    // normalizeVoiceConfig coerces silently: an unknown key is dropped and a bad type
+    // becomes the default. The command answered "config updated" either way, so a typo
+    // looked exactly like a successful change.
+    const report = patchReport(DEFAULT_VOICE_CONFIG, {
+        alwaysOn: true,
+        idleSleepMs: "soon",
+        vadSilenceMs: 99_999,
+        nativeAec: "magic",
+        notASetting: 1,
+    });
+
+    assert.equal(report.next.alwaysOn, true, "valid values are applied");
+    assert.deepEqual(report.unknown, ["notASetting"], "unknown keys are named");
+    assert.equal(report.adjusted.length, 3, "a bad type, an out-of-range number and a bad enum are all reported");
+    assert.match(report.adjusted.join(" "), /idleSleepMs/);
+    assert.match(report.adjusted.join(" "), /vadSilenceMs/);
+    assert.match(report.adjusted.join(" "), /nativeAec/);
+
+    const clean = patchReport(DEFAULT_VOICE_CONFIG, { alwaysOn: true });
+
+    assert.deepEqual(clean.unknown, []);
+    assert.deepEqual(clean.adjusted, [], "a good patch reports no surprises");
+});
+
+test("saving the config writes a complete file with no temp litter", () => {
+    // One shared `path.tmp` let `/voice key <secret>` and a TUI edit race, and the
+    // settings file holds the API key: it is created owner-only where the OS honours it.
+    const dir = mkdtempSync(join(tmpdir(), "pi-voice-cfg-"));
+    const path = join(dir, "pi-voice.json");
+
+    try {
+        saveVoiceConfig(patchVoiceConfig(DEFAULT_VOICE_CONFIG, { apiKey: "secret-key", alwaysOn: true }), path);
+        saveVoiceConfig(patchVoiceConfig(DEFAULT_VOICE_CONFIG, { apiKey: "secret-key", alwaysOn: false }), path);
+
+        const written = loadVoiceConfig(path);
+
+        assert.equal(written.alwaysOn, false, "the second write wins");
+        assert.equal(written.apiKey, "secret-key");
+        assert.deepEqual(readdirSync(dir), ["pi-voice.json"], "no .tmp files are left behind");
+
+        if (process.platform !== "win32") {
+            assert.equal(statSync(path).mode & 0o777, 0o600, "the key file is not world-readable");
+        }
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 console.log("prompt");
 test("there is exactly one transport: no browser keys survive in the config", () => {
     // Dropping browser support must not leave a config surface that pretends
@@ -423,6 +473,44 @@ test("clip collapses whitespace", () => {
     assert.equal(clip("  a \n b  ", 100), "a b");
 });
 
+test("credentials are stripped before a command is spoken or transmitted", () => {
+    // The approval summary is handed to the voice model ("ask the user to allow or
+    // deny") and the whole prompt is sent to Gemini, so a token in a command line was
+    // both transmitted and read out loud.
+    assert.equal(
+        redactSecrets('curl -H "Authorization: Bearer sk-abc1234567890xyz" https://x.io'),
+        'curl -H "Authorization: Bearer <redacted>" https://x.io',
+    );
+    assert.equal(redactSecrets("GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 git push"), "GITHUB_TOKEN=<redacted> git push");
+    assert.equal(redactSecrets("export GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnop"), "export GEMINI_API_KEY=<redacted>");
+    assert.equal(redactSecrets("mysql --password hunter2 -u root"), "mysql --password <redacted> -u root");
+    assert.equal(redactSecrets("npm publish --api-key=npm_1234567890abcdefghij"), "npm publish --api-key=<redacted>");
+    assert.equal(redactSecrets("npm publish --//registry.npmjs.org/:_authToken=NPM_TOKEN"), "npm publish --//registry.npmjs.org/:_authToken=<redacted>");
+    assert.equal(redactSecrets("git push https://user:GITHUB_TOKEN@example.invalid/repo.git"), "git push https://user:<redacted>@example.invalid/repo.git");
+    // Ordinary commands keep their text: redaction must not hide what is being approved.
+    assert.equal(redactSecrets("rm -rf build && git push origin main"), "rm -rf build && git push origin main");
+    assert.equal(redactSecrets("psql -c 'drop table users'"), "psql -c 'drop table users'");
+    assert.equal(redactSecrets("rm -rf build && git push origin main"), "rm -rf build && git push origin main");
+});
+
+test("PI_VOICE_DEBUG is honoured even when the config setting is off", () => {
+    // extension.ts used to call setDebug(config.debug) on every load, which set the
+    // source to "config" and overwrote the environment.
+    delete process.env.PI_VOICE_DEBUG;
+    assert.equal(debugFromEnv(), false);
+
+    for (const value of ["1", "true", "yes", "on", " TRUE "]) {
+        process.env.PI_VOICE_DEBUG = value;
+        assert.equal(debugFromEnv(), true, `PI_VOICE_DEBUG=${value} enables debug`);
+    }
+
+    const viaEnv = debugFromEnv();
+    setDebug(false || viaEnv, viaEnv ? "env" : "config");
+    assert.deepEqual(debugState(), { enabled: true, source: "env" });
+    delete process.env.PI_VOICE_DEBUG;
+    setDebug(false);
+});
+
 console.log("completions");
 const completionContext = {
     models: liveModelIds().map((id) => ({ id, label: capabilitiesFor(id).label })),
@@ -500,6 +588,72 @@ test("reads the google api key from auth.json", () => {
 test("oauth-only credentials are ignored", () => {
     writeFileSync(keyPath, JSON.stringify({ "google-gemini-cli": { type: "oauth", access: "x" } }));
     assert.equal(readKeyFromAuthJson(keyPath), undefined);
+});
+
+test("the key source is explained even before voice starts", () => {
+    // With voice off there is no controller to have resolved anything, and the old answer
+    // was "not resolved" while a key sat in auth.json — the exact moment a user asks.
+    const explainPath = join(keyDir, "explain.json");
+
+    writeFileSync(explainPath, JSON.stringify({ google: { type: "api_key", key: "AIzaTEST" } }));
+
+    const savedAuth = process.env.PI_VOICE_AUTH;
+
+    process.env.PI_VOICE_AUTH = explainPath;
+
+    try {
+        assert.match(keySourceLabel("", undefined), /auth\.json \(google\)/);
+        assert.equal(keySourceLabel("AIza-config", undefined), "config (pi-voice.json)");
+        assert.equal(keySourceLabel("", "env GEMINI_API_KEY"), "env GEMINI_API_KEY", "a live resolution wins");
+    } finally {
+        if (savedAuth === undefined) {
+            delete process.env.PI_VOICE_AUTH;
+        } else {
+            process.env.PI_VOICE_AUTH = savedAuth;
+        }
+    }
+
+    writeFileSync(explainPath, JSON.stringify({}));
+    process.env.PI_VOICE_AUTH = explainPath;
+
+    const envNames = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_GENAI_API_KEY"];
+    const savedEnv = envNames.map((name) => [name, process.env[name]] as const);
+
+    for (const name of envNames) {
+        delete process.env[name];
+    }
+
+    try {
+        assert.match(keySourceLabel("", undefined), /not resolved/);
+    } finally {
+        delete process.env.PI_VOICE_AUTH;
+
+        for (const [name, value] of savedEnv) {
+            if (value !== undefined) {
+                process.env[name] = value;
+            }
+        }
+    }
+});
+
+test("/voice status start line states all four combinations", () => {
+    const base = DEFAULT_VOICE_CONFIG;
+
+    assert.match(describeStart({ ...base, alwaysOn: false, connectOnWake: true }), /connects at startup/);
+    assert.match(describeStart({ ...base, alwaysOn: false, connectOnWake: false }), /connects at startup/);
+    assert.match(describeStart({ ...base, alwaysOn: true, connectOnWake: true }), /asleep/);
+    assert.match(describeStart({ ...base, alwaysOn: true, connectOnWake: false }), /stays connected/);
+});
+
+test("a boolean verb rejects nonsense instead of silently meaning off", () => {
+    // `value ? /^(on|true|yes|1)$/i.test(value) : !current` made every unrecognised word
+    // false: `/voice always-on enabled` turned the wake word off.
+    assert.equal(parseBool("on", false), true);
+    assert.equal(parseBool("OFF", true), false);
+    assert.equal(parseBool(undefined, true), false, "no argument toggles");
+    assert.equal(parseBool(undefined, false), true);
+    assert.equal(parseBool("enabled", false), undefined, "a word that is neither is rejected");
+    assert.equal(parseBool("sure", true), undefined);
 });
 
 await asyncTest("explicit config key wins", async () => {
@@ -1072,6 +1226,14 @@ test("a tool result is never stored or spoken as an assistant reply", () => {
 
     emit("user", "check the deploy");
     assert.equal(bridge.status.lastUser, "check the deploy");
+
+    // `pi_recent` promises "messages between the user and the main Pi agent"; it only
+    // ever returned assistant text, so "what did I ask?" got Pi's reply back.
+    const recent = bridge.recentMessages(4);
+
+    assert.deepEqual(recent.map((entry) => entry.role), ["assistant", "user"], "both roles, in order");
+    assert.equal(recent[0]?.text, "The deploy is green.");
+    assert.equal(recent[1]?.text, "check the deploy");
     bridge.dispose();
 });
 

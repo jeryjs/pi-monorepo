@@ -9,7 +9,7 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadVoiceConfig, patchVoiceConfig, saveVoiceConfig, type VoiceConfig } from "./config.ts";
 import { VoiceController, type StartResult } from "./controller.ts";
-import { registerVoiceCommands, type VoiceRuntime } from "./commands.ts";
+import { describeStart, registerVoiceCommands, type VoiceRuntime } from "./commands.ts";
 import { diagnoseLive } from "./probe.ts";
 import { resolveGeminiKey, type KeyRegistry } from "./keychain.ts";
 import { getController, removeController, setController } from "./registry.ts";
@@ -18,9 +18,10 @@ import { buildSystemInstruction } from "./bridge/prompt.ts";
 import { functionDeclarations } from "./bridge/tools.ts";
 import { createSetupBuilder } from "./live/setup.ts";
 import { NativeTransport } from "./audio/native.ts";
-import { setDebug, warn } from "./util.ts";
+import { debugFromEnv, redactSecrets, setDebug, warn } from "./util.ts";
 
-/** Commands that should never run without a human saying yes. */const RISKY: { pattern: RegExp; label: string }[] = [
+/** Commands that should never run without a human saying yes. */
+const RISKY: { pattern: RegExp; label: string }[] = [
     { pattern: /\brm\s+-[a-z]*[rf]/i, label: "recursive delete" },
     { pattern: /\bgit\s+push\b/i, label: "push to a remote" },
     { pattern: /\bgit\s+reset\s+--hard\b/i, label: "hard reset" },
@@ -73,7 +74,11 @@ function riskOf(toolName: string, input: unknown): string | undefined {
 
     for (const rule of RISKY) {
         if (rule.pattern.test(command)) {
-            return `${rule.label}: ${command.slice(0, 160)}`;
+            // This summary is handed to the voice model with "ask the user to allow or
+            // deny" — the model reads it back out loud and the whole prompt goes to
+            // Gemini. A command line carrying a token was therefore transmitted and
+            // spoken; redact before it leaves the process.
+            return `${rule.label}: ${redactSecrets(command.slice(0, 160))}`;
         }
     }
 
@@ -85,7 +90,20 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     let context: ExtensionContext | undefined;
     let controller: VoiceController | undefined;
 
-    setDebug(config.debug);
+    /**
+     * Apply the debug switch: the config file *or* the environment.
+     *
+     * `setDebug(config.debug)` ran on every config load and overwrote the environment
+     * unconditionally, so the documented `PI_VOICE_DEBUG=1` did nothing unless the
+     * setting was also on in pi-voice.json.
+     */
+    const applyDebug = (from: VoiceConfig = config): void => {
+        const viaEnv = debugFromEnv();
+
+        setDebug(from.debug || viaEnv, viaEnv ? "env" : "config");
+    };
+
+    applyDebug();
 
     pi.registerFlag("voice", {
         description: "Start with voice enabled and always-on (waiting for the wake phrase)",
@@ -198,7 +216,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             warn("config", `could not save pi-voice.json: ${String(error)}`);
         }
 
-        setDebug(config.debug);
+        applyDebug(config);
 
         const result = controller?.updateConfig(config);
         refreshStatus();
@@ -328,7 +346,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         }
 
         controller = undefined;
-        setDebug(config.debug);
+        applyDebug();
         refreshStatus(ctx);
 
         if (config.enabled && (config.autoStart || forced)) {
@@ -434,10 +452,13 @@ export default function voiceExtension(pi: ExtensionAPI): void {
                 const lines = [
                     `running: ${controller?.running ?? false}`,
                     `state: ${controller?.liveState ?? "idle"}`,
+                    // The socket state alone said "live" while the mic was muted by
+                    // voice_sleep; the agent could not tell whether speaking is heard.
+                    `mic: ${controller?.running ? (controller.micOpen ? "open (the model hears you)" : "muted — the wake phrase reopens it, or call voice_listen") : "off"}`,
                     `model: ${config.model}`,
                     `wake engine: ${controller?.wakeEngineActive ?? "off"}`,
                     `always-on: ${config.alwaysOn}`,
-                    `start: ${config.alwaysOn && config.connectOnWake ? "asleep until the wake phrase" : "connected"}`,
+                    `start: ${describeStart(config)}`,
                 ];
 
                 return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -473,11 +494,17 @@ export default function voiceExtension(pi: ExtensionAPI): void {
             if (action === "sleep") {
                 controller.sleep("agent");
 
-                return { content: [{ type: "text", text: "asleep" }] };
+                return { content: [{ type: "text", text: "asleep — the microphone is muted until the wake phrase or a voice_listen call" }] };
             }
 
             if (action === "always_on") {
-                const enabled = params.enabled === true;
+                // `params.enabled === true` made an omitted field mean "off": the agent
+                // could mute the wake word by calling always_on with no value.
+                if (typeof params.enabled !== "boolean") {
+                    return { content: [{ type: "text", text: "enabled (true/false) is required for action=always_on" }] };
+                }
+
+                const enabled = params.enabled;
                 config = patchVoiceConfig(config, { alwaysOn: enabled });
 
                 try {

@@ -131,3 +131,33 @@ export async function resolveGeminiKey(options: ResolveOptions = {}): Promise<Re
 
     return undefined;
 }
+/**
+ * Explain where the key would come from, without starting voice.
+ *
+ * `/voice key` and `/voice status` reported the *controller's* last resolution, so
+ * with voice off they answered "not resolved" even though a key sat in auth.json —
+ * the exact case where the user asks because a start just failed.
+ */
+export function keySourceLabel(configKey: string, controllerSource?: string): string {
+    if (configKey.trim()) {
+        return "config (pi-voice.json)";
+    }
+
+    if (controllerSource) {
+        return controllerSource;
+    }
+
+    const stored = readKeyFromAuthJson();
+
+    if (stored) {
+        return stored.source;
+    }
+
+    const env = readKeyFromEnv();
+
+    if (env) {
+        return env.source;
+    }
+
+    return "not resolved (no key in pi-voice.json, auth.json or the environment; Pi's provider registry is only asked when voice starts)";
+}

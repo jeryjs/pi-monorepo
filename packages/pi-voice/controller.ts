@@ -199,6 +199,18 @@ export class VoiceController implements VoiceControl {
         return this.#keySource;
     }
 
+    /**
+     * Can the model hear the microphone right now?
+     *
+     * False while asleep (voice_sleep, /voice sleep), dormant after a close, or
+     * idle-gated. `pi_voice status` and /voice status used to report the socket state
+     * only, so `state: live` was shown while the mic was muted and the agent could not
+     * tell whether speaking would be heard.
+     */
+    get micOpen(): boolean {
+        return !this.#dormant && Boolean(this.#session?.streaming);
+    }
+
     /** Last stream/fatal error, shown by /voice status. */
     get lastError(): string | undefined {
         return this.#lastError;
@@ -820,7 +832,7 @@ export class VoiceController implements VoiceControl {
                 ? "[You were cut off mid-sentence; start with a brief \"oh\" and do not finish the old sentence]\n\n"
                 : "";
 
-            return `${lead}Say this to the user now, close to verbatim, in your normal spoken voice: "${text.slice(0, 800)}"`;
+            return `${lead}Say this to the user now, close to verbatim, in your normal spoken voice: ${JSON.stringify(text.slice(0, 800))}`;
         }, true);
     }
 

@@ -363,6 +363,19 @@ export class AgentBridge {
             .map((message) => message.text);
     }
 
+    /**
+     * The last `limit` conversational messages, user and assistant alike, oldest first.
+     *
+     * `pi_recent` is described as "messages between the user and the main Pi agent", so
+     * returning assistant-only text answered "what did I ask?" with Pi's replies.
+     */
+    recentMessages(limit = 3, chars = 600): { role: "user" | "assistant"; text: string }[] {
+        return this.#recent
+            .filter((message) => message.role === "user" || message.role === "assistant")
+            .slice(-Math.max(1, limit))
+            .map((message) => ({ role: message.role as "user" | "assistant", text: clip(message.text, chars) }));
+    }
+
     /** Send a spoken request into Pi. `steer` injects mid-run; `queue` waits for the turn to end. */
     ask(message: string, mode: "queue" | "steer" = "steer"): boolean {
         // Both names on purpose. The extension API documents `deliverAs`, but the
